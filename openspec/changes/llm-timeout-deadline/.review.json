@@ -1,0 +1,27 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "date": "2026-11-09",
+  "impl_hash": "sha256:01198c3b7b45f76fcd7a9cc9a9371c322a14beaa77403584b5c3a7cbc7a92456",
+  "impl_hash_basis": "git diff af61b146a (working tree incl. intent-to-add lib_tests.rs) at review-close; earlier hash ed47ba76caf41012 was miscomputed on the committed-only diff — reviewer recomputed 01a1328b… on the tree, then the ZERO-fallback fix landed (r_glm re-verified APPROVE), and this hash was taken after it",
+  "gate_results": {
+    "gates-local.sh": "28 passed / 0 failed / 4 skipped (lint-commits, lint-bridge-releases, doc-guide-test, cargo-audit — CI/network-owned; doc-guide-test run separately, exit 0)",
+    "cargo_build_workspace": "OK",
+    "cargo_test_workspace_lib": "all ok, 0 failed",
+    "hexagonal_architecture_boundaries_test": "33 passed",
+    "discriminator": "body_gap_beyond_30s: 50/50 worker + 20/20 reviewer reruns"
+  },
+  "findings": {
+    "important": [
+      "impl-hash re-baselined at commit (process; resolved — this file records the canonical hash)"
+    ],
+    "minor": [
+      "release fallback now returns LlmError::provider(\"transport timeout without an enforced bound\") instead of fabricated Idle/ZERO — fixed post-review, r_glm re-verified APPROVE",
+      "tests/decision_http.rs auth_failure_redacted does not assert adapter Debug (3rd surface) — pre-existing, untouched by this change; bd follow-up filed",
+      "genai_adapter_tests.rs at 3223 lines — house #[path] split suggested if it grows again"
+    ]
+  },
+  "spec_coverage": "all ADDED+MODIFIED scenarios owned (walk recorded in review)",
+  "hard_limits": "all hold (no decision read_timeout; read_capped untouched; public signatures unchanged; no new deps; SSRF/pinning/OnceCell/retry/content_started untouched; Timeout tuple variant; body-cap filed as rc-kemrg; keycloak filed as rc-ucneu)"
+}

@@ -61,9 +61,20 @@ pub enum LlmError {
     #[error("network error: {0}")]
     Network(String),
 
-    /// Request exceeded the configured timeout.
-    #[error("timeout after {0:?}")]
+    /// A deadline lapsed. Carries the duration that elapsed: the producer
+    /// `timeout_secs` deadline on the chat path, the per-request total on the
+    /// decision path.
+    #[error("timeout: deadline {0:?} exceeded")]
     Timeout(Duration),
+
+    /// Transport timeout inside one HTTP attempt; retryable.
+    #[error("timeout: {}", .phase.display_message(*.after))]
+    TransportTimeout {
+        /// Transport layer that fired.
+        phase: TransportTimeoutPhase,
+        /// Duration bound that elapsed.
+        after: Duration,
+    },
 
     /// Request was malformed or violated provider constraints.
     #[error("invalid request: {0}")]
@@ -85,6 +96,27 @@ pub enum LlmError {
     /// to 200 bytes with UTF-8 safety via [`LlmError::provider`].
     #[error("provider error: {0}")]
     Provider(String),
+}
+
+/// Transport-level timeout layer that fired.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportTimeoutPhase {
+    /// TCP connection not established within the connect bound.
+    Connect,
+    /// No response activity (or headers, pre-headers) within the
+    /// transport read-idle guard.
+    Idle,
+}
+
+impl TransportTimeoutPhase {
+    /// Human-readable description of the bound that fired.
+    pub fn display_message(self, after: Duration) -> String {
+        match self {
+            Self::Connect => format!("connect not established within {after:?}"),
+            Self::Idle => format!("no response activity for {after:?}"),
+        }
+    }
 }
 
 /// Maximum length for provider error display strings.
@@ -124,6 +156,17 @@ impl LlmError {
             .collect();
         LlmError::Protocol(truncate_for_display(&cleaned))
     }
+
+    /// Returns `true` if the error is any kind of timeout.
+    ///
+    /// Callers must not have to match [`LlmError::Timeout`] and
+    /// [`LlmError::TransportTimeout`] separately.
+    pub fn is_timeout(&self) -> bool {
+        matches!(
+            self,
+            LlmError::Timeout(_) | LlmError::TransportTimeout { .. }
+        )
+    }
 }
 
 /// Returns `true` if the error is transient and the operation may succeed
@@ -137,6 +180,7 @@ impl LlmError {
 /// - [`LlmError::ProviderUnavailable`] — server-side transient
 /// - [`LlmError::ModelUnavailable`] — model overloaded
 /// - [`LlmError::Timeout`] — request timed out
+/// - [`LlmError::TransportTimeout`] — transport-level timeout (connect or read-idle)
 pub fn is_retryable(err: &LlmError) -> bool {
     matches!(
         err,
@@ -145,6 +189,7 @@ pub fn is_retryable(err: &LlmError) -> bool {
             | LlmError::ProviderUnavailable(_)
             | LlmError::ModelUnavailable(_)
             | LlmError::Timeout(_)
+            | LlmError::TransportTimeout { .. }
     )
 }
 
@@ -248,6 +293,49 @@ mod tests {
             CamelError::from(LlmError::InvalidRequest("bad json".into())),
             CamelError::ProcessorError(_)
         ));
+    }
+
+    #[test]
+    fn transport_timeout_display_names_layer_and_bound() {
+        let connect = LlmError::TransportTimeout {
+            phase: TransportTimeoutPhase::Connect,
+            after: Duration::from_secs(10),
+        };
+        let display = connect.to_string();
+        assert!(display.contains("timeout"), "missing timeout: {display}");
+        assert!(display.contains("connect"), "missing layer: {display}");
+        assert!(display.contains("10s"), "missing bound: {display}");
+
+        let idle = LlmError::TransportTimeout {
+            phase: TransportTimeoutPhase::Idle,
+            after: Duration::from_secs(600),
+        };
+        let display = idle.to_string();
+        assert!(display.contains("timeout"), "missing timeout: {display}");
+        assert!(
+            display.contains("no response activity"),
+            "missing layer: {display}"
+        );
+        assert!(display.contains("600s"), "missing bound: {display}");
+    }
+
+    #[test]
+    fn producer_deadline_display_keeps_timeout_word() {
+        let display = LlmError::Timeout(Duration::from_secs(90)).to_string();
+        assert!(display.contains("timeout"), "missing timeout: {display}");
+        assert!(display.contains("90s"), "missing deadline: {display}");
+    }
+
+    #[test]
+    fn transport_timeout_is_retryable_and_is_timeout() {
+        let transport = LlmError::TransportTimeout {
+            phase: TransportTimeoutPhase::Idle,
+            after: Duration::from_secs(1),
+        };
+        assert!(is_retryable(&transport));
+        assert!(transport.is_timeout());
+        assert!(LlmError::Timeout(Duration::from_secs(1)).is_timeout());
+        assert!(!LlmError::Network("x".into()).is_timeout());
     }
 
     #[test]

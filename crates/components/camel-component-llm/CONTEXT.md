@@ -50,6 +50,10 @@ _Avoid_: token tracking, billing
 Streaming `timeout_secs` covers every `stream.next()`. If no event arrives within the deadline, the stream yields a `Timeout` error. Contrasts with materialized total-deadline timeout.
 _Avoid_: connection timeout, idle timeout
 
+**Transport read-idle guard**:
+The client-wide inactivity bound on the chat/embed transport (600s). It also bounds time-to-headers. It contrasts with the streaming activity timeout, which is a producer deadline per `stream.next()`. It is an inactivity bound, not a per-attempt lifetime bound.
+_Avoid_: idle timeout, connection timeout
+
 **Producer semaphore**:
 Wraps provider work to enforce `max_concurrency`. For streaming, the permit is held by `PermitStream` inside the returned `Body::Stream` and released when the stream is consumed/dropped.
 _Avoid_: connection pool, rate limiter
@@ -103,7 +107,7 @@ _Avoid_: TypeSafe client, Ollama client (those are provider names, not codecs)
 - `ChatMessage`: new field `tool_calls: Option<Vec<EmittedToolCall>>`
 - `build_chat_request`: return type changed from `ChatRequest` to `Result<ChatRequest, LlmError>`
 - `MetricsCollector` trait: new default method `record_histogram` (non-breaking; default no-op)
-- `LlmError::Timeout`: now carries the configured `Duration` (genai transport timeout maps here, not to `Network`)
+- `LlmError::Timeout`: a lapsed deadline (producer `timeout_secs` total, decision per-request total). NEW `TransportTimeout { phase, after }` names the transport layer that fired (Connect | Idle); `LlmError::is_timeout()` covers both.
 - `LlmOperation` gains `Decide` and becomes `#[non_exhaustive]`.
 - `LlmGlobalConfig` gains `default_decision_provider`, `decision_providers`, and `decision_question_sets`.
 - `LlmEndpointConfig` gains `questions`.

@@ -33,7 +33,7 @@ pub use decision::{
     DecisionQuestion, DecisionRequest, DecisionResponse, DecisionState, DecisionUsage, NamedAnswer,
     QuestionKind, ScoreLevel, ScoreProbability,
 };
-pub use error::LlmError;
+pub use error::{LlmError, TransportTimeoutPhase};
 pub use provider::{
     ChatEvent, ChatMessage, ChatRequest, ChatRole, EmbedRequest, EmbedResponse, EmittedToolCall,
     FinishReason, LlmProvider, LlmUsage, ToolChoice, ToolDefinition,
@@ -49,6 +49,49 @@ use decision::factory::DecisionProviderMap;
 use metadata::LlmMetadataDescriptor;
 use provider_factory::ProviderMap;
 
+/// Per-caller transport policy for hardened LLM HTTP clients.
+///
+/// No total-timeout field exists by design: the configured deadline
+/// (`timeout_secs`) owns the total; see ADR-0021 and the change
+/// `llm-timeout-deadline`.
+#[derive(Clone, Copy)]
+pub(crate) struct LlmHttpPolicy {
+    /// TCP connect bound (both policies: 10s).
+    pub(crate) connect: Duration,
+    /// Transport read-idle guard: `Some` on the chat/embed client
+    /// (600s), `None` on the decision client (its per-request total
+    /// must not be shadowed; reqwest 0.13.5 `read_timeout` also caps
+    /// time-to-headers and has no per-request override).
+    pub(crate) read_idle: Option<Duration>,
+}
+// Why Copy: the policy is passed BY VALUE into map_genai_error call sites
+// from `&self`; the adapter copies it into a local BEFORE building the
+// 'static stream closure (the stream outlives the borrow).
+impl LlmHttpPolicy {
+    /// Chat/embed: connect 10s + 600s transport read-idle guard.
+    /// 600s matches the OpenAI/Anthropic SDK per-read defaults and sits
+    /// above Ollama's 300s model-load stall limit. MUST NOT be derived
+    /// from `timeout_secs` (the timers would race and flip the reported
+    /// layer).
+    pub(crate) fn chat() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            read_idle: Some(Duration::from_secs(600)),
+        }
+    }
+
+    /// Decisions: connect 10s, NO read-idle guard.
+    // Only the `decisions` feature wires this constructor; unit tests cover it
+    // in every configuration, so the test build keeps it available.
+    #[cfg(any(feature = "decisions", test))]
+    pub(crate) fn decision() -> Self {
+        Self {
+            connect: Duration::from_secs(10),
+            read_idle: None,
+        }
+    }
+}
+
 /// Build a hardened `reqwest::Client` for outbound LLM HTTP traffic.
 ///
 /// Hardening (H15):
@@ -56,22 +99,35 @@ use provider_factory::ProviderMap;
 ///   bypass scheme/IP validation. Both OpenAI and Ollama APIs are
 ///   non-redirecting; a redirect response is a signal of misconfiguration
 ///   or attack.
+/// - **`no_proxy`** — required so environment proxies cannot bypass
+///   `resolve_to_addrs` DNS pinning.
 /// - **Connect timeout 10s** — bound TCP handshake.
-/// - **Request timeout 30s** — bound total request lifetime. This is the
-///   sole deadline: no per-request deadline is configurable through the
-///   `LlmProvider` surface; when it fires, `LlmError::Timeout` carries the
-///   configured duration.
+/// - **No client-wide total timeout** — the configured deadline
+///   (`timeout_secs`) owns the total in materialized mode and the
+///   per-chunk activity timeout in streaming mode. The chat/embed client
+///   additionally carries a 600s transport read-idle guard; the decision
+///   client carries none.
 /// - **Optional DNS pinning** — when `pinned` is `Some((host, addrs))`,
 ///   applies `resolve_to_addrs` to close the TOCTOU window between SSRF
 ///   validation and the first outbound request (D-M10).
 pub fn hardened_http_client_with_pinning(
     pinned: Option<(&str, &[std::net::SocketAddr])>,
 ) -> Result<reqwest::Client, CamelError> {
+    hardened_http_client_with_policy(LlmHttpPolicy::chat(), pinned)
+}
+
+/// Policy-parameterized hardened client builder; see [`hardened_http_client_with_pinning`].
+pub(crate) fn hardened_http_client_with_policy(
+    policy: LlmHttpPolicy,
+    pinned: Option<(&str, &[std::net::SocketAddr])>,
+) -> Result<reqwest::Client, CamelError> {
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy() // CRITICAL: env proxies bypass resolve_to_addrs
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30));
+        .connect_timeout(policy.connect);
+    if let Some(d) = policy.read_idle {
+        builder = builder.read_timeout(d);
+    }
     if let Some((host, addrs)) = pinned {
         builder = builder.resolve_to_addrs(host, addrs);
     }
@@ -240,3 +296,7 @@ impl Component for LlmComponent {
         )))
     }
 }
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

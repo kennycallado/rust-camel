@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:5878913b6b15f94fb58e57d6f530a443bfbf29b0ba8fd7d8f4f0b565c9cfe150",
+  "expert": "experts/e_gpt",
+  "rounds": 3,
+  "date": "2026-11-09",
+  "notes": "Spec blessed at 04c143af (round 2). Plan: r1 REJECT (critical: read_idle never applied; 5 important) -> fixed; r2 BLESS-WITH-FIXES (producer-deadline tests must use producer calls; --features decisions + nonzero count; Copy derive) -> fixed; r3 BLESS. Reviewer r_glm: REJECT r1 (10 findings) -> APPROVE-WITH-FINDINGS r2."
+}

@@ -18,6 +18,7 @@ use camel_api::SsrfPolicy;
 use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt};
 
+use crate::LlmHttpPolicy;
 #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
 use crate::config::LlmServiceKind;
 use crate::error::LlmError;
@@ -250,23 +251,23 @@ pub(super) fn embed_model_for(req: &EmbedRequest, default: &str) -> String {
 // ============================================================================
 
 /// Decompose a `WebStream` error into its boxed transport cause.
-fn split_web_stream_error(err: &genai::Error, configured_timeout: Duration) -> Option<LlmError> {
+fn split_web_stream_error(err: &genai::Error, policy: LlmHttpPolicy) -> Option<LlmError> {
     let genai::Error::WebStream { error, .. } = err else {
         return None;
     };
 
     if let Some(inner) = error.as_ref().downcast_ref::<genai::Error>() {
-        return Some(map_genai_error(inner, configured_timeout));
+        return Some(map_genai_error(inner, policy));
     }
     if let Some(reqwest_error) = error.as_ref().downcast_ref::<reqwest::Error>() {
-        return Some(map_reqwest_error(reqwest_error, configured_timeout));
+        return Some(map_reqwest_error(reqwest_error, policy, None));
     }
 
     Some(LlmError::Network(error.to_string()))
 }
 
 /// Decompose `WebModelCall` / `WebAdapterCall` into their webc cause.
-fn split_webc_error(err: &genai::Error, configured_timeout: Duration) -> Option<LlmError> {
+fn split_webc_error(err: &genai::Error, policy: LlmHttpPolicy) -> Option<LlmError> {
     let (model, webc_error) = match err {
         genai::Error::WebModelCall {
             model_iden,
@@ -294,18 +295,18 @@ fn split_webc_error(err: &genai::Error, configured_timeout: Duration) -> Option<
             ))
         }
         genai::webc::Error::Reqwest(reqwest_error) => {
-            Some(map_reqwest_error(reqwest_error, configured_timeout))
+            Some(map_reqwest_error(reqwest_error, policy, None))
         }
         other => Some(LlmError::Network(other.to_string())),
     }
 }
 
 /// Map any genai error into the Camel error taxonomy.
-pub(super) fn map_genai_error(err: &genai::Error, configured_timeout: Duration) -> LlmError {
-    if let Some(mapped) = split_web_stream_error(err, configured_timeout) {
+pub(super) fn map_genai_error(err: &genai::Error, policy: LlmHttpPolicy) -> LlmError {
+    if let Some(mapped) = split_web_stream_error(err, policy) {
         return mapped;
     }
-    if let Some(mapped) = split_webc_error(err, configured_timeout) {
+    if let Some(mapped) = split_webc_error(err, policy) {
         return mapped;
     }
 
@@ -409,7 +410,7 @@ struct GenaiProvider {
     default_model: String,
     config: GenaiConfig,
     policy: SsrfPolicy,
-    configured_timeout: Duration,
+    transport_policy: LlmHttpPolicy,
     client: Arc<tokio::sync::OnceCell<genai::Client>>,
     #[cfg(test)]
     client_builds: Arc<AtomicUsize>,
@@ -422,7 +423,6 @@ impl GenaiProvider {
         id: impl Into<String>,
         default_model: impl Into<String>,
         config: GenaiConfig,
-        configured_timeout: Duration,
         policy: SsrfPolicy,
     ) -> Self {
         Self {
@@ -430,7 +430,7 @@ impl GenaiProvider {
             default_model: default_model.into(),
             config,
             policy,
-            configured_timeout,
+            transport_policy: LlmHttpPolicy::chat(),
             client: Arc::new(tokio::sync::OnceCell::new()),
             #[cfg(test)]
             client_builds: Arc::new(AtomicUsize::new(0)),
@@ -445,7 +445,7 @@ impl GenaiProvider {
         id: impl Into<String>,
         default_model: impl Into<String>,
         config: GenaiConfig,
-        configured_timeout: Duration,
+        transport_policy: LlmHttpPolicy,
         override_: BuildOverride,
         policy: SsrfPolicy,
     ) -> Self {
@@ -454,7 +454,7 @@ impl GenaiProvider {
             default_model: default_model.into(),
             config,
             policy,
-            configured_timeout,
+            transport_policy,
             client: Arc::new(tokio::sync::OnceCell::new()),
             client_builds: Arc::new(AtomicUsize::new(0)),
             build_override: Some(override_),
@@ -484,7 +484,7 @@ impl LlmProvider for GenaiProvider {
         let config = self.config.clone();
         let default_model = self.default_model.clone();
         let client_cell = Arc::clone(&self.client);
-        let configured_timeout = self.configured_timeout;
+        let transport_policy = self.transport_policy;
         let policy = self.policy;
         #[cfg(test)]
         let builds = Arc::clone(&self.client_builds);
@@ -527,7 +527,7 @@ impl LlmProvider for GenaiProvider {
             let response = client
                 .exec_chat_stream(target, build_chat_request(&req), Some(&options))
                 .await
-                .map_err(|e| map_genai_error(&e, configured_timeout))?;
+                .map_err(|e| map_genai_error(&e, transport_policy))?;
 
             let mut stream = response.stream;
             // Per-id buffering: emit at most one ToolCall event per id, in the
@@ -573,7 +573,7 @@ impl LlmProvider for GenaiProvider {
                     // Mid-stream error: emit a mapped Err and terminate without
                     // a trailing Finished event.
                     Err(e) => {
-                        Err(map_genai_error(&e, configured_timeout))?;
+                        Err(map_genai_error(&e, transport_policy))?;
                     }
                 }
             }
@@ -593,7 +593,7 @@ impl LlmProvider for GenaiProvider {
         }
 
         let config = self.config.clone();
-        let configured_timeout = self.configured_timeout;
+        let transport_policy = self.transport_policy;
         let policy = self.policy;
         #[cfg(test)]
         let builds = Arc::clone(&self.client_builds);
@@ -626,7 +626,7 @@ impl LlmProvider for GenaiProvider {
         let response = client
             .embed_batch(target, req.inputs, None)
             .await
-            .map_err(|e| map_genai_error(&e, configured_timeout))?;
+            .map_err(|e| map_genai_error(&e, transport_policy))?;
 
         let usage = convert_embed_usage(response.usage.prompt_tokens, response.usage.total_tokens);
         // genai maps response embeddings 1:1 and in request order; preserve it.
@@ -788,11 +788,13 @@ async fn build_client_from_config(
 /// Build an OpenAI-backed `LlmProvider`.
 ///
 /// The genai client is constructed lazily on first use — no `block_on` here.
+/// `_configured_timeout` is retained for semver; the chat transport no longer
+/// consults it (llm-timeout-deadline).
 #[cfg(any(feature = "openai", feature = "all-providers"))]
 pub fn build_openai(
     name: &str,
     config: &crate::config::OpenaiProviderConfig,
-    configured_timeout: Duration,
+    _configured_timeout: Duration,
     policy: SsrfPolicy,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = GenaiConfig::OpenAi {
@@ -803,7 +805,6 @@ pub fn build_openai(
         name,
         &config.default_model,
         cfg,
-        configured_timeout,
         policy,
     )))
 }
@@ -811,11 +812,13 @@ pub fn build_openai(
 /// Build an Ollama-backed `LlmProvider`.
 ///
 /// The genai client is constructed lazily on first use — no `block_on` here.
+/// `_configured_timeout` is retained for semver; the chat transport no longer
+/// consults it (llm-timeout-deadline).
 #[cfg(any(feature = "ollama", feature = "all-providers"))]
 pub fn build_ollama(
     name: &str,
     config: &crate::config::OllamaProviderConfig,
-    configured_timeout: Duration,
+    _configured_timeout: Duration,
     policy: SsrfPolicy,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = GenaiConfig::Ollama {
@@ -825,7 +828,6 @@ pub fn build_ollama(
         name,
         &config.default_model,
         cfg,
-        configured_timeout,
         policy,
     )))
 }
@@ -834,11 +836,13 @@ pub fn build_ollama(
 ///
 /// The target adapter kind comes from `service`; the model is never inspected
 /// and no environment variable is consulted. The genai client stays lazy.
+/// `_configured_timeout` is retained for semver; the chat transport no longer
+/// consults it (llm-timeout-deadline).
 #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
 pub fn build_generic(
     name: &str,
     config: &crate::config::GenericProviderConfig,
-    configured_timeout: Duration,
+    _configured_timeout: Duration,
     policy: SsrfPolicy,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let cfg = GenaiConfig::Generic {
@@ -850,7 +854,6 @@ pub fn build_generic(
         name,
         &config.default_model,
         cfg,
-        configured_timeout,
         policy,
     )))
 }

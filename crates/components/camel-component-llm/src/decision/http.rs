@@ -15,6 +15,7 @@ use tokio::sync::OnceCell;
 use url::Host;
 use url::Url;
 
+use crate::LlmHttpPolicy;
 use crate::error::LlmError;
 use crate::provider::http_errors;
 use crate::provider_factory;
@@ -94,10 +95,9 @@ impl DecisionHttp {
         if let Some(key) = &self.api_key {
             request = request.bearer_auth(key);
         }
-        let mut resp = request
-            .send()
-            .await
-            .map_err(|e| http_errors::map_reqwest_error(&e, self.timeout))?;
+        let mut resp = request.send().await.map_err(|e| {
+            http_errors::map_reqwest_error(&e, LlmHttpPolicy::decision(), Some(self.timeout))
+        })?;
         let status = resp.status().as_u16();
         let retry_after = http_errors::parse_retry_after(
             resp.headers()
@@ -139,7 +139,7 @@ impl DecisionHttp {
         let pinned = pinning
             .as_ref()
             .map(|(host, addrs)| (host.as_str(), addrs.as_slice()));
-        crate::hardened_http_client_with_pinning(pinned)
+        crate::hardened_http_client_with_policy(LlmHttpPolicy::decision(), pinned)
             .map_err(|e| LlmError::provider(e.to_string()))
     }
 
@@ -176,7 +176,7 @@ async fn read_capped(
     while let Some(chunk) = resp
         .chunk()
         .await
-        .map_err(|e| http_errors::map_reqwest_error(&e, timeout))?
+        .map_err(|e| http_errors::map_reqwest_error(&e, LlmHttpPolicy::decision(), Some(timeout)))?
     {
         let room = MAX_DECISION_RESPONSE_BYTES - buf.len();
         if chunk.len() > room {

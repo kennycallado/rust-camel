@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use super::*;
-use crate::error::LlmError;
+use crate::LlmHttpPolicy;
+use crate::error::{LlmError, TransportTimeoutPhase};
 #[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
 use crate::provider::LlmProvider;
 use crate::provider::http_errors::is_insufficient_quota;
@@ -329,7 +330,7 @@ fn map_error_401_403_authfailed() {
             body: "access denied".into(),
         };
         assert!(matches!(
-            map_genai_error(&err, Duration::from_secs(30)),
+            map_genai_error(&err, LlmHttpPolicy::chat()),
             LlmError::AuthFailed { .. }
         ));
     }
@@ -343,7 +344,7 @@ fn map_error_404_model_not_found() {
         body: "model gpt-99 does not exist".into(),
     };
 
-    match map_genai_error(&err, Duration::from_secs(30)) {
+    match map_genai_error(&err, LlmHttpPolicy::chat()) {
         LlmError::ModelNotFound(model) => assert!(!model.is_empty()),
         other => panic!("expected ModelNotFound, got {other:?}"),
     }
@@ -361,7 +362,7 @@ fn map_error_400_422_invalid_request() {
             body: "bad request".into(),
         };
         assert!(matches!(
-            map_genai_error(&err, Duration::from_secs(30)),
+            map_genai_error(&err, LlmHttpPolicy::chat()),
             LlmError::InvalidRequest(_)
         ));
     }
@@ -379,7 +380,7 @@ fn map_error_5xx_provider_unavailable() {
             body: "server error".into(),
         };
         assert!(matches!(
-            map_genai_error(&err, Duration::from_secs(30)),
+            map_genai_error(&err, LlmHttpPolicy::chat()),
             LlmError::ProviderUnavailable(_)
         ));
     }
@@ -390,15 +391,22 @@ async fn map_error_timeout_and_connect() {
     let connect = connect_error().await;
     assert!(connect.is_connect());
     assert!(matches!(
-        map_genai_error(&web_stream(connect), Duration::from_secs(42)),
+        map_genai_error(&web_stream(connect), LlmHttpPolicy::chat()),
         LlmError::Network(_)
     ));
 
+    // A pre-header transport timeout is a NOT-connect transport timeout: it
+    // maps to the read-idle layer and reports the policy bound the transport
+    // actually enforced (600s chat guard), never a configured deadline.
     let timeout = timeout_error().await;
     assert!(timeout.is_timeout());
-    match map_genai_error(&web_stream(timeout), Duration::from_secs(42)) {
-        LlmError::Timeout(after) => assert_eq!(after, Duration::from_secs(42)),
-        other => panic!("expected Timeout, got {other:?}"),
+    assert!(!timeout.is_connect());
+    match map_genai_error(&web_stream(timeout), LlmHttpPolicy::chat()) {
+        LlmError::TransportTimeout {
+            phase: TransportTimeoutPhase::Idle,
+            after,
+        } => assert_eq!(after, Duration::from_secs(600)),
+        other => panic!("expected TransportTimeout::Idle, got {other:?}"),
     }
 }
 
@@ -413,7 +421,7 @@ fn webc_404_model_not_found_from_model_iden() {
         },
     };
 
-    match map_genai_error(&err, Duration::from_secs(30)) {
+    match map_genai_error(&err, LlmHttpPolicy::chat()) {
         LlmError::ModelNotFound(model) => assert_eq!(model, "gpt-4o"),
         other => panic!("expected ModelNotFound, got {other:?}"),
     }
@@ -432,7 +440,7 @@ fn web_stream_unknown_genai_inner_maps_through_mapper() {
     };
 
     assert!(matches!(
-        map_genai_error(&err, Duration::from_secs(30)),
+        map_genai_error(&err, LlmHttpPolicy::chat()),
         LlmError::Protocol(_)
     ));
 }
@@ -446,7 +454,7 @@ fn map_error_stream_parse_protocol() {
     };
 
     assert!(matches!(
-        map_genai_error(&err, Duration::from_secs(30)),
+        map_genai_error(&err, LlmHttpPolicy::chat()),
         LlmError::Protocol(_)
     ));
 }
@@ -480,7 +488,7 @@ fn webc_response_failed_status_maps_status_and_retry_after() {
         webc_error: response_failed(reqwest::StatusCode::TOO_MANY_REQUESTS, rate_limit_body, "9"),
     };
 
-    match map_genai_error(&err, Duration::from_secs(30)) {
+    match map_genai_error(&err, LlmHttpPolicy::chat()) {
         LlmError::RateLimit { retry_after } => {
             assert_eq!(retry_after, Some(Duration::from_secs(9)))
         }
@@ -496,23 +504,26 @@ fn webc_response_failed_status_maps_status_and_retry_after() {
         ),
     };
 
-    match map_genai_error(&err, Duration::from_secs(30)) {
+    match map_genai_error(&err, LlmHttpPolicy::chat()) {
         LlmError::RateLimit { retry_after } => assert_eq!(retry_after, None),
         other => panic!("expected RateLimit, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn webc_reqwest_timeout_maps_to_timeout() {
+async fn webc_reqwest_timeout_maps_to_transport_idle() {
     let timeout = timeout_error().await;
     let err = genai::Error::WebModelCall {
         model_iden: model_iden(),
         webc_error: genai::webc::Error::Reqwest(timeout),
     };
 
-    match map_genai_error(&err, Duration::from_secs(42)) {
-        LlmError::Timeout(after) => assert_eq!(after, Duration::from_secs(42)),
-        other => panic!("expected Timeout, got {other:?}"),
+    match map_genai_error(&err, LlmHttpPolicy::chat()) {
+        LlmError::TransportTimeout {
+            phase: TransportTimeoutPhase::Idle,
+            after,
+        } => assert_eq!(after, Duration::from_secs(600)),
+        other => panic!("expected TransportTimeout::Idle, got {other:?}"),
     }
 }
 
@@ -528,7 +539,7 @@ fn web_adapter_call_variant_maps_identically() {
     };
 
     assert!(matches!(
-        map_genai_error(&err, Duration::from_secs(30)),
+        map_genai_error(&err, LlmHttpPolicy::chat()),
         LlmError::ProviderUnavailable(_)
     ));
 }
@@ -575,7 +586,6 @@ fn genai_provider_implements_llm_provider() {
             api_key: "sk-test".into(),
             base_url: None,
         },
-        Duration::from_secs(30),
         SsrfPolicy::AllowInternal,
     );
 
@@ -711,7 +721,7 @@ async fn client_built_once_under_concurrency() {
         GenaiConfig::Ollama {
             base_url: server.uri(),
         },
-        Duration::from_secs(30),
+        LlmHttpPolicy::chat(),
         stub_builder,
         SsrfPolicy::AllowInternal,
     ));
@@ -884,7 +894,6 @@ fn body_derived_error_details_are_truncated() {
 #[cfg(any(feature = "openai", feature = "all-providers"))]
 mod wiremock_chat {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use camel_api::SsrfPolicy;
     use futures::StreamExt;
@@ -892,6 +901,7 @@ mod wiremock_chat {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::super::{BuildOverride, GenaiConfig, GenaiProvider};
+    use crate::LlmHttpPolicy;
     use crate::error::LlmError;
     use crate::provider::{
         ChatEvent, ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmUsage, ToolDefinition,
@@ -924,7 +934,7 @@ mod wiremock_chat {
                 api_key: "sk-test".into(),
                 base_url: Some(format!("{}/v1", server.uri())),
             },
-            Duration::from_secs(10),
+            LlmHttpPolicy::chat(),
             build_override(),
             SsrfPolicy::AllowInternal,
         )
@@ -1330,13 +1340,13 @@ mod wiremock_chat {
 #[cfg(any(feature = "openai", feature = "ollama", feature = "all-providers"))]
 mod wiremock_embed {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use camel_api::SsrfPolicy;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::super::{BuildOverride, GenaiConfig, GenaiProvider};
+    use crate::LlmHttpPolicy;
     use crate::provider::{EmbedRequest, LlmProvider, LlmUsage};
 
     /// Reuse the chat suite's pattern: bypass ambient proxies for `127.0.0.1`.
@@ -1363,7 +1373,7 @@ mod wiremock_embed {
                 api_key: "sk-test".into(),
                 base_url: Some(format!("{}/v1", server.uri())),
             },
-            Duration::from_secs(10),
+            LlmHttpPolicy::chat(),
             build_override(),
             SsrfPolicy::AllowInternal,
         )
@@ -1377,7 +1387,7 @@ mod wiremock_embed {
             GenaiConfig::Ollama {
                 base_url: server.uri(),
             },
-            Duration::from_secs(10),
+            LlmHttpPolicy::chat(),
             build_override(),
             SsrfPolicy::AllowInternal,
         )
@@ -1535,7 +1545,6 @@ mod wiremock_embed {
 #[cfg(any(feature = "ollama", feature = "all-providers"))]
 mod wiremock_ollama {
     use std::sync::Arc;
-    use std::time::Duration;
 
     use camel_api::SsrfPolicy;
     use futures::StreamExt;
@@ -1543,6 +1552,7 @@ mod wiremock_ollama {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::super::{BuildOverride, GenaiConfig, GenaiProvider};
+    use crate::LlmHttpPolicy;
     use crate::error::LlmError;
     use crate::provider::{
         ChatEvent, ChatMessage, ChatRequest, FinishReason, LlmProvider, LlmUsage,
@@ -1567,7 +1577,7 @@ mod wiremock_ollama {
             GenaiConfig::Ollama {
                 base_url: server.uri(),
             },
-            Duration::from_secs(10),
+            LlmHttpPolicy::chat(),
             build_override(),
             SsrfPolicy::AllowInternal,
         )
@@ -1701,6 +1711,7 @@ mod wiremock_error {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::super::{BuildOverride, GenaiConfig, GenaiProvider};
+    use crate::LlmHttpPolicy;
     use crate::error::{LlmError, is_retryable};
     use crate::provider::{ChatMessage, ChatRequest, EmbedRequest, LlmProvider};
 
@@ -1720,24 +1731,9 @@ mod wiremock_error {
         })
     }
 
-    /// Transport client with a timeout shorter than the provider's configured
-    /// timeout, so the mapping test can prove which value reaches `Timeout`.
-    fn build_override_with_transport_timeout(timeout: Duration) -> BuildOverride {
-        Arc::new(move || {
-            Box::pin(async move {
-                let client = reqwest::Client::builder()
-                    .no_proxy()
-                    .timeout(timeout)
-                    .build()
-                    .map_err(|err| LlmError::Network(format!("test reqwest client: {err}")))?;
-                Ok(genai::Client::builder().with_reqwest(client).build())
-            })
-        })
-    }
-
     fn openai_provider(
         base_url: String,
-        configured_timeout: Duration,
+        transport_policy: LlmHttpPolicy,
         override_: BuildOverride,
     ) -> GenaiProvider {
         GenaiProvider::new_with_build_override(
@@ -1747,7 +1743,7 @@ mod wiremock_error {
                 api_key: "sk-test".into(),
                 base_url: Some(base_url),
             },
-            configured_timeout,
+            transport_policy,
             override_,
             SsrfPolicy::AllowInternal,
         )
@@ -1756,7 +1752,7 @@ mod wiremock_error {
     fn provider_for(server: &MockServer) -> GenaiProvider {
         openai_provider(
             format!("{}/v1", server.uri()),
-            Duration::from_secs(10),
+            LlmHttpPolicy::chat(),
             build_override(),
         )
     }
@@ -1776,7 +1772,7 @@ mod wiremock_error {
     }
 
     /// Drain the chat stream and return its single mapped error.
-    async fn chat_error(provider: &GenaiProvider) -> LlmError {
+    pub(super) async fn chat_error(provider: &GenaiProvider) -> LlmError {
         let events: Vec<_> = provider.chat_stream(request()).collect().await;
         let mut errors = events.into_iter().filter_map(Result::err);
         let err = errors.next().expect("stream must yield an error");
@@ -1952,7 +1948,7 @@ mod wiremock_error {
 
         let provider = openai_provider(
             format!("http://{addr}/v1"),
-            Duration::from_secs(10),
+            LlmHttpPolicy::chat(),
             build_override(),
         );
 
@@ -1964,31 +1960,6 @@ mod wiremock_error {
         );
         assert!(is_retryable(&err), "connection failures must be retryable");
     }
-
-    #[tokio::test]
-    async fn chat_timeout_maps_timeout_with_configured_duration() {
-        // The transport gives up after 100ms while the provider is configured
-        // for 1s. The mapped error must carry the CONFIGURED duration.
-        let server = mock_server(
-            CHAT_PATH,
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(300))
-                .set_body_raw("data: [DONE]\n\n", "text/event-stream"),
-        )
-        .await;
-        let provider = openai_provider(
-            format!("{}/v1", server.uri()),
-            Duration::from_secs(1),
-            build_override_with_transport_timeout(Duration::from_millis(100)),
-        );
-
-        let err = chat_error(&provider).await;
-
-        assert!(
-            matches!(err, LlmError::Timeout(after) if after == Duration::from_secs(1)),
-            "expected Timeout with the configured 1s duration, got: {err:?}"
-        );
-    }
 }
 
 /// Native generic-service targets, factory construction, embedding rejection,
@@ -1998,7 +1969,6 @@ mod generic_native {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
     use camel_api::SsrfPolicy;
     use genai::ModelSpec;
@@ -2008,6 +1978,7 @@ mod generic_native {
     use super::super::{
         BuildOverride, GenaiConfig, GenaiProvider, collect_pinning_from_config, resolve_target,
     };
+    use crate::LlmHttpPolicy;
     use crate::config::{
         GenericProviderConfig, LlmGlobalConfig, LlmProviderConfig, LlmServiceKind,
     };
@@ -2169,7 +2140,7 @@ mod generic_native {
                     api_key: "explicit-key".into(),
                     base_url: None,
                 },
-                Duration::from_secs(7),
+                LlmHttpPolicy::chat(),
                 override_,
                 SsrfPolicy::AllowInternal,
             );
@@ -2663,5 +2634,590 @@ mod wiremock_generic {
             is_retryable(errors[0]),
             "RESOURCE_EXHAUSTED must stay retryable"
         );
+    }
+}
+
+/// Staged-server proofs for the chat-path timeout/deadline layers
+/// (change `llm-timeout-deadline`, task 1.4).
+///
+/// The hidden 30s client total is gone: a peer that sends response headers
+/// immediately and then stalls the body must not be cut by the transport.
+/// `wiremock` cannot express that split (its delay covers headers too), so
+/// these tests drive `HttpTestServer`'s staged responses.
+///
+/// `build_override_with_policy` / `policy_provider` / `staged_sse` /
+/// `start_staged_server` / `send_after` are `pub(super)` so task 1.5 can
+/// reuse them from a sibling module in this file.
+#[cfg(any(feature = "openai", feature = "all-providers"))]
+mod staged_deadline {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use camel_api::{Body, Exchange, Message, SsrfPolicy};
+    use camel_component_api::NetworkRetryPolicy;
+    use camel_component_api::test_support::http::{
+        HttpTestServer, Responder, Response, ResponseHeaders,
+    };
+    use tower::Service;
+
+    use super::super::{BuildOverride, GenaiConfig, GenaiProvider};
+    use super::wiremock_error::chat_error;
+    use crate::LlmHttpPolicy;
+    use crate::error::{LlmError, TransportTimeoutPhase};
+    use crate::producer::LlmProducer;
+    use crate::{LlmEndpointConfig, LlmOperation};
+
+    /// Build override using the REAL production hardened builder with the
+    /// given policy, so the client enforces exactly what the adapter maps.
+    pub(super) fn build_override_with_policy(
+        connect: Duration,
+        read_idle: Option<Duration>,
+    ) -> BuildOverride {
+        Arc::new(move || {
+            Box::pin(async move {
+                let client = crate::hardened_http_client_with_policy(
+                    LlmHttpPolicy { connect, read_idle },
+                    None,
+                )
+                .map_err(|err| LlmError::Network(format!("test hardened client: {err}")))?;
+                Ok(genai::Client::builder().with_reqwest(client).build())
+            })
+        })
+    }
+
+    /// Provider whose enforced client policy and mapped policy are the SAME
+    /// value (policy threading agreement).
+    pub(super) fn policy_provider(base_url: String, policy: LlmHttpPolicy) -> GenaiProvider {
+        GenaiProvider::new_with_build_override(
+            "staged-openai",
+            "gpt-4o",
+            GenaiConfig::OpenAi {
+                api_key: "sk-test".into(),
+                base_url: Some(base_url),
+            },
+            policy,
+            build_override_with_policy(policy.connect, policy.read_idle),
+            SsrfPolicy::AllowInternal,
+        )
+    }
+
+    /// Staged SSE response: headers flush immediately, the body follows `rx`.
+    ///
+    /// `transfer-encoding: chunked` is declared because the harness frames
+    /// staged chunks as HTTP chunks; without it the client would read the
+    /// framing lines as body bytes (connection-delimited response).
+    pub(super) fn staged_sse(rx: tokio::sync::mpsc::Receiver<Vec<u8>>) -> Response {
+        Response::staged(
+            ResponseHeaders::new(
+                200,
+                "OK",
+                vec![
+                    ("content-type".to_string(), "text/event-stream".to_string()),
+                    ("transfer-encoding".to_string(), "chunked".to_string()),
+                ],
+            ),
+            rx,
+        )
+    }
+
+    /// Start a staged localhost server and return its body sender.
+    ///
+    /// Base URL: [`base_url`]. The IP literal avoids DNS under paused clocks.
+    pub(super) async fn start_staged_server() -> (HttpTestServer, tokio::sync::mpsc::Sender<Vec<u8>>)
+    {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+        let slot = Arc::new(std::sync::Mutex::new(Some(rx)));
+        let server = HttpTestServer::start(Responder::route(move |_req| {
+            let rx = slot
+                .lock()
+                .expect("staged response slot")
+                .take()
+                .expect("staged response is requested once");
+            staged_sse(rx)
+        }))
+        .await
+        .expect("start staged HTTP server");
+        (server, tx)
+    }
+
+    /// OpenAI-compatible base URL for a staged server.
+    pub(super) fn base_url(server: &HttpTestServer) -> String {
+        format!("http://127.0.0.1:{}/v1", server.port())
+    }
+
+    /// Send `chunk` after `delay`.
+    ///
+    /// Nested helper: `lint-test-sleep` exempts sleeps inside helpers, and the
+    /// sleep participates in virtual time under `start_paused`.
+    pub(super) async fn send_after(
+        tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+        delay: Duration,
+        chunk: &[u8],
+    ) {
+        tokio::time::sleep(delay).await;
+        let _ = tx.send(chunk.to_vec()).await;
+    }
+
+    fn sse_data(payload: &str) -> Vec<u8> {
+        format!("data: {payload}\n\n").into_bytes()
+    }
+
+    fn sse_chunk(text: &str) -> Vec<u8> {
+        sse_data(&serde_json::json!({"choices":[{"delta":{"content": text}}]}).to_string())
+    }
+
+    fn sse_finish() -> Vec<u8> {
+        sse_data(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#)
+    }
+
+    fn sse_done() -> Vec<u8> {
+        sse_data("[DONE]")
+    }
+
+    /// Materialized chat producer (`stream=false`) with the given deadline.
+    pub(super) fn materialized_producer(
+        provider: GenaiProvider,
+        timeout: Option<Duration>,
+    ) -> LlmProducer {
+        let config = LlmEndpointConfig {
+            operation: LlmOperation::Chat,
+            stream: false,
+            ..Default::default()
+        };
+        LlmProducer::new(config, Arc::new(provider), 32768, "test-route".into())
+            .with_timeout(timeout)
+            .build()
+    }
+
+    /// Materialized chat producer with deadline and network retry (task 1.5).
+    pub(super) fn materialized_producer_with_retry(
+        provider: GenaiProvider,
+        timeout: Option<Duration>,
+        retry: Option<NetworkRetryPolicy>,
+    ) -> LlmProducer {
+        let config = LlmEndpointConfig {
+            operation: LlmOperation::Chat,
+            stream: false,
+            ..Default::default()
+        };
+        LlmProducer::new(config, Arc::new(provider), 32768, "test-route".into())
+            .with_timeout(timeout)
+            .with_retry(retry)
+            .build()
+    }
+
+    /// Two-attempt network retry policy with negligible real backoff.
+    fn two_attempt_retry() -> NetworkRetryPolicy {
+        NetworkRetryPolicy {
+            enabled: true,
+            max_attempts: 2,
+            initial_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            max_delay: Duration::from_millis(5),
+            jitter_factor: 0.0,
+            max_attempts_absolute: None,
+        }
+    }
+
+    fn exchange() -> Exchange {
+        Exchange::new(Message::new(Body::Text("hello".into())))
+    }
+    /// Blessed-spec scenario: a body gap beyond the removed 30s client total
+    /// completes under the configured deadline. THE discriminating test — on
+    /// pre-change code the 30s client total cut this stream.
+    #[tokio::test(start_paused = true)]
+    async fn body_gap_beyond_30s_completes_under_configured_deadline() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_secs(600)),
+            },
+        );
+        let mut producer = materialized_producer(provider, Some(Duration::from_secs(90)));
+
+        let writer = tokio::spawn(async move {
+            // Headers flush at request time; the first body byte waits 45s of
+            // VIRTUAL time — beyond the removed 30s client total.
+            send_after(&tx, Duration::from_secs(45), &sse_chunk("hello")).await;
+            send_after(&tx, Duration::from_millis(1), &sse_chunk(" world")).await;
+            send_after(&tx, Duration::from_millis(1), &sse_finish()).await;
+            send_after(&tx, Duration::from_millis(1), &sse_done()).await;
+        });
+
+        // Bound 120s (virtual): above the 90s configured deadline and the 45s
+        // intentional gap, so only a real regression trips this bound.
+        let result = tokio::time::timeout(Duration::from_secs(120), producer.call(exchange()))
+            .await
+            .expect("producer call must finish within the 120s test bound");
+
+        let out = result.expect("the 45s body gap must not abort the chat");
+        match &out.input.body {
+            Body::Text(text) => assert_eq!(text, "hello world"),
+            other => panic!("expected materialized text body, got {other:?}"),
+        }
+        writer.abort();
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario: the transport read-idle guard lapses before the
+    /// configured producer deadline, so the transport layer is reported.
+    ///
+    /// Producer-level precedence proof (display text only): a provider-only
+    /// probe cannot see which producer deadline would have fired.
+    #[tokio::test]
+    async fn read_idle_lapse_maps_transport_timeout_idle() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(200)),
+            },
+        );
+        let mut producer = materialized_producer(provider, Some(Duration::from_secs(5)));
+
+        // Headers plus one chunk flush immediately; keeping the sender alive
+        // stalls the rest of the body (dropping it would end the response).
+        tx.try_send(sse_chunk("partial"))
+            .expect("staged body channel has capacity");
+        let _stall = tx;
+
+        // Bound 5s (real time): the 200ms idle guard must win well inside it.
+        let result = tokio::time::timeout(Duration::from_secs(5), producer.call(exchange()))
+            .await
+            .expect("producer call must end within the 5s test bound");
+
+        let err = result.expect_err("a stalled body must time out");
+        let display = err.to_string();
+        assert!(
+            display.contains("timeout"),
+            "expected timeout, got: {display}"
+        );
+        assert!(
+            display.contains("no response activity for 200ms"),
+            "the transport idle guard must win before the 5s deadline, got: {display}"
+        );
+        server.shutdown().await;
+    }
+
+    /// Honest contract replacing the retired stale test (which asserted the
+    /// misreport — a 100ms transport lapse reported as a configured 1s
+    /// deadline): a transport read-idle lapse reports the layer that fired and
+    /// the bound the policy enforced (100ms), never a configured deadline.
+    #[tokio::test]
+    async fn transport_idle_lapse_reports_idle_layer_not_configured_deadline() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(100)),
+            },
+        );
+
+        // Headers flush immediately; keeping the sender alive stalls the body.
+        // (Dropping it would end the body cleanly instead of stalling, so no
+        // timeout would fire at all.)
+        let _stall = tx;
+
+        // Bound 5s (real time): above the 100ms enforced idle guard. This is a
+        // test bound only; chat_error bypasses the producer deadline.
+        let err = tokio::time::timeout(Duration::from_secs(5), chat_error(&provider))
+            .await
+            .expect("chat error must surface within the 5s test bound");
+
+        assert!(
+            matches!(
+                err,
+                LlmError::TransportTimeout {
+                    phase: TransportTimeoutPhase::Idle,
+                    after,
+                } if after == Duration::from_millis(100)
+            ),
+            "expected TransportTimeout::Idle after the enforced 100ms, got: {err:?}"
+        );
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario: the reported idle bound equals the ENFORCED
+    /// policy (policy threading proof). Typed variant, no producer involved.
+    #[tokio::test]
+    async fn transport_idle_variant_is_typed() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(200)),
+            },
+        );
+        tx.try_send(sse_chunk("partial"))
+            .expect("staged body channel has capacity");
+        let _stall = tx;
+
+        // Bound 5s (real time): above the 200ms guard that must fire.
+        let err = tokio::time::timeout(Duration::from_secs(5), chat_error(&provider))
+            .await
+            .expect("chat error must surface within the 5s test bound");
+
+        assert!(
+            matches!(
+                err,
+                LlmError::TransportTimeout {
+                    phase: TransportTimeoutPhase::Idle,
+                    after,
+                } if after == Duration::from_millis(200)
+            ),
+            "expected TransportTimeout::Idle after the enforced 200ms, got: {err:?}"
+        );
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario: the read-idle guard resets per read, not per
+    /// response. Chunks arrive 100ms apart under a 300ms guard.
+    #[tokio::test(start_paused = true)]
+    async fn read_idle_resets_per_read_not_total() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(300)),
+            },
+        );
+        let mut producer = materialized_producer(provider, Some(Duration::from_secs(5)));
+
+        let writer = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(100));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            for index in 0..12 {
+                ticker.tick().await;
+                let _ = tx.send(sse_chunk(&index.to_string())).await;
+            }
+            ticker.tick().await;
+            let _ = tx.send(sse_finish()).await;
+            ticker.tick().await;
+            let _ = tx.send(sse_done()).await;
+        });
+
+        // Bound 120s (virtual): above the ~1.3s paced timeline.
+        let result = tokio::time::timeout(Duration::from_secs(120), producer.call(exchange()))
+            .await
+            .expect("producer call must finish within the 120s test bound");
+
+        let out = result.expect("paced chunks under the idle guard must complete");
+        let expected: String = (0..12).map(|index| index.to_string()).collect();
+        match &out.input.body {
+            Body::Text(text) => assert_eq!(text, &expected),
+            other => panic!("expected materialized text body, got {other:?}"),
+        }
+        writer.abort();
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario: the producer deadline maps to `Timeout` with the
+    /// CONFIGURED duration; no idle guard can shadow it (`read_idle: None`).
+    ///
+    /// The typed `Timeout` variant is owned by 1.2's unit tests
+    /// (`apply_timeout` lives in the producer), so this asserts display text.
+    #[tokio::test(start_paused = true)]
+    async fn producer_deadline_maps_timeout_with_configured_duration() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: None,
+            },
+        );
+        let mut producer = materialized_producer(provider, Some(Duration::from_millis(400)));
+        let _stall = tx;
+
+        // Bound 120s (virtual): above the 400ms configured deadline.
+        let result = tokio::time::timeout(Duration::from_secs(120), producer.call(exchange()))
+            .await
+            .expect("producer call must finish within the 120s test bound");
+
+        let err = result.expect_err("the 400ms deadline must fire");
+        let display = err.to_string();
+        assert!(
+            display.contains("timeout"),
+            "expected timeout, got: {display}"
+        );
+        assert!(
+            display.contains("400ms"),
+            "expected the configured 400ms, got: {display}"
+        );
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario "Hung chat connection is still bounded" at test
+    /// scale: with no configured deadline (`timeout_secs` unset), the transport
+    /// read-idle guard still ends the call — no silent hang.
+    #[tokio::test]
+    async fn hung_connection_bounded_when_deadline_unset() {
+        let (server, tx) = start_staged_server().await;
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(200)),
+            },
+        );
+        let mut producer = materialized_producer(provider, None);
+        tx.try_send(sse_chunk("partial"))
+            .expect("staged body channel has capacity");
+        let _stall = tx;
+
+        // Bound 5s (real time): above the 200ms guard. There is no producer
+        // deadline here, so the test supplies the only bound.
+        let result = tokio::time::timeout(Duration::from_secs(5), producer.call(exchange()))
+            .await
+            .expect("producer call must end within the 5s test bound");
+
+        let err = result.expect_err("a hung connection without a deadline must still end");
+        let display = err.to_string();
+        assert!(
+            display.contains("timeout"),
+            "expected timeout, got: {display}"
+        );
+        assert!(
+            display.contains("no response activity for 200ms"),
+            "the transport idle guard must bound the hang, got: {display}"
+        );
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario: a transport read-idle lapse BEFORE any content
+    /// Delta is retryable — the retry loop issues a second HTTP attempt and
+    /// the second answer completes.
+    #[tokio::test]
+    async fn transport_timeout_before_content_is_retried() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let stalled: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::clone(&attempts);
+        let holders = Arc::clone(&stalled);
+        let server = HttpTestServer::start(Responder::route(move |_req| {
+            let attempt = counter.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+            if attempt == 0 {
+                // Park the sender: headers flush, the body never ends, and the
+                // read-idle guard fires before any content Delta.
+                holders.lock().expect("stall holder").push(tx);
+            } else {
+                tx.try_send(sse_chunk("recovered"))
+                    .expect("staged body channel has capacity");
+                tx.try_send(sse_finish())
+                    .expect("staged body channel has capacity");
+                tx.try_send(sse_done())
+                    .expect("staged body channel has capacity");
+                // Dropping `tx` here ends the body after the buffered chunks.
+            }
+            staged_sse(rx)
+        }))
+        .await
+        .expect("start retry staged server");
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(150)),
+            },
+        );
+        let mut producer = materialized_producer_with_retry(
+            provider,
+            Some(Duration::from_secs(10)),
+            Some(two_attempt_retry()),
+        );
+
+        // Bound 5s (real time): above 150ms idle guard + 1ms backoff.
+        let result = tokio::time::timeout(Duration::from_secs(5), producer.call(exchange()))
+            .await
+            .expect("producer call must finish within the 5s test bound");
+
+        let out = result.expect("a pre-content transport timeout must be retried");
+        match &out.input.body {
+            Body::Text(text) => assert_eq!(text, "recovered"),
+            other => panic!("expected materialized text body, got {other:?}"),
+        }
+        assert_eq!(
+            server.recorded().len(),
+            2,
+            "one stalled attempt plus one retry"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        drop(stalled);
+        server.shutdown().await;
+    }
+
+    /// Blessed-spec scenario: a transport read-idle lapse AFTER content
+    /// started must NOT be retried (unchanged producer rule at
+    /// `producer.rs:173`); the call fails with the transport layer text.
+    #[tokio::test]
+    async fn transport_timeout_after_content_is_not_retried() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let stalled: Arc<Mutex<Vec<tokio::sync::mpsc::Sender<Vec<u8>>>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let counter = Arc::clone(&attempts);
+        let holders = Arc::clone(&stalled);
+        let server = HttpTestServer::start(Responder::route(move |_req| {
+            let attempt = counter.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+            tx.try_send(sse_chunk("partial"))
+                .expect("staged body channel has capacity");
+            if attempt == 0 {
+                // Content already started; parking the sender stalls the body
+                // so the read-idle guard fires after the Delta.
+                holders.lock().expect("stall holder").push(tx);
+            } else {
+                // Must never be served: content-started suppresses the retry.
+                tx.try_send(sse_done())
+                    .expect("staged body channel has capacity");
+            }
+            staged_sse(rx)
+        }))
+        .await
+        .expect("start no-retry staged server");
+        let provider = policy_provider(
+            base_url(&server),
+            LlmHttpPolicy {
+                connect: Duration::from_secs(10),
+                read_idle: Some(Duration::from_millis(150)),
+            },
+        );
+        let mut producer = materialized_producer_with_retry(
+            provider,
+            Some(Duration::from_secs(10)),
+            Some(two_attempt_retry()),
+        );
+
+        // Bound 5s (real time): above the 150ms idle guard.
+        let result = tokio::time::timeout(Duration::from_secs(5), producer.call(exchange()))
+            .await
+            .expect("producer call must finish within the 5s test bound");
+
+        let err = result.expect_err("a post-content transport timeout must surface");
+        let display = err.to_string();
+        assert!(
+            display.contains("timeout"),
+            "expected timeout, got: {display}"
+        );
+        assert!(
+            display.contains("no response activity for 150ms"),
+            "expected the enforced idle bound, got: {display}"
+        );
+        assert_eq!(
+            server.recorded().len(),
+            1,
+            "content started: the attempt must not be retried"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        drop(stalled);
+        server.shutdown().await;
     }
 }

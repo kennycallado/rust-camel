@@ -44,7 +44,7 @@ llm:<operation>?provider=<name>[&model=<model>][&temperature=<n>][&max_tokens=<n
 | `stream` | `true` | `true` streams, `false` materializes |
 | `system_prompt` | — | System prompt override |
 
-`timeout_secs` is not a URI parameter. Configure it in the provider section of `Camel.toml` (or the global LLM config). It sets the activity timeout for streaming mode and the total deadline for materialized mode.
+`timeout_secs` is not a URI parameter. Configure it in the provider section of `Camel.toml` (or the global LLM config). It sets the streaming per-event activity timeout and the materialized total deadline. The transport adds no total cap: the chat/embed client bounds each attempt with a 10s connect timeout and a 600s transport read-idle guard, and the transport never reports a configured value it did not enforce.
 
 ## Operations
 
@@ -284,6 +284,10 @@ Gemini reports both request throttling and daily or project quota exhaustion as 
 The manual retry loop honors provider `retry_after` over exponential backoff (ADR-0021). The loop only runs in materialized mode. Once content starts streaming, the loop stops.
 
 The streaming `timeout_secs` covers each `stream.next()` call. A deadline lapse yields a `Timeout` error. The materialized total deadline covers the whole request.
+
+The transport applies its bounds in this order: connect (10s) → transport read-idle guard (600s with no response activity; before the headers, the guard bounds time-to-headers) → the configured deadline (per-event in streaming, total in materialized). Which guard fires first depends on the configuration. With `timeout_secs` unset, the read-idle guard still bounds hung connections.
+
+Each error text names the layer that fired. `timeout: deadline {d:?} exceeded` means a configured deadline lapsed (streaming per-event, materialized total, or the decision per-request total). `timeout: connect not established within {after:?}` means the TCP connect bound lapsed. `timeout: no response activity for {after:?}` means the transport read-idle guard fired. Transport timeouts inside one attempt are retryable. The no-retry-after-content rule does not change.
 
 ## Error handling
 

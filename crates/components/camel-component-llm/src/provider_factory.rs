@@ -172,8 +172,9 @@ fn build_single(
             if let Some(ref base_url) = c.base_url {
                 validate_llm_url(base_url, policy)?;
             }
+            // Value ignored by the chat transport since llm-timeout-deadline; kept for the public build_* signature.
             let configured_timeout =
-                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
+                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or_default());
             crate::provider::genai_adapter::build_openai(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }
@@ -184,8 +185,9 @@ fn build_single(
         #[cfg(any(feature = "ollama", feature = "all-providers"))]
         LlmProviderConfig::Ollama(c) => {
             validate_llm_url(&c.base_url, policy)?;
+            // Value ignored by the chat transport since llm-timeout-deadline; kept for the public build_* signature.
             let configured_timeout =
-                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
+                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or_default());
             crate::provider::genai_adapter::build_ollama(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }
@@ -201,8 +203,9 @@ fn build_single(
             if let Some(ref base_url) = c.base_url {
                 validate_llm_url(base_url, policy)?;
             }
+            // Value ignored by the chat transport since llm-timeout-deadline; kept for the public build_* signature.
             let configured_timeout =
-                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or(30));
+                Duration::from_secs(c.timeout_secs.or(global_timeout).unwrap_or_default());
             crate::provider::genai_adapter::build_generic(name, c, configured_timeout, policy)
                 .map(|p| p as Arc<dyn LlmProvider>)
         }

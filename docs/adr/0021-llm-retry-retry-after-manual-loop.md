@@ -40,3 +40,22 @@ The loop is also justified by two hardening-spec decisions:
 - Cancellation is delivered via Rust's standard future-drop semantics
   (dropping `Body::Stream` drops the inner provider stream). No explicit
   `CancellationToken` is needed — in Rust, drop IS cancellation.
+
+## Addendum (2026-11, llm-timeout-deadline)
+
+The hidden 30s client total (`hardened_http_client_with_pinning`) was itself a
+per-attempt timeout, which this ADR forbids. That total is removed. The
+single-deadline rule is restored: the configured deadline (`timeout_secs`) owns
+the total (materialized `apply_timeout`, streaming per-event, decision
+per-request).
+
+Transport bounds are now: a 10s connect timeout; plus a 600s transport
+read-idle guard on the chat/embed client. The guard measures inactivity, not
+lifetime, so it is a different kind of bound than the per-attempt lifetime
+timeout this ADR forbids. The decision client carries no read-idle guard; its
+per-request total is unchanged.
+
+Accepted residual risk for `timeout_secs: None`: a peer that trickles bytes
+under 600s of inactivity is not bounded, and the chat/embed path has no
+body-size cap. Set `timeout_secs` for a lifetime bound. Follow-ups: bd
+`rc-kemrg` (body-size cap) and bd `rc-ucneu` (Keycloak hardened client).
