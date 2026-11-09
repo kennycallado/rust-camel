@@ -1,0 +1,21 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "hash": "sha256:8e38ab79e2994cc0585ecd36e299cddcd8351a61688442bee3112f8260324fcf",
+  "expert": "experts/e_gpt",
+  "session": "ses_e3f1b2d16ffemnh5uZxCC0esXt",
+  "superseded": {
+    "kind": "spec",
+    "verdict": "APPROVED",
+    "hash": "sha256:553cf3df1c5a56ff36a1226131685801883841858003be92e4d12b3bf91bd557",
+    "session": "ses_e3f35ea45ffeAaL0cO406pFydE"
+  },
+  "review_loop": [
+    { "reviewer": "reviewers/r_glm", "verdict": "REJECT", "session": "ses_e3f335bc8ffeU6WLf57DicMKzN", "findings": "5 (2 critical: export pipeline precedence, working-tree drift; 1 important: no-op --list; 1 important: summary literal; 1 minor: escaped backticks)" },
+    { "reviewer": "reviewers/r_glm", "verdict": "APPROVE-WITH-FINDINGS", "session": "ses_e3f2af41cffen6KfWkyh8cn0Xt", "findings": "2 minor (non-observable Documenting-count assertion, SCRATCH var lifetime) — prescribed fixes applied" }
+  ],
+  "plan_bless_loop": [
+    { "expert": "experts/e_gpt", "verdict": "APPROVED-WITH-FIXES", "session": "ses_e3f1e0758ffeJBNaM9GBEzYnKc", "fix": "bash -x xtrace observation of parsed doc-build invocation (cargo doc caching makes Documenting lines unreliable)" }
+  ],
+  "date": "2026-11-09"
+}

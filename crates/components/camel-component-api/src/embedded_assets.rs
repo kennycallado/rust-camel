@@ -14,7 +14,7 @@
 //!
 //! # Reserved reference prefix
 //!
-//! [`EMBEDDED_REF_PREFIX`] (`camel-embedded:`) and its percent-encoded
+//! [`crate::embedded_assets::EMBEDDED_REF_PREFIX`] (`camel-embedded:`) and its percent-encoded
 //! spelling (`camel-embedded%3A`) are reserved: a value that starts with
 //! either spelling is resolved against this registry and never against
 //! the filesystem. A real file whose name starts with either spelling is
