@@ -150,6 +150,11 @@ redis = ["dep:redis", "camel-bundles/redis"]
 # The harness is a bundles consumer, so the shadow feature must
 # forward it (lint-gate-forwarding Rule 1).
 wasm = ["camel-bundles/wasm"]
+# Demand-gated rhai activation (rhai-reconcile-bench task 1.1): rhai
+# registration sits behind camel-core's `lang-rhai` cargo feature, so the
+# reconcile fixtures boot with rhai only when this shadow feature is on.
+# camel-core is already a direct dependency — no dep edge is added.
+lang-rhai = ["camel-core/lang-rhai"]
 
 [lints]
 workspace = true

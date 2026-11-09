@@ -1,0 +1,297 @@
+# Reconcile budget fixture (rhai-reconcile-bench task 1.1): the
+# deterministic, in-process reconstruction of the customer's reconcile
+# workload. The stimulus enters at `direct:reconcile-budget` with the
+# member count as the body (a quoted string — "1200" in the CI control,
+# "5001" in the bench — coerced to INT by the v0.56-compat shim below;
+# see the change proposal's conductor-gate deviations). The generator
+# builds the eleven large exchange properties the
+# real reconcile reads and rewrites — viirsReport, graphEdges,
+# historicIncidents, clusterAssignments, scoreIndex, pairScores,
+# pendingClusters, stableSingletons, retiredIds, reconcileLog and the
+# oracle map. That count is the fidelity contract: every one of them is
+# read AND written once per reconcile iteration inside
+# `direct:cb-reconcile`; dropping one would understate the snapshot and
+# write-back cost the bench exists to measure.
+#
+# Every script step evaluates in a fresh scope seeded only with
+# `body`/`headers`/`properties`, so each generator re-derives `n` from
+# the coerced body, and cross-step state travels through `properties`.
+# Nested writes do NOT auto-create parents, so each generator initializes
+# its target map before the per-member writes. Controls (memberCount,
+# chunkCount, chunkIdx, loop vars) stay INT because `range(from, to)`
+# and array indexing are INT-only; payload fields are f64.
+#
+# OPS-CAP SPLIT (sanctioned cap-gap remedy, customer-environment defaults
+# kept — [languages.rhai.limits] is untouched): some scripts exceed the
+# 100,000-operation default at 5001 members, so their `for` range runs in
+# two halves (`range(0, half)` / `range(half, n)`, `half = n / 2` INT
+# division). Both halves re-derive `n`/`half`; ONLY the first half
+# initializes the map (`properties["<map>"] = #{};`) — a re-assignment in
+# the second half would erase the first half's entries. The payload shape
+# is unchanged: same keys, same fields, same types.
+routes:
+  - id: reconcile-budget-fixture
+    from: direct:reconcile-budget
+    steps:
+      # Phase marker: the bench opens its log-capture window before the
+      # document runs and reads these four `cb-phase-` lines back in order.
+      - to: log:cb-phase-start
+
+      # g1 (first half) — viirsReport: one report row per member keyed by
+      # the synthetic member id. Split for the ops cap; init here only.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            // Map init first: nested writes do not create their parents.
+            properties["viirsReport"] = #{};
+            for i in range(0, half) {
+                properties["viirsReport"]["viirs:" + i] = #{ score: (i % 97) * 1.0, band: (i % 7) * 1.0, phase: 0.0 };
+            }
+
+      # g2 (second half) — viirsReport continuation; no map init.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            for i in range(half, n) {
+                properties["viirsReport"]["viirs:" + i] = #{ score: (i % 97) * 1.0, band: (i % 7) * 1.0, phase: 0.0 };
+            }
+
+      # g3 (first half) — graphEdges: the report-to-graph edge table.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            properties["graphEdges"] = #{};
+            for i in range(0, half) {
+                properties["graphEdges"]["graph:" + i] = #{ viirsId: "viirs:" + i, weight: (i % 13) * 1.0 };
+            }
+
+      # g4 (second half) — graphEdges continuation; no map init.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            for i in range(half, n) {
+                properties["graphEdges"]["graph:" + i] = #{ viirsId: "viirs:" + i, weight: (i % 13) * 1.0 };
+            }
+
+      # g5 (first half) — historicIncidents: one prior incident per member.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            properties["historicIncidents"] = #{};
+            for i in range(0, half) {
+                properties["historicIncidents"]["historic:" + i] = #{ viirsId: "viirs:" + i, age: (i % 31) * 1.0 };
+            }
+
+      # g6 (second half) — historicIncidents continuation; no map init.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            for i in range(half, n) {
+                properties["historicIncidents"]["historic:" + i] = #{ viirsId: "viirs:" + i, age: (i % 31) * 1.0 };
+            }
+
+      # g7 (first half) — clusterAssignments + scoreIndex: the
+      # member-to-cluster map and the score index. Both inits here only.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            properties["clusterAssignments"] = #{};
+            properties["scoreIndex"] = #{};
+            for i in range(0, half) {
+                properties["clusterAssignments"]["viirs:" + i] = "cluster:" + i;
+                properties["scoreIndex"]["viirs:" + i] = (i % 97) * 1.0;
+            }
+
+      # g8 (second half) — clusterAssignments + scoreIndex continuation;
+      # no map init.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            for i in range(half, n) {
+                properties["clusterAssignments"]["viirs:" + i] = "cluster:" + i;
+                properties["scoreIndex"]["viirs:" + i] = (i % 97) * 1.0;
+            }
+
+      # g9 — pairScores: the per-member pair score pair (fits the cap
+      # unsplit).
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            properties["pairScores"] = #{};
+            for i in range(0, n) {
+                properties["pairScores"]["viirs:" + i] = #{ a: (i % 17) * 1.0, b: 0.0 };
+            }
+
+      # g10 (first half) — pendingClusters plus the three pre-filled
+      # arrays. The arrays are built locally for this half and assigned
+      # once; the second half extends them in place (a local `let` does
+      # not survive across steps, and a re-init would erase this half).
+      # (n + 127) / 128 is INT division for one chunk of 128 members.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            let chunkCount = (n + 127) / 128;
+            properties["pendingClusters"] = #{};
+            let stable = [];
+            let retired = [];
+            let chunkLog = [];
+            for i in range(0, half) {
+                properties["pendingClusters"]["cluster:" + i] = "viirs:" + i;
+                stable.push("unset");
+                retired.push("unset");
+                if i < chunkCount {
+                    chunkLog.push("unset");
+                }
+            }
+            properties["stableSingletons"] = stable;
+            properties["retiredIds"] = retired;
+            properties["reconcileLog"] = chunkLog;
+
+      # g11 (second half) — pendingClusters continuation and array
+      # extension; no map init.
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let half = n / 2;
+            let chunkCount = (n + 127) / 128;
+            let stable = properties["stableSingletons"];
+            let retired = properties["retiredIds"];
+            let chunkLog = properties["reconcileLog"];
+            for i in range(half, n) {
+                properties["pendingClusters"]["cluster:" + i] = "viirs:" + i;
+                stable.push("unset");
+                retired.push("unset");
+                if i < chunkCount {
+                    chunkLog.push("unset");
+                }
+            }
+            properties["stableSingletons"] = stable;
+            properties["retiredIds"] = retired;
+            properties["reconcileLog"] = chunkLog;
+
+      # g12 — the oracle map kept as JSON TEXT (the customer's own
+      # conversion-avoidance pattern: the reconcile route never parses it)
+      # and the INT scalar controls (fits the cap unsplit).
+      - script:
+          language: rhai
+          source: |
+            let n = if type_of(body) == "String" || type_of(body) == "string" { body.parse_int() } else { body };
+            let oracle = #{};
+            for i in range(0, n) {
+                oracle["viirs:" + i] = "stable:" + i;
+            }
+            properties["oracleMapAsText"] = to_json(oracle);
+            properties["memberCount"] = n;
+            properties["chunkCount"] = (n + 127) / 128;
+            properties["chunkIdx"] = 0;
+            properties["phaseIdx"] = 0;
+
+      # Generator-end marker.
+      - to: log:cb-phase-generator
+
+      # The inner call raises the direct producer timeout: the 30 s default
+      # must not be mistaken for a benchmark result on the 5001 run.
+      - to: "direct:cb-reconcile?timeout_ms=600000"
+
+      # Reconcile-end marker.
+      - to: log:cb-phase-reconcile
+
+      # Oracle phase, part 1 (split for the ops cap; one marker at the end):
+      # the expensive walks. `clusters` is still a seen-set over the
+      # clusterAssignments keys; the count is the set's INT length.
+      - script:
+          language: rhai
+          source: |
+            let members = properties["memberCount"];
+
+            // clusters = distinct values in clusterAssignments (stable
+            // singletons: one distinct cluster per member). A local map is
+            // the seen-set; its len is the INT count.
+            let assignments = properties["clusterAssignments"];
+            let seen = #{};
+            for key in keys(assignments) {
+                seen[assignments[key]] = true;
+            }
+            let clusters = seen.len();
+
+            // retired = entries that actually retired. The deterministic
+            // workload keeps every entry "unset", so this is 0.
+            let retired = 0;
+            for entry in properties["retiredIds"] {
+                if entry != "unset" {
+                    retired += 1;
+                }
+            }
+
+            properties["ocMembers"] = members;
+            properties["ocClusters"] = clusters;
+            properties["ocRetired"] = retired;
+
+      # Oracle phase, part 2: the four completion checks and the reply.
+      # The oracle map is parsed ONCE here — nowhere inside the hot loop.
+      - script:
+          language: rhai
+          source: |
+            let members = properties["ocMembers"];
+            let clusters = properties["ocClusters"];
+            let retired = properties["ocRetired"];
+            let chunkCount = properties["chunkCount"];
+
+            let errors = 0;
+            // (1) every chunk of every phase was reconciled.
+            let logged = 0;
+            for entry in properties["reconcileLog"] {
+                if entry != "unset" {
+                    logged += 1;
+                }
+            }
+            if logged != chunkCount {
+                errors += 1;
+            }
+            // (2) every member was assigned a stable singleton.
+            let singletons = 0;
+            for entry in properties["stableSingletons"] {
+                if entry != "unset" {
+                    singletons += 1;
+                }
+            }
+            if singletons != members {
+                errors += 1;
+            }
+            // (3) all ten phases ran; the counter advances inside the outer
+            // loop, so a stranded route-level step would fail here.
+            if properties["phaseIdx"] != 10 {
+                errors += 1;
+            }
+            // (4) the oracle text round-trips — one parse, outside the loop.
+            let oracle = parse_json(properties["oracleMapAsText"]);
+            if oracle["viirs:0"] != "stable:0" {
+                errors += 1;
+            }
+
+            let reply = #{ members: members, clusters: clusters, retiredIds: retired, errors: errors };
+            body = reply;
+
+      # Oracle-end marker: its rendered `Body:` line is the reply the bench
+      # prints.
+      - to: log:cb-phase-oracle

@@ -1,0 +1,14 @@
+sendDeadline: 600s
+routeFiles:
+  - reconcile-budget-fixture.yaml
+  - reconcile.yaml
+scenario:
+  - send:
+      to: direct:reconcile-budget?timeout_ms=600000
+      body: "5001"
+      expectReply:
+        equals:
+          members: 5001
+          clusters: 5001
+          retiredIds: 0
+          errors: 0

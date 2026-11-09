@@ -1,0 +1,10 @@
+{
+  "kind": "plan",
+  "change": "rhai-reconcile-bench",
+  "verdict": "BLESS",
+  "expert": "experts/e_gpt",
+  "hash": "sha256:3de28d2161ac17dc322487f0e1c3cba0910167f839588c9e29befda18f882583",
+  "rounds": 4,
+  "date": "2026-11-09",
+  "notes": "Supersedes the spec bless (cb4fc05). Plan review: r_glm rounds 1-2 REJECT (boot gate, oracle phase, rhai syntax, ops cap, fresh-scope n, INT controls, diff scope) -> round 3 APPROVE-WITH-FINDINGS (1 cosmetic minor, folded); plan bless rounds 1-3 REJECT (map init, fidelity round-trip, vacuous correctness, historical extraction, split-init erasure, field-dropping, phaseIdx placement) -> round 4 BLESS. Merge holds intact: (1) fixture reconstruction pending conductor ruling, (2) lang-rhai shadow feature pending conductor ruling. tasks.md is deliberately uncommitted per repo convention (.git/info/exclude: orchestrator-owned); its content is hashed into this bless."
+}

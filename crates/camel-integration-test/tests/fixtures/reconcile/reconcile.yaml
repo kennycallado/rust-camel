@@ -1,0 +1,78 @@
+# Reconcile route (rhai-reconcile-bench task 1.1): the hot path. Ten
+# phases, each draining the member set in chunks of 128, so the workload
+# is ~400 rhai evaluations at 5001 members. ONE script step per chunk
+# iteration — the per-member script boundary is deliberately absent; the
+# cost under test is the per-evaluation exchange snapshot plus the
+# validate-all-then-commit write-back of the eleven large properties,
+# not per-member interpreter dispatch.
+#
+# The outer loop's third step advances `phaseIdx`. It must live INSIDE the
+# outer loop (once per phase, reaching 10); a route-level sibling would
+# run once and strand the oracle's completion check.
+routes:
+  - id: cb-reconcile
+    from: direct:cb-reconcile
+    steps:
+      - loop:
+          count: 10
+          steps:
+            # (i) Reset the chunk cursor: every phase starts at chunk 0.
+            - script:
+                language: rhai
+                source: |
+                  properties["chunkIdx"] = 0;
+            # (ii) Drain this phase while the INT cursor is below the INT
+            # chunk count. `max_iterations` is the safety cap, not the
+            # workload size (one chunk per 128 members).
+            - loop:
+                while:
+                  rhai: 'property("chunkIdx") < property("chunkCount")'
+                max_iterations: 64
+                steps:
+                  # The per-iteration reconcile script: control values stay
+                  # INT (range/array indexes are INT-only), payload fields
+                  # stay f64. Writes use index-assignment on the properties
+                  # root — the only committing mutation form for a script
+                  # step — never a local copy, so the full snapshot and
+                  # write-back cost is paid on every iteration.
+                  - script:
+                      language: rhai
+                      source: |
+                        let idx = properties["chunkIdx"];
+                        let n = properties["memberCount"];
+                        let base = idx * 128;
+                        let end = if base + 128 > n { n } else { base + 128 };
+
+                        // Per-member writes on the six per-member
+                        // properties. `"viirs:" + i` renders the INT as
+                        // Display text (`viirs:1234`).
+                        for i in range(base, end) {
+                            properties["viirsReport"]["viirs:" + i]["phase"] += 1.0;
+                            properties["scoreIndex"]["viirs:" + i] += 1.0;
+                            properties["pairScores"]["viirs:" + i]["b"] = properties["pairScores"]["viirs:" + i]["a"];
+                            properties["graphEdges"]["graph:" + i]["weight"] = properties["scoreIndex"]["viirs:" + i];
+                            properties["historicIncidents"]["historic:" + i]["age"] += 1.0;
+                            properties["stableSingletons"][i] = "viirs:" + i;
+                        }
+
+                        // Per-chunk writes on the remaining properties. They
+                        // are same-value writes (or reads plus the same-value
+                        // write-back) on purpose: they still force the whole
+                        // snapshot/write-back pass, while keeping the oracle
+                        // inputs intact — retiredIds must stay all-"unset"
+                        // so the oracle counts 0. The oracle map stays in its
+                        // customer-faithful TEXT form: read as text, written
+                        // back unchanged — no per-iteration parse/serialize.
+                        properties["retiredIds"][base] = "unset";
+                        properties["reconcileLog"][idx] = "chunk:" + idx;
+                        properties["pendingClusters"]["cluster:" + idx] = properties["pendingClusters"]["cluster:" + idx];
+                        properties["clusterAssignments"]["viirs:" + base] = properties["clusterAssignments"]["viirs:" + base];
+                        let oracleText = properties["oracleMapAsText"];
+                        properties["oracleMapAsText"] = oracleText;
+
+                        properties["chunkIdx"] = idx + 1;
+            # (iii) One phase complete: advance the INT phase counter.
+            - script:
+                language: rhai
+                source: |
+                  properties["phaseIdx"] += 1;

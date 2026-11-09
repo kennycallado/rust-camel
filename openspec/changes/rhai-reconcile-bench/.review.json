@@ -1,0 +1,31 @@
+{
+  "kind": "holistic-review",
+  "change": "rhai-reconcile-bench",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "impl_hash": "commit e3660c528 + process commit (proposal deltas) at gate time; tree clean",
+  "date": "2026-11-09",
+  "findings": [
+    {
+      "severity": "important",
+      "finding": "Post-bless conductor-ruled fixture deltas (quoted bodies, coercion shim, sendDeadline, oracle split) recorded in no durable artifact",
+      "disposition": "resolved — proposal.md conductor-gate deviations §3 records all deltas with rationale; AC2 amended with the blocked v0.56 outcome; tasks.md execution record mirrors it; committed before merge"
+    },
+    {
+      "severity": "minor",
+      "finding": "Stale fixture header comments predate the quoted-body delta",
+      "disposition": "resolved — header rewritten in the same amend"
+    },
+    {
+      "severity": "minor",
+      "finding": "Two v0.56 probe conclusions lacked verbatim log sources",
+      "disposition": "resolved — full probe transcripts saved to /home/shared/tmp/rhaiperf-v056-probes.log (conductor-transcribed, marked as such) and cited in the park"
+    },
+    {
+      "severity": "minor",
+      "finding": "proposal AC2 letter vs delivered blocked outcome conflict",
+      "disposition": "resolved — AC2 outcome note added (main measured; v0.56 blocked; unblocking requires conductor-gate hold 1)"
+    }
+  ],
+  "notes": "No code changes required. Product diff: fixtures dir + reconcile_budget_test.rs + one Cargo.toml feature line. Gates on the final tree: passed 28, failed 0, skipped 4. Merge holds (conductor gate): fixture reconstruction vs verbatim originals; lang-rhai shadow feature vs 'no gate changes'. Merge is the master conductor's action."
+}
