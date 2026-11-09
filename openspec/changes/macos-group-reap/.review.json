@@ -1,0 +1,22 @@
+{
+  "kind": "holistic-review",
+  "change": "macos-group-reap",
+  "verdict": "APPROVE",
+  "reviewer": "r_glm",
+  "impl_hash_note": "reviewed full diff merge-base(3d365ad5e)..HEAD at commits fd9695b4b, d34793746, 05fb1b0c7",
+  "findings": [
+    {
+      "severity": "minor-nonblocking",
+      "finding": "describe_survivors renders malformed Some(input) as GONE via ps_rows(...).unwrap_or_default(); invariant enforced by call-site pre-validation (usable_snapshot / Linux /proc synthesis), not structurally in the formatter",
+      "disposition": "accepted — test-only, both call sites validated by construction; if touched again, match ps_rows Err -> unknown-path"
+    }
+  ],
+  "checks": {
+    "scenario_coverage": "5/5 delta scenarios have implementation coverage",
+    "contract_freeze": "Linux region byte-identical to main; ReapMode/reap_slot/Drop untouched; 5s bounds unchanged; no sleeps/retries",
+    "cross_task_drift": "none — signatures compose, dedupe invariant at both layers, empty-snapshot polarity pinned by tests",
+    "docs_surface": "clean — no examples/, CONTEXT*, GLOSSARY, README, or public API changes",
+    "gates": "build workspace 0; test --workspace --lib 0; hexagonal boundaries 33 passed; gates-local passed 28 / failed 0 / skipped 4 (lint-commits lint-bridge-releases doc-guide-test cargo-audit — network/docs-toolchain, sanctioned)"
+  },
+  "residual_risk": "macOS execution gap: flipped zombie_probe_contract assertion and non-Linux fallback wiring execute only in CI Weekly; owner must re-run gh workflow run ci-weekly.yml --ref main after merge. /bin/ps -o pid=,pgid=,stat=,comm= column-order assumption macOS-CI-verified only."
+}

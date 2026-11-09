@@ -1,0 +1,32 @@
+{
+  "kind": "plan",
+  "change": "macos-group-reap",
+  "verdict": "BLESS",
+  "hash": "sha256:51414a18c259185b2959675e02c0804b5f50680d955ac76d9fefdbe3da99c4cc",
+  "expert": "e_gpt",
+  "spec_bless": {
+    "hash": "sha256:93cc788507960f63167dcbbda025cb77f69b3f0abcee6efe3880e8e10a8494d7",
+    "verdict": "BLESS"
+  },
+  "reviewer_loop": [
+    "r_glm round 1: APPROVE-WITH-FINDINGS (1 important group-kill0 wiring, 2 minor) — fixed",
+    "r_glm round 2: APPROVE-WITH-FINDINGS, ready for bless gate (1 wording minor) — fixed"
+  ],
+  "plan_rounds": [
+    {
+      "hash": "sha256:4f62f3f9b52792c21314d54fec89f5879db30d024d1212175c2ded41c9c56058",
+      "verdict": "BLESS-WITH-FIXES",
+      "fixes": [
+        "dedupe rows by pid at formatter + provider layers, regression test",
+        "empty/whitespace ps output fixtures + Linux empty-snapshot coherence note",
+        "exact per-line zombie assertions (4 occurrences)",
+        "correct the Linux compilation claim to an explicit macOS CI verification gap"
+      ]
+    },
+    {
+      "hash": "sha256:51414a18c259185b2959675e02c0804b5f50680d955ac76d9fefdbe3da99c4cc",
+      "verdict": "BLESS",
+      "fixes": []
+    }
+  ]
+}

@@ -811,24 +811,298 @@ mod tests {
         false
     }
 
-    /// Bare `kill(pid, 0)` also answers 0 for zombies. A zombie is a pending
-    /// reap, not a survivor. The Linux counterpart excludes Z/X states via
-    /// /proc. BSD-family kernels detach an exited process from its process
-    /// group at exit, so after group invalidation group-gone does not imply
-    /// reaped: tests must wait (bounded) for the reap itself; see
-    /// [`early_watchdog_death_surfaces`].
+    /// One `ps` snapshot, returned only when the whole buffer parses. `None`
+    /// means no state evidence is available, so callers fall back to the bare
+    /// `kill` probe. When the snapshot is unusable the pre-change bare probe
+    /// answers instead; it never masks a real survivor.
     #[cfg(not(target_os = "linux"))]
-    fn pid_running(pid: u32) -> bool {
-        // SAFETY: signal 0 is an existence probe.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
+    fn usable_snapshot() -> Option<String> {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-A", "-o", "pid=,pgid=,stat=,comm="])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        ps_rows(&text).ok().map(|_| text)
     }
 
-    /// Bare `kill(-pgid, 0)` probe. The group may read empty while
-    /// exited-but-unreaped members exist; do not treat group-gone as reaped.
+    /// A `Z` state is a pending reap, not a survivor: a zombie reads
+    /// not-running even though bare `kill(pid, 0)` answers 0 for it. This is
+    /// parity with the Linux `/proc` filter. When the snapshot is unusable the
+    /// bare probe answers instead, which can only make a test stricter.
+    #[cfg(not(target_os = "linux"))]
+    fn pid_running(pid: u32) -> bool {
+        match usable_snapshot() {
+            None => {
+                // SAFETY: signal 0 is an existence probe.
+                unsafe { libc::kill(pid as i32, 0) == 0 }
+            }
+            Some(text) => ps_rows(&text).is_ok_and(|rows| {
+                rows.iter()
+                    .any(|row| row.pid == pid as i32 && is_alive_state(&row.state))
+            }),
+        }
+    }
+
+    /// `true` exactly when at least one ALIVE member remains: a zombie-only
+    /// group is already dead for reap purposes, matching the Linux polarity.
+    /// When the snapshot is unusable the pre-change bare probe answers instead;
+    /// it never masks a real survivor. Note BSD-family kernels detach an exited
+    /// process from its process group at exit, so the fallback group probe may
+    /// read empty while an unreaped zombie is still pending — the zombie-aware
+    /// snapshot path exists to close exactly that gap.
     #[cfg(not(target_os = "linux"))]
     fn group_running(pgid: i32) -> bool {
-        // SAFETY: signal 0 is an existence probe for the group.
-        unsafe { libc::kill(-pgid, 0) == 0 }
+        match usable_snapshot() {
+            None => {
+                // SAFETY: signal 0 is an existence probe for the group.
+                unsafe { libc::kill(-pgid, 0) == 0 }
+            }
+            Some(text) => !survivors_from_ps(&text, pgid)
+                .unwrap_or_default()
+                .is_empty(),
+        }
+    }
+
+    /// One row of `ps -A -o pid=,pgid=,stat=,comm=`. `state` keeps the raw
+    /// `stat` token verbatim, modifiers included.
+    #[derive(Debug, PartialEq, Eq)]
+    struct PsRow {
+        pid: i32,
+        pgid: i32,
+        state: String,
+        command: String,
+    }
+
+    /// Marker for a snapshot that cannot answer liveness questions.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SnapshotUnusable;
+
+    /// Parses `ps -A -o pid=,pgid=,stat=,comm=` output. A header row, a parse
+    /// failure, or empty output makes the whole snapshot unusable: rows are
+    /// never silently dropped, and empty output means the tool failed rather
+    /// than "no processes".
+    fn ps_rows(output: &str) -> Result<Vec<PsRow>, SnapshotUnusable> {
+        if output.trim().is_empty() {
+            return Err(SnapshotUnusable);
+        }
+        let mut rows = Vec::new();
+        for line in output.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 4 {
+                return Err(SnapshotUnusable);
+            }
+            if matches!(fields[2], "PID" | "PGID" | "STAT" | "COMMAND") {
+                return Err(SnapshotUnusable);
+            }
+            let pid = fields[0].parse::<i32>().map_err(|_| SnapshotUnusable)?;
+            let pgid = fields[1].parse::<i32>().map_err(|_| SnapshotUnusable)?;
+            let state = fields[2].to_string();
+            let command = fields[3..].join(" ");
+            rows.push(PsRow {
+                pid,
+                pgid,
+                state,
+                command,
+            });
+        }
+        Ok(rows)
+    }
+
+    /// First letter of the `stat` token decides liveness. `Z` (zombie) and `X`
+    /// (dead) are pending reaps, not survivors; modifiers are ignored.
+    fn is_alive_state(state: &str) -> bool {
+        match state.trim().chars().next() {
+            None | Some('Z') | Some('X') => false,
+            Some(_) => true,
+        }
+    }
+
+    /// Live members of `pgid` from a `ps` snapshot.
+    fn survivors_from_ps(output: &str, pgid: i32) -> Result<Vec<PsRow>, SnapshotUnusable> {
+        Ok(ps_rows(output)?
+            .into_iter()
+            .filter(|row| row.pgid == pgid && is_alive_state(&row.state))
+            .collect())
+    }
+
+    /// Renders a diagnosis of probed pids and the group. `kill0` is the
+    /// injected existence probe; the group probe is the same closure called
+    /// with the negated pgid. A `None` snapshot renders `unknown`; `Some("")`
+    /// is evidence of absence and renders `GONE`.
+    fn describe_survivors(
+        output: Option<&str>,
+        kill0: impl Fn(i32) -> bool,
+        pids: &[i32],
+        pgid: i32,
+    ) -> String {
+        let answer = |pid: i32| if kill0(pid) { "yes" } else { "no" };
+        let mut lines = Vec::new();
+
+        let Some(output) = output else {
+            lines.push(String::from("ps unavailable; classification unknown"));
+            for &pid in pids {
+                lines.push(format!("pid {pid} kill0 {} => unknown", answer(pid)));
+            }
+            lines.push(format!(
+                "pgid {pgid} kill0 {} alive-members unknown",
+                answer(-pgid)
+            ));
+            return lines.join("\n");
+        };
+
+        // `Some` is pre-validated at the call site; the empty snapshot is the
+        // deliberate evidence-of-absence case and parses as zero rows.
+        let rows = ps_rows(output).unwrap_or_default();
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<PsRow> = rows
+            .into_iter()
+            .filter(|row| seen.insert(row.pid))
+            .collect();
+
+        for &pid in pids {
+            match unique.iter().find(|row| row.pid == pid) {
+                Some(row) => {
+                    let verdict = if is_alive_state(&row.state) {
+                        "ALIVE"
+                    } else {
+                        "ZOMBIE"
+                    };
+                    lines.push(format!(
+                        "pid {pid} cmd {} state {} kill0 {} => {verdict}",
+                        row.command,
+                        row.state,
+                        answer(pid)
+                    ));
+                }
+                None => lines.push(format!(
+                    "pid {pid} cmd n/a state absent kill0 {} => GONE",
+                    answer(pid)
+                )),
+            }
+        }
+
+        let members: Vec<&PsRow> = unique.iter().filter(|row| row.pgid == pgid).collect();
+        let alive = members
+            .iter()
+            .filter(|row| is_alive_state(&row.state))
+            .count();
+        lines.push(format!(
+            "pgid {pgid} kill0 {} alive-members {alive}",
+            answer(-pgid)
+        ));
+        for row in members {
+            let verdict = if is_alive_state(&row.state) {
+                "ALIVE"
+            } else {
+                "ZOMBIE"
+            };
+            lines.push(format!(
+                "  member pid {} state {} => {verdict}",
+                row.pid, row.state
+            ));
+        }
+        lines.join("\n")
+    }
+
+    /// Snapshot text for a failure diagnosis. Other platforms reuse the `ps`
+    /// provider; Linux synthesizes the same four-field row format from `/proc`
+    /// so no shell is involved.
+    #[cfg(not(target_os = "linux"))]
+    fn snapshot_text(_pids: &[i32], _pgid: i32) -> Option<String> {
+        usable_snapshot()
+    }
+
+    /// Builds `"{pid} {pgrp} {state} {comm}"` rows from `/proc`: one per
+    /// requested pid that still exists, plus one per alive-or-zombie member of
+    /// `pgid`. A reaped pid contributes no row, which the formatter renders as
+    /// `GONE`. Each pid is emitted at most once; `None` means `/proc` is
+    /// unreadable.
+    #[cfg(target_os = "linux")]
+    fn snapshot_text(pids: &[i32], pgid: i32) -> Option<String> {
+        let contents = |pid: i32| {
+            std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .map(|comm| comm.trim().to_string())
+                .ok()
+                .filter(|comm| !comm.is_empty())
+                .unwrap_or_else(|| String::from("n/a"))
+        };
+        let mut rows = Vec::new();
+        let mut emitted = std::collections::HashSet::new();
+
+        for &pid in pids {
+            let Some(state) = process_state(pid as u32) else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some((_, rest)) = stat.rsplit_once(')') else {
+                continue;
+            };
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            if fields.len() < 3 {
+                continue;
+            }
+            let Ok(pgrp) = fields[2].parse::<i32>() else {
+                continue;
+            };
+            if emitted.insert(pid) {
+                rows.push(format!("{pid} {pgrp} {state} {}", contents(pid)));
+            }
+        }
+
+        for entry in std::fs::read_dir("/proc").ok()?.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some((_, rest)) = stat.rsplit_once(')') else {
+                continue;
+            };
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            if fields.len() < 3 {
+                continue;
+            }
+            let state = fields[0].chars().next();
+            let Ok(pgrp) = fields[2].parse::<i32>() else {
+                continue;
+            };
+            if pgrp != pgid || matches!(state, None | Some('X')) {
+                continue;
+            }
+            if emitted.insert(pid) {
+                let state = state.unwrap_or('?');
+                rows.push(format!("{pid} {pgrp} {state} {}", contents(pid)));
+            }
+        }
+
+        Some(rows.join("\n"))
+    }
+
+    /// Lazy failure-message diagnostics: one `kill(pid, 0)` probe shared by the
+    /// per-pid rows and the group line (`kill0(-pgid)`).
+    fn survivor_diagnostics(pids: &[i32], pgid: i32) -> String {
+        // SAFETY: signal 0 is an existence probe.
+        let kill0 = |pid: i32| unsafe { libc::kill(pid, 0) == 0 };
+        describe_survivors(snapshot_text(pids, pgid).as_deref(), kill0, pids, pgid)
     }
 
     #[test]
@@ -905,11 +1179,13 @@ mod tests {
 
         drop(guard);
 
+        let converged = wait_until(Duration::from_secs(5), || {
+            !group_running(pgid) && !pid_running(bridge_pid)
+        });
         assert!(
-            wait_until(Duration::from_secs(5), || {
-                !group_running(pgid) && !pid_running(bridge_pid)
-            }),
-            "{program} watchdog left a survivor after drop (pgid {pgid}, bridge {bridge_pid})"
+            converged,
+            "{program} watchdog left a survivor after drop (pgid {pgid}, bridge {bridge_pid}): {}",
+            survivor_diagnostics(&[bridge_pid as i32], pgid)
         );
     }
 
@@ -922,11 +1198,13 @@ mod tests {
 
         drop(guard);
 
+        let converged = wait_until(Duration::from_secs(5), || {
+            !group_running(pgid) && !pid_running(bridge_pid)
+        });
         assert!(
-            wait_until(Duration::from_secs(5), || {
-                !group_running(pgid) && !pid_running(bridge_pid)
-            }),
-            "group {pgid} or bridge {bridge_pid} still running after drop"
+            converged,
+            "group {pgid} or bridge {bridge_pid} still running after drop: {}",
+            survivor_diagnostics(&[bridge_pid as i32], pgid)
         );
     }
 
@@ -985,11 +1263,13 @@ mod tests {
         // SAFETY: direct watchdog kill simulates early watchdog death.
         assert_eq!(unsafe { libc::kill(watchdog_pid as i32, libc::SIGKILL) }, 0);
 
+        let converged = wait_until(Duration::from_secs(5), || {
+            guard.group_pgid().is_none() && !group_running(pgid) && !pid_running(bridge_pid)
+        });
         assert!(
-            wait_until(Duration::from_secs(5), || {
-                guard.group_pgid().is_none() && !group_running(pgid) && !pid_running(bridge_pid)
-            }),
-            "early watchdog death left group {pgid} or bridge {bridge_pid} uncleaned within 5s"
+            converged,
+            "early watchdog death left group {pgid} or bridge {bridge_pid} uncleaned within 5s: {}",
+            survivor_diagnostics(&[bridge_pid as i32], pgid)
         );
     }
 
@@ -1072,11 +1352,13 @@ mod tests {
         // outcome: no survivors.
         drop(guard);
 
+        let converged = wait_until(Duration::from_secs(5), || {
+            !group_running(pgid) && !pid_running(bridge_pid) && !pid_running(watchdog_pid)
+        });
         assert!(
-            wait_until(Duration::from_secs(5), || {
-                !group_running(pgid) && !pid_running(bridge_pid) && !pid_running(watchdog_pid)
-            }),
-            "survivors after drop: bridge {bridge_pid}, watchdog {watchdog_pid}, pgid {pgid}"
+            converged,
+            "survivors after drop: bridge {bridge_pid}, watchdog {watchdog_pid}, pgid {pgid}: {}",
+            survivor_diagnostics(&[bridge_pid as i32, watchdog_pid as i32], pgid)
         );
     }
 
@@ -1117,8 +1399,9 @@ mod tests {
     /// unreaped zombie, then proves that reaping clears it on every platform.
     ///
     /// Linux answers via `/proc/<pid>/stat` (a zombie is a pending reap, not a
-    /// survivor). BSD-family kernels answer via bare `kill(pid, 0)`, which
-    /// returns 0 for a zombie: that is the trap this test pins.
+    /// survivor). The macOS helper answers via `/bin/ps` state, so a zombie
+    /// reads not-running there too; the Linux branch and the reap invariant
+    /// are unchanged.
     #[test]
     fn zombie_probe_contract() {
         // NOTE: if an assertion below fires, the fixture child stays an
@@ -1178,8 +1461,8 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         assert!(
-            pid_running(pid),
-            "bare probe answers 0 for a zombie; tests must wait for the reap"
+            !pid_running(pid),
+            "macos helper must treat a zombie as a pending reap, not a survivor"
         );
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1230,5 +1513,157 @@ mod tests {
             "monitor left an unreaped child after early watchdog death (permanent zombie): \
              bridge {bridge_pid}, watchdog {watchdog_pid}, pgid {pgid}"
         );
+    }
+
+    #[test]
+    fn is_alive_state_classifies_state_letters() {
+        for state in ["R", "S", "I", "T", "U", "S+", "SN"] {
+            assert!(is_alive_state(state), "{state} must classify as alive");
+        }
+        for state in ["Z", "X", ""] {
+            assert!(
+                !is_alive_state(state),
+                "{state:?} must classify as not alive"
+            );
+        }
+    }
+
+    #[test]
+    fn ps_rows_parses_usable_fixture() {
+        let fixture = "  23307 23307 Z sh\n  23309 23307 Z sleep\n 1000  1000 S  login\n\n";
+        let rows = ps_rows(fixture).expect("usable fixture");
+        assert_eq!(rows.len(), 3, "every non-blank line must produce a row");
+        let row = rows
+            .iter()
+            .find(|row| row.pid == 23309)
+            .expect("row for pid 23309");
+        assert_eq!(row.command, "sleep");
+        assert_eq!(row.pgid, 23307);
+        assert_eq!(row.state, "Z");
+    }
+
+    #[test]
+    fn ps_rows_rejects_unusable_snapshots() {
+        for fixture in [
+            "",
+            "   \n  ",
+            "PID PGID STAT COMMAND\n1 1 S sh",
+            "not-a-pid 23307 Z sh",
+            "  23307 23307\n",
+        ] {
+            assert_eq!(
+                ps_rows(fixture),
+                Err(SnapshotUnusable),
+                "fixture {fixture:?} must be unusable"
+            );
+        }
+    }
+
+    #[test]
+    fn survivors_from_ps_filters_alive_members_of_group() {
+        let fixture = "23307 23307 Z sh\n23309 23307 S+ sleep\n500  500   R  top\n";
+        let survivors = survivors_from_ps(fixture, 23307).expect("usable fixture");
+        assert_eq!(survivors.len(), 1, "only the live group member survives");
+        assert_eq!(survivors[0].pid, 23309);
+        assert_eq!(survivors[0].state, "S+");
+
+        let none = survivors_from_ps("23307 23307 Z sh\n23309 23307 Z sleep\n", 23307)
+            .expect("usable fixture");
+        assert_eq!(none, Vec::new());
+    }
+
+    #[test]
+    fn survivors_from_ps_reproduces_ci_weekly_survivor_line() {
+        // CI Weekly run 42565698846: bridge 23309, watchdog 23307, pgid 23307,
+        // every member a zombie.
+        let fixture = "23307 23307 Z sh\n23309 23307 Z sleep\n";
+        let survivors = survivors_from_ps(fixture, 23307).expect("usable fixture");
+        assert_eq!(survivors, Vec::new());
+    }
+
+    #[test]
+    fn describe_survivors_renders_zombie_verdict_for_failed_run() {
+        let fixture = "23307 23307 Z sh\n23309 23307 Z sleep\n";
+        let report = describe_survivors(Some(fixture), |_| true, &[23309, 23307], 23307);
+
+        assert_eq!(
+            report.matches("=> ZOMBIE").count(),
+            4,
+            "two pid lines and two member lines must be zombies: {report}"
+        );
+        assert!(
+            report.contains("pid 23309 cmd sleep state Z kill0 yes => ZOMBIE"),
+            "{report}"
+        );
+        assert!(
+            report.contains("pid 23307 cmd sh state Z kill0 yes => ZOMBIE"),
+            "{report}"
+        );
+        assert!(
+            report.contains("member pid 23309 state Z => ZOMBIE"),
+            "{report}"
+        );
+        assert!(
+            report.contains("member pid 23307 state Z => ZOMBIE"),
+            "{report}"
+        );
+        assert!(
+            report.contains("pgid 23307 kill0 yes alive-members 0"),
+            "{report}"
+        );
+        assert!(!report.contains("GONE"), "{report}");
+    }
+
+    #[test]
+    fn describe_survivors_dedupes_rows_by_pid() {
+        let fixture = "23309 23307 S+ sleep\n23309 23307 S+ sleep\n23307 23307 Z sh\n";
+        let report = describe_survivors(Some(fixture), |_| true, &[23309], 23307);
+
+        assert_eq!(
+            report.matches("member pid 23309").count(),
+            1,
+            "duplicate rows must collapse to one member line: {report}"
+        );
+        assert!(
+            report.contains("pgid 23307 kill0 yes alive-members 1"),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn describe_survivors_renders_gone_for_empty_snapshot() {
+        let report = describe_survivors(Some(""), |_| false, &[23309], 23307);
+
+        assert!(report.contains("pid 23309"), "{report}");
+        assert!(report.contains("state absent"), "{report}");
+        assert!(report.contains("=> GONE"), "{report}");
+        assert!(
+            report.contains("pgid 23307 kill0 no alive-members 0"),
+            "{report}"
+        );
+        assert!(!report.contains("ps unavailable"), "{report}");
+        assert!(!report.contains("unknown"), "{report}");
+    }
+
+    #[test]
+    fn describe_survivors_renders_unknown_without_snapshot() {
+        let report = describe_survivors(None, |_| true, &[23309, 23307], 23307);
+
+        assert!(report.contains("ps unavailable"), "{report}");
+        assert_eq!(report.matches("=> unknown").count(), 2, "{report}");
+        assert!(report.contains("alive-members unknown"), "{report}");
+        assert!(!report.contains("GONE"), "{report}");
+        assert!(!report.contains("absent"), "{report}");
+    }
+
+    #[test]
+    fn describe_survivors_renders_gone_for_reaped_pid() {
+        let fixture = "23307 23307 Z sh\n";
+        let report = describe_survivors(Some(fixture), |pid| pid != 999, &[999], 23307);
+
+        assert!(report.contains("pid 999"), "{report}");
+        assert!(report.contains("state absent"), "{report}");
+        assert!(report.contains("=> GONE"), "{report}");
+        assert!(report.contains("kill0 no"), "{report}");
     }
 }
