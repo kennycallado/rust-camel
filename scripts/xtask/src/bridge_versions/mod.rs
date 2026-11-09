@@ -2,11 +2,13 @@
 
 pub mod bump;
 pub mod registry;
+pub mod releases;
 pub mod scan;
 
 use std::path::{Path, PathBuf};
 
 use registry::{Bridge, Registry};
+use releases::{ReleaseFinding, ReleasePass};
 
 /// One bridge-version lint finding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,10 +39,57 @@ fn remedy_for(relative_path: &str) -> &'static str {
 pub struct LintOutcome {
     pub findings: Vec<Finding>,
     pub tag_error: Option<String>,
+    pub release_findings: Vec<ReleaseFinding>,
+    pub release_passed: Vec<ReleasePass>,
+}
+
+impl LintOutcome {
+    /// Whether any offline or release check failed.
+    pub fn failed(&self) -> bool {
+        self.tag_error.is_some() || !self.findings.is_empty() || !self.release_findings.is_empty()
+    }
+
+    /// Human-readable lines, in offline findings, release passes, release
+    /// findings order.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for finding in &self.findings {
+            // The diagnostic token is not secret material; bind it outside the
+            // macro under the existing `lexeme` name so `lint-secrets` does not
+            // flag the keyword as a format argument.
+            let lexeme = &finding.token;
+            lines.push(format!(
+                "{}:{}: {} [{}]",
+                finding.path.display(),
+                finding.line,
+                finding.detail,
+                lexeme
+            ));
+        }
+        for pass in &self.release_passed {
+            lines.push(format!("release OK: {} ({} assets)", pass.tag, pass.assets));
+        }
+        for finding in &self.release_findings {
+            lines.push(format!(
+                "release finding: {} {}: {}",
+                finding.tag, finding.url, finding.detail
+            ));
+        }
+        lines
+    }
 }
 
 /// Run registry, constant, live-set, and optional tag checks.
 pub fn lint(root: &Path, tag: Option<&str>) -> Result<LintOutcome, String> {
+    lint_with(root, tag, false)
+}
+
+/// Run the offline lint plus optional published-release checks.
+pub fn lint_with(
+    root: &Path,
+    tag: Option<&str>,
+    check_releases: bool,
+) -> Result<LintOutcome, String> {
     if let Some(tag) = tag {
         let (bridge, version) = match parse_tag(tag) {
             Ok(parsed) => parsed,
@@ -48,6 +97,8 @@ pub fn lint(root: &Path, tag: Option<&str>) -> Result<LintOutcome, String> {
                 return Ok(LintOutcome {
                     findings: Vec::new(),
                     tag_error: Some(message),
+                    release_findings: Vec::new(),
+                    release_passed: Vec::new(),
                 });
             }
         };
@@ -58,6 +109,8 @@ pub fn lint(root: &Path, tag: Option<&str>) -> Result<LintOutcome, String> {
                 return Ok(LintOutcome {
                     findings,
                     tag_error: None,
+                    release_findings: Vec::new(),
+                    release_passed: Vec::new(),
                 });
             }
         };
@@ -71,10 +124,12 @@ pub fn lint(root: &Path, tag: Option<&str>) -> Result<LintOutcome, String> {
                     bridge.key(),
                     bridge.key(),
                 )),
+                release_findings: Vec::new(),
+                release_passed: Vec::new(),
             });
         }
 
-        return collect_findings(root, &registry);
+        return collect_findings(root, &registry, check_releases);
     }
 
     let registry = match registry::parse_registry(&root.join("bridges/versions.toml")) {
@@ -83,19 +138,32 @@ pub fn lint(root: &Path, tag: Option<&str>) -> Result<LintOutcome, String> {
             return Ok(LintOutcome {
                 findings,
                 tag_error: None,
+                release_findings: Vec::new(),
+                release_passed: Vec::new(),
             });
         }
     };
 
-    collect_findings(root, &registry)
+    collect_findings(root, &registry, check_releases)
 }
 
-fn collect_findings(root: &Path, registry: &Registry) -> Result<LintOutcome, String> {
+fn collect_findings(
+    root: &Path,
+    registry: &Registry,
+    check_releases: bool,
+) -> Result<LintOutcome, String> {
     let mut findings = lint_registry_constants(root, registry)?;
     findings.extend(scan::scan_live_set(root)?.findings);
+    let (release_passed, release_findings) = if check_releases {
+        releases::check_releases(registry)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(LintOutcome {
         findings,
         tag_error: None,
+        release_findings,
+        release_passed,
     })
 }
 
@@ -400,5 +468,86 @@ mod tests {
         assert!(outcome.tag_error.is_none(), "{:?}", outcome.tag_error);
         assert_eq!(outcome.findings.len(), 1);
         assert_eq!(outcome.findings[0].token, "0.8.4");
+    }
+
+    #[test]
+    fn lint_without_flag_has_empty_release_results() {
+        let dir = lint_fixture();
+        write_registry(dir.path(), "0.8.4", "0.8.4", "0.8.1");
+        four_matching_constants(dir.path());
+
+        let outcome = lint_with(dir.path(), None, false).expect("lint succeeds");
+
+        assert!(outcome.release_findings.is_empty());
+        assert!(outcome.release_passed.is_empty());
+        assert!(outcome.findings.is_empty());
+        assert!(!outcome.failed());
+    }
+
+    #[test]
+    fn outcome_lines_are_empty_when_clean() {
+        let outcome = LintOutcome {
+            findings: Vec::new(),
+            tag_error: None,
+            release_findings: Vec::new(),
+            release_passed: Vec::new(),
+        };
+
+        assert_eq!(outcome.lines(), Vec::<String>::new());
+        assert!(!outcome.failed());
+    }
+
+    #[test]
+    fn outcome_fails_on_release_finding_only() {
+        let outcome = LintOutcome {
+            findings: Vec::new(),
+            tag_error: None,
+            release_findings: vec![ReleaseFinding {
+                tag: "jms-bridge-v0.9.1".to_string(),
+                url: "https://api.github.com/repos/kennycallado/rust-camel/releases/tags/jms-bridge-v0.9.1".to_string(),
+                detail: "release jms-bridge-v0.9.1 not found - publish the release or fix bridges/versions.toml".to_string(),
+            }],
+            release_passed: Vec::new(),
+        };
+
+        assert!(outcome.failed());
+        assert!(
+            outcome
+                .lines()
+                .iter()
+                .any(|line| line.starts_with("release finding: "))
+        );
+    }
+
+    #[test]
+    fn outcome_reports_release_pass_alongside_offline_drift() {
+        let outcome = LintOutcome {
+            findings: vec![Finding {
+                path: PathBuf::from("crates/components/camel-jms/src/lib.rs"),
+                line: 3,
+                token: "0.9.1".to_string(),
+                detail: "bridge version mismatch: fixture drift".to_string(),
+            }],
+            tag_error: None,
+            release_findings: Vec::new(),
+            release_passed: vec![ReleasePass {
+                tag: "jms-bridge-v0.8.8".to_string(),
+                assets: 4,
+            }],
+        };
+
+        let lines = outcome.lines();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "release OK: jms-bridge-v0.8.8 (4 assets)")
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("bridge version mismatch: fixture drift"))
+        );
+        assert!(outcome.failed());
     }
 }

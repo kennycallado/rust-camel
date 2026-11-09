@@ -26,7 +26,8 @@ AGENTS="$ROOT/AGENTS.md"
 #   doc-guide-test      -> needs mdbook + docs toolchain
 #   cargo-audit         -> advisory DB download
 #   audit               -> cargo-audit wrapper, same DB
-SKIP="${GATES_SKIP-lint-commits doc-guide-test cargo-audit audit}"
+#   lint-bridge-releases -> GitHub release API (published tag and assets)
+SKIP="${GATES_SKIP-lint-commits doc-guide-test cargo-audit audit lint-bridge-releases}"
 ONLY="${GATES_ONLY:-}"
 
 [[ -f "$AGENTS" ]] || { echo "gates-local: no AGENTS.md at $AGENTS" >&2; exit 2; }

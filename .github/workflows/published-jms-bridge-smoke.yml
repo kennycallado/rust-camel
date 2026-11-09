@@ -1,0 +1,194 @@
+# Published JMS Bridge Smoke — release verification, NOT a PR gate.
+#
+# Why this exists: every CI job builds the JMS bridge locally and tests that
+# binary. None of them downloads what users actually get from the GitHub
+# Release. That gap is a real failure class: "works in our build, fails in what
+# users download", usually from release build flags (GraalVM version,
+# native-image options, packaging).
+#
+# Trigger wiring: chained after the "JMS Bridge Release" workflow
+# (.github/workflows/jms-bridge-release.yml, tag `jms-bridge-v*`), which creates
+# the GitHub Release with the tarballs. That workflow does not expose the tag on
+# `github.event.release`, so this job resolves it from `workflow_run.head_branch`
+# and falls back to the newest `jms-bridge-v*` release. `workflow_dispatch`
+# allows re-running the verification without cutting a new release (pass
+# `bridge_version`, with or without the `jms-bridge-v` prefix).
+#
+# Even when a dispatch overrides the downloaded version, the job independently
+# requires the tag derived from `bridges/versions.toml` to exist, so a dispatch
+# cannot hide an unreleased registry version.
+#
+# Download URL shape:
+#   https://github.com/kennycallado/rust-camel/releases/download/jms-bridge-v<VER>/jms-bridge-<VER>-linux-musl-x86_64.tar.gz
+#
+# How to read a failure:
+#   - Download/checksum failure: the release is incomplete or corrupted.
+#   - Consumer test failure: the PUBLISHED artifact regressed. Check the release
+#     build flags (GraalVM/native-image config, packaging), not the source code —
+#     locally built binaries still pass these tests in CI.
+#   - Registry assert failure: `bridges/versions.toml` names a version whose
+#     release does not exist yet; publish it or fix the registry.
+#
+# The CXF smoke (.github/workflows/published-bridge-smoke.yml) is intentionally
+# separate and unchanged; the two release streams must not share triggers.
+
+name: Published JMS Bridge Smoke
+
+on:
+  workflow_run:
+    workflows: ["JMS Bridge Release"]
+    types: [completed]
+    branches:
+      - 'jms-bridge-v*'
+  workflow_dispatch:
+    inputs:
+      bridge_version:
+        description: 'Bridge version (e.g. 0.8.8 or jms-bridge-v0.8.8). Empty = newest jms-bridge release.'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: published-jms-bridge-smoke-${{ github.event.inputs.bridge_version || github.event.workflow_run.head_branch || 'latest' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # Same disk mitigation as ci.yml full-tests-linux.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  smoke:
+    name: Published JMS binary smoke (linux-musl-x86_64)
+    # Only smoke successful releases; manual dispatch is always allowed.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Job-level only: every `gh` step inherits both.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The consumer test starts the bridge as a child process; keep the JDK in
+      # the environment to match the toolchain used to build the bridge.
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+
+      # jms_test compiles bindgen-dependent workspace crates; same install as
+      # the full-tests-linux job in ci.yml.
+      - name: Install libclang for bindgen
+        run: sudo apt-get install -y libclang-dev
+
+      - name: Resolve download version
+        id: version
+        shell: bash
+        env:
+          BRIDGE_VERSION_INPUT: ${{ github.event.inputs.bridge_version }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          version="${BRIDGE_VERSION_INPUT:-}"
+          if [[ -z "$version" && "$EVENT_NAME" == "workflow_run" ]]; then
+            version="${WORKFLOW_RUN_BRANCH:-}"
+          fi
+          if [[ -z "$version" ]]; then
+            version="$(gh api "repos/${REPO}/releases" --paginate \
+              --jq '.[].tag_name' | grep -E '^jms-bridge-v[0-9]' | head -n1 || true)"
+          fi
+          version="${version#jms-bridge-v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Could not resolve a jms-bridge version (got '$version')"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved bridge version: $version"
+
+      # Independent of the resolved download version: the registry is the source
+      # of truth, so an older dispatch override cannot hide an unreleased bump.
+      - name: Assert registry tag is published
+        shell: bash
+        run: |
+          set -euo pipefail
+          registry_version="$(awk -F'"' '$1 ~ /^jms[[:space:]]*=/ {print $2; exit}' bridges/versions.toml)"
+          test -n "$registry_version"
+          registry_tag="jms-bridge-v${registry_version}"
+          if ! gh release view "$registry_tag" --repo "$REPO" >/dev/null; then
+            echo "::error::bridges/versions.toml declares ${registry_tag} but that release does not exist"
+            exit 1
+          fi
+
+      - name: Download and verify published linux-musl artifact
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          asset="jms-bridge-${VERSION}-linux-musl-x86_64.tar.gz"
+          tag="jms-bridge-v${VERSION}"
+          mkdir -p published
+          gh release download "$tag" --pattern "$asset" --dir published
+          gh release download "$tag" --pattern "jms-bridge-${VERSION}-SHA256SUMS" --dir published
+          cd published
+          grep " ${asset}$" "jms-bridge-${VERSION}-SHA256SUMS" | sha256sum -c -
+          tar -xzf "$asset"
+          test -x "jms-bridge-${VERSION}-linux-musl-x86_64/bin/jms-bridge"
+          echo "CAMEL_JMS_BRIDGE_BINARY_PATH=$PWD/jms-bridge-${VERSION}-linux-musl-x86_64/bin/jms-bridge" >> "$GITHUB_ENV"
+
+      - name: Run JMS consumer test against the published binary
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          echo "bridge: $CAMEL_JMS_BRIDGE_BINARY_PATH"; ls -l "$CAMEL_JMS_BRIDGE_BINARY_PATH"
+          log="$RUNNER_TEMP/jms-smoke.log"
+          # Create the log before tail starts; tail --pid needs the file.
+          : > "$log"
+          # NEVER pipe cargo output here. Spawned jms-bridge children inherit
+          # stderr and outlive the test process, so a pipe stays open after the
+          # tests finish and the step hangs forever. Redirect to a file and
+          # stream it with tail; no pipe, no hang. setsid puts the whole test in
+          # one process group so the deadline can kill all of it.
+          # shellcheck disable=SC2016 # $1 is expanded by the inner bash, not this shell.
+          setsid bash -c 'cargo test -p camel-test --features integration-tests --test jms_test \
+              -- jms_consumer_receives_from_activemq --nocapture --test-threads=1 > "$1" 2>&1' _ "$log" &
+          pid=$!
+          tail -n +1 --pid="$pid" -f "$log" &
+          tailpid=$!
+          deadline=$((SECONDS + 4800))
+          while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 5; done
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "::error::test phase exceeded 4800s; killing the process group"
+            kill -TERM -- "-$pid" 2>/dev/null || true; sleep 5; kill -KILL -- "-$pid" 2>/dev/null || true
+            status=124
+          else
+            # Capture a failed wait without aborting: diagnostics must still run.
+            if wait "$pid"; then status=0; else status=$?; fi
+          fi
+          kill "$tailpid" 2>/dev/null || true
+          if [ "$status" -ne 0 ]; then
+            # shellcheck disable=SC2009 # pgrep cannot show the full command line here.
+            ps -eo pid,etime,args | grep -i '[j]ms-bridge' || true
+          fi
+          # A zero-test filter or a rename must fail loudly, not pass vacuously.
+          grep -q 'jms_consumer_receives_from_activemq' "$log" || { echo "::error::test did not run"; exit 1; }
+          exit "$status"
+
+      - name: Kill leftover bridge processes
+        if: always()
+        run: pkill -f 'jms-bridge' || true

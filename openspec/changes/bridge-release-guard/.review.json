@@ -1,0 +1,25 @@
+{
+  "verdict": "APPROVE",
+  "initial_verdict": "APPROVE-WITH-FINDINGS",
+  "closure_reviewed_head": "7478a8f5d",
+  "reviewer": "reviewers/r_glm",
+  "review_session": "ses_e403c9180ffedLppl9fDdp7MK3",
+  "base": "14fd50e8a9bca5feb4ec5a0c37da3103af6f8735",
+  "reviewed_head": "a3532302b27c0b5e1afac0524f74f2b5780dc502",
+  "impl_hash": "69a41f47a9690cb81d54472910859002b2be45982bc4d5c0f94d045479388c6d",
+  "impl_hash_command": "git diff 14fd50e8a..a3532302 -- .github/workflows/ci.yml .github/workflows/published-jms-bridge-smoke.yml .opencode/prompts/bump-bridge.md AGENTS.md scripts/gates-local.sh scripts/xtask/src/bridge_versions/mod.rs scripts/xtask/src/bridge_versions/releases.rs scripts/xtask/src/main.rs | sha256sum",
+  "findings": [
+    {"severity": "important", "finding": "Durable review record missing", "resolution": "This tracked record records the holistic verdict before park; no archive or merge performed."},
+    {"severity": "minor", "finding": "Mission commit lacks Bd linkage", "resolution": "Closing commit uses mission subject and Bd: rc-bxjzq, rc-o60f5, rc-mjvub."},
+    {"severity": "minor", "finding": "Actionlint exit code absent from consolidated evidence", "resolution": "Final actionlint run exit 0; /tmp/bridgereleaseguard-actionlint-final.rc and .log capture evidence."}
+  ],
+  "verification": {
+    "local_sweep": {"exit": 0, "passed": 28, "failed": 0, "skipped": ["lint-commits", "lint-bridge-releases", "doc-guide-test", "cargo-audit"]},
+    "workspace_library_tests": {"passed": 13123, "ignored": 2},
+    "xtask_library_tests": {"passed": 103},
+    "hexagonal_boundary_tests": {"passed": 33},
+    "actionlint": {"exit": 0},
+    "cargo_audit": {"exit": 1, "status": "pre-existing-failure-exemption", "issue": "rc-kdmdq", "advisory": "RUSTSEC-2026-0459", "dependency": "libsqlite3-sys 0.30.1", "proof": "Same failure reproduced from main's identical Cargo.lock; no dependency files changed."},
+    "integration_verification": "integration-verification-deferred-to-CI"
+  }
+}

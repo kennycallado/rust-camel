@@ -1,30 +1,49 @@
 ### Bridge version bump prompt
 
-Bump the version of one or more Java bridges (`cxf`, `jms`, `xml`). Each bridge is
-versioned and released **independently** via tag `{bridge}-bridge-vX.Y.Z`, which triggers
-`.github/workflows/{bridge}-bridge-release.yml` (native binary build → GitHub Release).
+`bridges/versions.toml` is the single version source for the `cxf`, `jms`, and
+`xml` bridges. The tag `{bridge}-bridge-vX.Y.Z` is the release trigger for
+`.github/workflows/{bridge}-bridge-release.yml`, which builds the native binaries
+and publishes the GitHub Release.
 
-**Bridge → files to bump:**
+**Bridge → registry and constants:**
 
-| Bridge | gradle default version | `BRIDGE_VERSION` const(s) | Tag |
-|--------|------------------------|---------------------------|-----|
-| `cxf`  | `bridges/cxf/build.gradle.kts:7` | `crates/components/camel-cxf/src/lib.rs:32` | `cxf-bridge-vX.Y.Z` |
-| `jms`  | `bridges/jms/build.gradle.kts:7` | `crates/components/camel-jms/src/lib.rs:38` | `jms-bridge-vX.Y.Z` |
-| `xml`  | `bridges/xml/build.gradle.kts:7` | `crates/components/camel-validator/src/lib.rs:20` **and** `crates/components/camel-xslt/src/lib.rs:20` | `xml-bridge-vX.Y.Z` |
+| Bridge | Registry key | `BRIDGE_VERSION` const(s) | Tag |
+|--------|--------------|---------------------------|-----|
+| `cxf`  | `cxf` | `crates/components/camel-cxf/src/lib.rs` | `cxf-bridge-vX.Y.Z` |
+| `jms`  | `jms` | `crates/components/camel-jms/src/lib.rs` | `jms-bridge-vX.Y.Z` |
+| `xml`  | `xml` | `crates/components/camel-validator/src/lib.rs` **and** `crates/components/camel-xslt/src/lib.rs` | `xml-bridge-vX.Y.Z` |
 
-> `xml` feeds **two** Rust components (validator XSD mode + xslt) — bump **both** consts.
-> The JMS const was the one missed in the 0.3.0→0.4.0 bump (fixed in `cc7951d3`); always
-> confirm all 4 sites when doing a lockstep bump of the three bridges.
+> `xml` feeds **two** Rust components (validator XSD mode + xslt) — its single
+> registry key drives both constants, and both constants move together.
 
-**Steps (per bridge; OLD=A.B.C → NEW=X.Y.Z):**
+**Procedure (per bridge; OLD=A.B.C → NEW=X.Y.Z):**
 
-1. Update the gradle default version (line 7, the `?: "OLD"` literal — do **not** touch the
-   plugin versions on lines 3-4):
-   `sed -i 's/?: "OLD"/?: "NEW"/' bridges/{bridge}/build.gradle.kts`
-2. Update `pub const BRIDGE_VERSION: &str` in the crate `lib.rs` file(s) listed above.
-3. Sanity check: `cargo build -p camel-{bridge}` (for `xml`: `-p camel-validator -p camel-xslt`).
-4. Commit (`caveman-commit`): `chore(bridge): bump version OLD to NEW`
-   - Body only if non-obvious; reference `Bd: rc-XXXX` at end.
-5. Local tag: `git tag {bridge}-bridge-vX.Y.Z`
+1. Run `cargo xtask bump-bridge <bridge> <version>`. It atomically writes
+   `bridges/versions.toml` and the registered `BRIDGE_VERSION` constant(s) — for
+   `xml` both constants — and restores every target byte-for-byte on failure.
+2. Run `cargo xtask lint-bridge-versions`; require a clean exit before
+   committing.
+3. Commit (`caveman-commit`): `chore(bridge): bump version OLD to NEW`
+   - Body only if non-obvious; reference the tracked issue at the end
+     (`Bd: rc-bxjzq`).
+4. Stop.
 
-**Do NOT `git push`.** The human pushes the tag to trigger the release workflow.
+The agent never tags, pushes, or triggers a release.
+The human creates and pushes the tag {bridge}-bridge-vX.Y.Z.
+The tag push is what starts the release workflow.
+
+## After the tag is pushed (human-run verification)
+
+1. Run `cargo xtask lint-bridge-versions --check-releases`; it must exit 0.
+2. Confirm the release carries every matrix asset:
+   - `{bridge}-bridge-{version}-linux-musl-x86_64.tar.gz`
+   - `{bridge}-bridge-{version}-macos-aarch64.tar.gz`
+   - `{bridge}-bridge-{version}-windows-x86_64.zip`
+   - `{bridge}-bridge-{version}-SHA256SUMS`
+3. Confirm the published tag equals the registry version.
+
+`--check-releases` fails before the release exists. That is expected and is not a bump failure.
+The bump is not complete until the release exists and the check is green.
+
+The published JMS binary is smoke-tested by
+`.github/workflows/published-jms-bridge-smoke.yml`; use it as the artifact check.

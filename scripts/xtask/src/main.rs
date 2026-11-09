@@ -228,6 +228,10 @@ enum Commands {
         /// `cxf-bridge-v0.8.4`).
         #[arg(long)]
         tag: Option<String>,
+        /// Check the GitHub release registry for every declared
+        /// bridge version. Network; fail-closed on transport and non-404 errors.
+        #[arg(long)]
+        check_releases: bool,
     },
     /// Atomically bump one bridge version in `bridges/versions.toml` and its
     /// registered `BRIDGE_VERSION` constants, then run the bridge-version lint.
@@ -923,40 +927,46 @@ fn main() {
                 }
             }
         }
-        Commands::LintBridgeVersions { tag } => {
+        Commands::LintBridgeVersions {
+            tag,
+            check_releases,
+        } => {
             let workspace_root = workspace_root_or_exit();
-            let outcome = match bridge_versions::lint(&workspace_root, tag.as_deref()) {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    eprintln!("lint-bridge-versions error: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let outcome =
+                match bridge_versions::lint_with(&workspace_root, tag.as_deref(), check_releases) {
+                    Ok(outcome) => outcome,
+                    Err(e) => {
+                        eprintln!("lint-bridge-versions error: {e}");
+                        std::process::exit(1);
+                    }
+                };
 
             if let Some(error) = &outcome.tag_error {
                 eprintln!("{error}");
                 std::process::exit(1);
             }
 
-            if outcome.findings.is_empty() {
-                println!("lint-bridge-versions: OK (no findings)");
-            } else {
-                for finding in &outcome.findings {
-                    let lexeme = &finding.token;
-                    println!(
-                        "{}:{}: {} [{}]",
-                        finding.path.display(),
-                        finding.line,
-                        finding.detail,
-                        lexeme
-                    );
-                }
+            for line in outcome.lines() {
+                println!("{line}");
+            }
+
+            if !outcome.findings.is_empty() {
                 eprintln!(
                     "\nlint-bridge-versions: FAILED ({} findings)",
                     outcome.findings.len()
                 );
+            }
+            if !outcome.release_findings.is_empty() {
+                eprintln!(
+                    "\nlint-bridge-versions: FAILED ({} release findings)",
+                    outcome.release_findings.len()
+                );
+            }
+            if !outcome.findings.is_empty() || !outcome.release_findings.is_empty() {
                 std::process::exit(1);
             }
+
+            println!("lint-bridge-versions: OK (no findings)");
         }
         Commands::BumpBridge { bridge, version } => {
             let workspace_root = workspace_root_or_exit();

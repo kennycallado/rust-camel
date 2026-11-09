@@ -92,6 +92,8 @@
   run: cargo xtask lint-component-deps
 - name: lint-bridge-versions
   run: cargo xtask lint-bridge-versions
+- name: lint-bridge-releases
+  run: cargo xtask lint-bridge-versions --check-releases
 - name: lint-gate-forwarding
   run: cargo xtask lint-gate-forwarding
 - name: lint-no-deprecated
