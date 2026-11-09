@@ -1,0 +1,35 @@
+{
+  "change": "audit-advisories",
+  "mission": "549-auditdeps",
+  "bd": "rc-kdmdq",
+  "verdict": "APPROVE",
+  "reviewer": "conductor (trivial path, mission self-review with evidence)",
+  "impl_hash": "67260c68c04a64d818910b327f9a0c6b862149847897f5e81e3542f9b2b33a9e",
+  "base": "cbe2ba0df (local main)",
+  "audit": {
+    "before": "cargo-audit 0.22.1 on main cbe2ba0df: 2 vulnerabilities (RUSTSEC-2026-0462 rmcp 3.8.0, RUSTSEC-2026-0459 libsqlite3-sys 0.30.1) + 7 warnings; evidence /home/shared/tmp/audit-main.log",
+    "after": "cargo-audit exit 0 on feature/auditdeps 1831bbc78: 0 vulnerabilities, 7 allowed warnings (unmaintained/yanked, informational)",
+    "command": "/nix/store/6j49hlq8na8px4z8a6mamf3qayf9041f-cargo-audit-0.22.1/bin/cargo-audit audit, run in worktree, log /tmp/fleet-auditdeps-audit-after.log"
+  },
+  "rmcp_fix": {
+    "update": "cargo update -p rmcp --precise 3.9.0",
+    "moved": "rmcp 3.8.0->3.9.0 and rmcp-macros 3.8.0->3.9.0 only; 13 lockfile lines, versions+checksums; no unrelated crate moved",
+    "proof": "cargo build -p camel-component-mcp and cargo test -p camel-component-mcp green (12/12 suites, e.g. 49+13+3+2 passed), zero source edits",
+    "logs": "/tmp/fleet-auditdeps-build.log, /tmp/fleet-auditdeps-test.log"
+  },
+  "sqlite_evidence": {
+    "advisory": "RUSTSEC-2026-0459 (CVE-2026-119375): SQLite < 3.54.0 returns uninitialized page-cache memory when opening a db file together with a sibling -wal whose page size differs; crafted pair planted by a less-trusted local writer; local vector",
+    "bundled": "TRUE — sqlx 0.9.0 manifest: sqlite = [\"sqlite-bundled\", ...], sqlite-bundled = [\"_sqlite\", \"sqlx-sqlite/bundled\", ...]; cargo tree -e features -i libsqlite3-sys shows libsqlite3-sys 'bundled' <- sqlx-sqlite 'bundled' <- sqlx 'sqlite-bundled' <- sqlx 'sqlite' via camel-component-sql/camel-cli/camel-integration-test; single dependency entry path sqlx-sqlite 0.9.0",
+    "reachability": "not reachable in rust-camel's trust model: SQLite paths come from operator-configured route URIs (camel-component-sql), never untrusted request input; writer and opener are the same trust domain; reaching the vector presupposes local write access to the operator's data directory — a pre-existing compromise dominating this disclosure's impact. Route chosen: accept-and-document (not non-applicable) with full reasoning in .cargo/audit.toml comment",
+    "upgrade_path": "none today: sqlx 0.9.0 is newest and pins libsqlite3-sys ^0.30; fix needs >= 0.39.0",
+    "followup_bd": "rc-xobmp (discovered-from: rc-kdmdq) tracks removing the ignore"
+  },
+  "trivial_property": "verified, not assumed: tracked diff = Cargo.lock + .cargo/audit.toml + openspec change metadata; zero crates/**/src/**; dependency bump with no source logic; no --ignore flags added to CI, no continue-on-error; .cargo/audit.toml the only lever",
+  "gates_sweep": "bash scripts/gates-local.sh exit 0 — passed: 28, failed: 0, skipped: 4 (lint-commits lint-bridge-releases doc-guide-test cargo-audit); log /tmp/fleet-auditdeps-gates.log",
+  "notes": [
+    "Order said audit.toml had 'four entries'; it has three ignore entries (RUSTSEC-2023-0071, RUSTSEC-2026-0249, RUSTSEC-2026-0387) — new entry is the fourth.",
+    "Main @ cbe2ba0df carries a misplaced root .bless.json from the http-content-type-provenance merge (tracked at worktree root instead of inside its change dir); untouched by this branch — flagged for the master conductor to relocate at its leisure.",
+    "Root checkout has 3 pre-existing dirty files (conductor-light.md, fleet.js, opencode.json) not part of this mission."
+  ],
+  "hash_scope": "git diff cbe2ba0df..HEAD -- Cargo.lock Cargo.toml .cargo/audit.toml | sha256sum"
+}

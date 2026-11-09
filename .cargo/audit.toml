@@ -31,5 +31,25 @@
 # (RUSTSEC-2026-0194/0195), so bumping trades one advisory for three.
 # Remove this entry once surrealdb's jsonwebtoken/p384 chain reaches
 # crypto-bigint >= 0.7.6 (tracked in bd rc-83l5f / rc-h7huz).
-ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0249", "RUSTSEC-2026-0387"]
+# RUSTSEC-2026-0459 (libsqlite3-sys 0.30.1 via C SQLite CVE-2026-119375,
+# uninitialized WAL page cache, 6.8) — bundled precondition confirmed TRUE, exposure
+# judged not reachable in rust-camel. Chain: camel-component-sql -> sqlx 0.9.0 ->
+# sqlx-sqlite -> libsqlite3-sys 0.30.1 (single entry path, verified with
+# `cargo tree -i libsqlite3-sys`). sqlx 0.9 FORCES bundling: its manifest defines
+# `sqlite = ["sqlite-bundled", ...]` and `sqlite-bundled = ["_sqlite",
+# "sqlx-sqlite/bundled", ...]`, so the plain `sqlite` feature this workspace uses
+# compiles C SQLite into the binary; only the opt-in `sqlite-unbundled` (buildtime
+# bindgen + system library) would avoid it. The advisory bites only when a process
+# opens a database file together with a sibling `-wal` whose page size differs —
+# a crafted pair planted by a LESS-TRUSTED local writer. rust-camel opens SQLite
+# paths from operator-configured route URIs (camel-component-sql), never from
+# untrusted request input: the writer of the data directory and the opener are the
+# same trust domain, so reaching the vector requires a local attacker who can
+# already write into the operator's data directory — a pre-existing compromise that
+# dominates this disclosure's impact. No upgrade path today (2026-11-09): sqlx
+# 0.9.0 is the newest line and pins `libsqlite3-sys ^0.30`; the fix needs
+# >= 0.39.0. This entry is removed when sqlx ships a release compatible with
+# `libsqlite3-sys >= 0.39.0`, or when the workspace moves camel-component-sql to
+# `sqlite-unbundled` against a system SQLite >= 3.54.0 (tracked in bd rc-xobmp).
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0249", "RUSTSEC-2026-0387", "RUSTSEC-2026-0459"]
 informational_warnings = ["unmaintained"]

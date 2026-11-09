@@ -1,0 +1,7 @@
+{
+  "kind": "trivial",
+  "verdict": "BLESSED",
+  "authority": "rc-kdmdq (security advisory, dependency-only)",
+  "hash": "sha256:ae01fbc9b900be923297f2daa487be6843a682bed27173740110f022390cb5ff",
+  "note": "Trivial-path property verified, not assumed: tracked diff = Cargo.lock (13 lines, rmcp+rmcp-macros 3.8.0->3.9.0 versions/checksums only) + .cargo/audit.toml (+28-line documented ignore) + openspec change metadata. Zero crates/**/src/** files. Dependency bump with no source logic. rmcp fix proven: cargo build -p camel-component-mcp and cargo test -p camel-component-mcp green (12/12 suites) with no source edit. sqlite advisory accepted-and-documented with bundled=TRUE evidence (sqlx 0.9 sqlite = [sqlite-bundled]) and not-reachable reasoning; removal tracked in bd rc-xobmp. cargo audit exit 0, zero vulnerabilities, 7 allowed warnings."
+}
