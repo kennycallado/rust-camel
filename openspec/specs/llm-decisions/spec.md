@@ -345,7 +345,8 @@ for every other status:
 | 429 with an `insufficient_quota` code or type | `QuotaExceeded` | no |
 | other 429 | `RateLimit { retry_after }` (delta-seconds `Retry-After`) | yes |
 | 5xx, including 529 | `ProviderUnavailable` | yes |
-| reqwest timeout | `Timeout(configured)` | yes |
+| reqwest timeout inside the per-request total | `Timeout(configured)` | yes |
+| connect timeout | `TransportTimeout { phase: Connect, after: connect bound }` | yes |
 
 The decision path SHALL pass the whole capped error body to `map_status`, so the
 `insufficient_quota` check sees valid JSON. Error text SHALL hold at most 200 body
@@ -353,9 +354,12 @@ bytes; `map_status` and `truncate_body` enforce this. Error text and `Debug`
 output (config and adapter) SHALL NOT contain the API key. The HTTP status scenarios require the `decisions`
 feature.
 
-The decision adapters SHALL build their client only with
-`hardened_http_client_with_pinning`: no redirects, `no_proxy`, and
-`resolve_to_addrs`. A per-request `.timeout(configured)` SHALL be set.
+The decision adapters SHALL build their client with the decision transport
+policy (`connect 10s`, no read-idle guard): no redirects, `no_proxy`, and
+`resolve_to_addrs`. A per-request `.timeout(configured)` SHALL be set. The
+decision client SHALL NOT carry a client-wide `read_timeout` (reqwest 0.13.5
+bounds time-to-headers with it and offers no per-request override, which would
+cap cold starts below the configured total).
 
 #### Scenario: Throttled and retried with Retry-After
 
@@ -404,6 +408,14 @@ that a timeout fires. It does not tell the two timeouts apart.
 - **WHEN** the producer runs
 - **THEN** the result is `CamelError::ProcessorError` whose text contains `timeout`,
   and it returns in less than 4 seconds
+
+#### Scenario: Connect timeout names the connect layer
+
+- **GIVEN** a decision endpoint whose TCP connection cannot be established within
+  the connect bound
+- **WHEN** `decide` runs
+- **THEN** the error is `TransportTimeout { phase: Connect, .. }` (retryable) whose
+  display contains `timeout` and the connect bound
 
 #### Scenario: Cancellation releases the permit
 

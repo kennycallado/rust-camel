@@ -128,6 +128,15 @@ no retry.
 - **WHEN** `chat_stream` runs against it
 - **THEN** the error maps to `Network` (retryable)
 
+
+#### Scenario: connection refused and timeout on chat stream
+
+- **GIVEN** a chat endpoint that refuses connections, and a configured timeout
+  exceeded against a stalled wiremock endpoint
+- **WHEN** `chat_stream` runs against each
+- **THEN** connection refused maps to `Network` (retryable) and timeout maps to
+  `Timeout` carrying the configured duration (retryable)
+
 #### Scenario: connect timeout names the connect layer
 
 - **GIVEN** a chat endpoint that accepts no TCP connection within the connect
