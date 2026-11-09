@@ -23,7 +23,20 @@ being released.
    release churned 662 lines of transitive deps inside the release commit).
 4. Commit: `chore(release): bump version to X.Y.Z` — SUBJECT ONLY, no body,
    no bullets, no Bd reference (matches all previous release commits).
-5. Local tag: `git tag vX.Y.Z`
+5. Verify the commit is tested — a skipped or cancelled Full Tests
+   run is **not tested**. Check with
+   `gh run list --workflow ci.yml --commit <SHA>`: it must show a
+   completed **successful push run on main** (PR-triggered rows do
+   not qualify — they test a synthetic merge commit). Then confirm
+   the evidence with
+   `gh run view <run-id> --json jobs --jq '.jobs[] | select(.name == "Full Tests (ubuntu-latest)") | {conclusion, steps: [.steps[] | select(.name == "Test (full workspace)" or .name == "Test camel-cli (exec flavor)") | {name, conclusion}]}'`:
+   the job and both test steps must show `"conclusion": "success"`.
+   A skipped or cancelled Full Tests means the release workflow's
+   preflight (release.yml `ci-preflight`, built-in GITHUB_TOKEN with
+   the `actions: read` scope — no secret setup) will fail the tag
+   run before the matrix or publish starts. Do not tag until the
+   check passes.
+6. Local tag: `git tag vX.Y.Z`
 
 Note: README carries no version reference — nothing to update there.
 

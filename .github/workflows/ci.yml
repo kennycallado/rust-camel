@@ -244,7 +244,18 @@ jobs:
         # keeping the gate cheap.
         run: cargo test -p camel-test --features integration-tests-cxf --test cxf_test --no-run
       - name: Test (full workspace)
-        run: cargo test --workspace
+        # rc-9wx6u: without --no-fail-fast the first failing binary aborts
+        # the run, so a red run executes only a fraction of the suite
+        # (measured: 41/37/309 of 636 targets on runs 41528349507,
+        # 41801330337, 41654602812) and prints no count of the targets that
+        # never ran. With the flag every target that compiles executes and
+        # cargo prints "error: N targets failed:" listing all of them. A
+        # red run is then expected to take about as long as a green one
+        # (~85-115 min — an estimate, subject to successful compilation;
+        # the 150-min timeout-minutes above is a hard cap, not a completion
+        # guarantee). Same rationale as the weekly job (rc-97uah).
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --no-fail-fast
       - name: Test camel-cli (exec flavor)
         # rc-zrta1: the workspace test above resolves camel-cli's default
         # flavor-regular. Since ADR-0037-A1 regular INCLUDES exec, the
@@ -252,7 +263,13 @@ jobs:
         # this explicit flavor-regular,exec leg keeps that true even if the
         # placement ever reverts, with the same closure and without the
         # kafka/surrealdb/containers rebuild of flavor-full.
-        run: cargo test -p camel-cli --no-default-features --features flavor-regular,exec
+        # rc-9wx6u/rc-1x9fl: --no-fail-fast so a red leg reports all its
+        # failing targets; !cancelled() so an earlier failure cannot skip
+        # it. Budget: a red leg is expected to take about as long as a green
+        # one (~85-115 min — an estimate; the job's 150-min timeout is a
+        # hard cap, not a completion guarantee).
+        if: ${{ !cancelled() }}
+        run: cargo test -p camel-cli --no-default-features --features flavor-regular,exec --no-fail-fast
 
   docker-smoke-test:
     name: Docker Smoke Test

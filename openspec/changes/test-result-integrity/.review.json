@@ -1,0 +1,46 @@
+{
+  "kind": "holistic-review",
+  "change": "test-result-integrity",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "r_glm",
+  "session": "ses_e3e998115ffe5zCFRXohUhI91N",
+  "impl_hash_base": "dde7e96e5a20c8762b7234e5d5be4f353a6ff5f7",
+  "head": "42406ac1e",
+  "commits": [
+    "e77c460b0 spec(test-result-integrity): blessed",
+    "fdf283fb3 plan(test-result-integrity): blessed",
+    "3b0632807 ci.yml --no-fail-fast + !cancelled() on Full Tests steps",
+    "06378617e release.yml fail-closed ci-preflight + needs wiring",
+    "42406ac1e bump-version.md checklist step 5"
+  ],
+  "findings": [
+    {
+      "severity": "minor",
+      "note": "commit types spec(/plan( are outside the AGENTS.md type list — mandated verbatim by the conductor-light flow (blessed-artifact commits); no gate fails; not worth rewriting blessed history",
+      "action": "none"
+    },
+    {
+      "severity": "absurd-minor",
+      "note": "exec-leg comment quotes job-level budget (~85-115 min) — byte-identical to blessed plan template",
+      "action": "none"
+    },
+    {
+      "severity": "absurd-minor",
+      "note": "bump-version.md header says '7-target build matrix' (canonical spec counts 12 entries) — pre-existing, out of diff, optional docs follow-up",
+      "action": "none (pre-existing, out of blessed scope)"
+    }
+  ],
+  "verification": {
+    "gates_local": "exit 0; passed 28 / failed 0 / skipped 4 (lint-commits lint-bridge-releases doc-guide-test cargo-audit — network/toolchain, CI-owned); all Rust/cargo-only gates beyond the sweep are N/A — no Rust changed (0 .rs/Cargo.toml in diff)",
+    "yaml_parse": "ci.yml + release.yml parse OK via nix-shell pyyaml; preflight permissions {contents: read, actions: read}; matrix needs [ci-preflight]; publish needs call-release-matrix; both test steps carry !cancelled() + --no-fail-fast",
+    "no_fail_fast_demo": "scratch workspace, 4 test binaries (doctests disabled): fail-fast exit 101 with 2 result lines (beta targets aborted, error: test failed, to rerun pass); --no-fail-fast exit 101 with 4 result lines + error: 1 target failed:",
+    "preflight_fixtures": "jq filters from shipped script: runs filter picks only push/main/success; jobs filter true on green, false on skipped/renamed/one-step/duplicate; bash -n OK, first line set -euo pipefail",
+    "gh_smoke": "real read-only API rows {id, conclusion, event, head_branch}: 42514160492 success/push/main; 42635743339 + 42498732481 failure/push/main; mandated base SHA dde7e96e5 has 0 runs (local-only — exercises the fail-closed no-qualifying-run branch)"
+  },
+  "post_merge_human_verification": [
+    "cut a throwaway tag on an untested SHA -> ci-preflight job must fail with an error naming the commit, before matrix/publish start (gh run list --workflow release.yml; gh run view <id> --json status,conclusion,jobs)",
+    "on the next red main push whose full-tests-linux ran to completion: gh run view <ci-run-id> --json jobs --jq '.jobs[] | select(.name == \"Full Tests (ubuntu-latest)\") | [.steps[] | select(.name == \"Test (full workspace)\" or .name == \"Test camel-cli (exec flavor)\") | .conclusion]' must be success/failure-shaped, never \"skipped\"",
+    "a red full-workspace run is expected to take ~85-115 min (estimate) and must stay under timeout-minutes: 150"
+  ],
+  "date": "2026-11-09"
+}

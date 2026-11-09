@@ -1,0 +1,26 @@
+{
+  "kind": "plan",
+  "change": "test-result-integrity",
+  "verdict": "APPROVE",
+  "hash": "sha256:fe77b516507cf037deaa684e467e0180c710c6b9a256cfc2a1f845ccea1109fb",
+  "expert": "e_gpt",
+  "session": "ses_e3eb832e3ffegDSprWEJLrwOrF",
+  "reviewer": "r_glm (ses_e3ec4c3bdffe0psuXKZKqfmKhk, 3 rounds, final APPROVE)",
+  "rounds": [
+    {
+      "hash": "sha256:4fbf1fe46f7d59e17d10e7b3e7006900a7b498900e48c1a72e867a25a903ec9b",
+      "verdict": "APPROVE-WITH-FIXES",
+      "fixes": [
+        "demo target count: disable scratch-crate doctests ([lib] doctest = false) so exactly 4 result lines",
+        "jq: per-name length==1 guards (exactly one workspace step AND one exec step) replacing raw length==2; jobs-duplicate.json fixture added",
+        "Task 1.2 acceptance diff paths: .github/workflows/release.yml (not root-level release.yml)",
+        "design.md post-merge no-silent-skip check scoped to jobs that ran to completion (not cancelled/timed out)"
+      ]
+    },
+    {
+      "hash": "sha256:fe77b516507cf037deaa684e467e0180c710c6b9a256cfc2a1f845ccea1109fb",
+      "verdict": "APPROVE"
+    }
+  ],
+  "date": "2026-11-09"
+}

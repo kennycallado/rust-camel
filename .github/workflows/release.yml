@@ -11,7 +11,72 @@ permissions:
   id-token: write
 
 jobs:
+  ci-preflight:
+    name: Preflight — CI green for tagged commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require a green CI Full Tests run for this commit
+        # rc-1x9fl: a tag used to publish with zero test evidence —
+        # release.yml ran no tests and checked no CI result, so a tag
+        # could ship a SHA whose Full Tests were skipped (JMS failures,
+        # runs 42490710101 / 42470660723) or cancelled (frequent in the
+        # run list). Fail closed: require a completed SUCCESSFUL PUSH
+        # RUN ON MAIN of ci.yml for the exact tagged commit (PR runs
+        # test a synthetic merge commit and never qualify), whose
+        # "Full Tests (ubuntu-latest)" job and its "Test (full
+        # workspace)" + "Test camel-cli (exec flavor)" steps all
+        # concluded success. No run, a cancelled or failed run, a
+        # skipped step, or any API error fails the release before the
+        # matrix or publish start (call-release-matrix needs this job).
+        # Token: built-in GITHUB_TOKEN with `actions: read` (job-level
+        # permissions replace the workflow-level set — same pattern as
+        # the publish job below); no secret setup.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse 'HEAD^{commit}')"
+          runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100")"
+          run_ids="$(printf '%s' "$runs_json" | jq -r '
+            .workflow_runs[]
+            | select(.conclusion == "success" and .event == "push" and .head_branch == "main")
+            | .id')"
+          if [ -z "$run_ids" ]; then
+            echo "::error::No successful push-on-main CI run for commit ${sha} — Full Tests evidence missing (a cancelled or missing run is untested). Refusing to release."
+            exit 1
+          fi
+          ok=""
+          for run_id in $run_ids; do
+            jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")"
+            # Tested iff the Full Tests job is green AND each test step
+            # exists exactly once (a rename fails closed, and a
+            # duplicate workspace step cannot stand in for the missing
+            # exec step) AND both concluded success (a "skipped" step
+            # fails this).
+            full_ok="$(printf '%s' "$jobs_json" | jq -r '
+              [.jobs[]
+                | select(.name == "Full Tests (ubuntu-latest)")
+                | select(.conclusion == "success")
+                | select((([.steps[] | select(.name == "Test (full workspace)")] | length) == 1)
+                    and (([.steps[] | select(.name == "Test camel-cli (exec flavor)")] | length) == 1))
+                | select(([.steps[]
+                  | select(.name == "Test (full workspace)" or .name == "Test camel-cli (exec flavor)")
+                  | .conclusion == "success"] | all))]
+              | length > 0')"
+            if [ "$full_ok" = "true" ]; then ok="$run_id"; break; fi
+          done
+          if [ -z "$ok" ]; then
+            echo "::error::CI ran for ${sha} but no successful push-on-main run has Full Tests (ubuntu-latest) green with both test steps success — treating as untested. Refusing to release."
+            exit 1
+          fi
+          echo "Tested: commit ${sha} verified by CI run ${ok} (Full Tests green, both test steps success)."
+
   call-release-matrix:
+    needs: [ci-preflight]
     uses: ./.github/workflows/release-matrix.yml
     with:
       publish: true
