@@ -792,6 +792,95 @@ async fn junit_document_error_and_expansion() {
     );
 }
 
+/// A scenario document whose boot fails produces no rows: the driver
+/// must still count it in the parse-error channel, exactly like a unit
+/// document-level failure. `missing.yaml` is never written — `direct`
+/// is a boot scheme, so route discovery fails before any context start.
+#[tokio::test(flavor = "multi_thread")]
+async fn scenario_doc_error_counts_as_parse_error() {
+    let dir = temp_dir("scenario-parse-err");
+    let camel_toml = dir.join("Camel.toml");
+    fs::write(&camel_toml, "log_level = \"info\"\n").expect("write Camel.toml"); // allow-unwrap
+    let ok = write_passing(&dir, "ok.test.yaml");
+    let bad = dir.join("bad.test.yaml");
+    fs::write(
+        &bad,
+        r#"routeFiles: [missing.yaml]
+scenario:
+- send:
+    to: direct:start
+"#,
+    )
+    .expect("write scenario doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![camel_toml, ok.clone(), bad.clone(), dir.clone()]);
+    let report = dir.join("r.xml");
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let config = TestRunConfig {
+        files: vec![ok, bad.clone()],
+        junit: Some(report.clone()),
+        ..Default::default()
+    };
+    let summary = run_tests_full(&config, &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(
+        summary.parse_errors, 1,
+        "a boot-failed scenario document must land in the parse-error channel"
+    );
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    assert!(
+        out.contains("1 passed, 0 failed, 1 parse-error doc (skipped)"),
+        "out: {out}"
+    );
+    let err = String::from_utf8(err).expect("err is utf-8"); // allow-unwrap
+    assert!(err.contains("bad.test.yaml"), "err: {err}");
+    assert!(
+        err.contains("full-boot-failure"),
+        "the diagnostic must name the boot-failure class: {err}"
+    );
+    assert!(
+        err.contains("missing.yaml"),
+        "the diagnostic must name the dead route source: {err}"
+    );
+    let last = err
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .unwrap_or_default();
+    assert!(
+        last.contains("1 parse-error doc (skipped): "),
+        "last non-empty stderr line must be the naming line: {err}"
+    );
+    assert!(
+        last.contains("bad.test.yaml"),
+        "the naming line must name the scenario document: {err}"
+    );
+    let text = fs::read_to_string(&report).expect("report must exist"); // allow-unwrap
+    assert_eq!(
+        text.matches("<error").count(),
+        1,
+        "exactly one document error testcase: {text}"
+    );
+    assert!(
+        text.contains("<testcase name=\"&lt;document&gt;\""),
+        "doc-error testcase: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "<testsuite name=\"{}\" tests=\"1\" failures=\"0\" errors=\"1\">",
+            bad.display()
+        )),
+        "scenario suite must count the single error testcase: {text}"
+    );
+    assert!(
+        text.contains("tests=\"1\" failures=\"0\" errors=\"0\""),
+        "the passing suite keeps its row: {text}"
+    );
+    assert!(
+        text.contains("<testsuites tests=\"2\" failures=\"0\" errors=\"1\">"),
+        "root totals must count the passing row plus the doc error: {text}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn junit_filtered_documents_have_no_rows() {
     let dir = temp_dir("junit-filtered");

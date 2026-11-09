@@ -413,6 +413,8 @@ pub async fn run_tests_full(
 ) -> TestRunSummary {
     let mut passed = 0usize;
     let mut failed = 0usize;
+    // Document-level failures that produced no rows: unit documents and
+    // scenario documents whose boot fails flow through this same channel.
     let mut parse_error_names: Vec<String> = Vec::new();
     let mut had_apparatus = false;
     let mut had_misuse = false;
@@ -642,6 +644,7 @@ pub async fn run_tests_full(
                 let result = scenario::run_scenario_doc(&scenario, &root).await;
                 if let Some(doc_error) = result.doc_error {
                     had_apparatus = true;
+                    parse_error_names.push(path.display().to_string());
                     let _ = writeln!(err, "{}: {doc_error}", path.display());
                     doc_reports.push(junit::DocReport {
                         path: path.clone(),
