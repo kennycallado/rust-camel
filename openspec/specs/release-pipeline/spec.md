@@ -4,7 +4,6 @@
 The release build pipeline. The build matrix lives in one reusable workflow,
 publish side effects are gated on the publish input, the dev path runs the
 feature-closure tests, and release assets are checksummed tarballs.
-
 ## Requirements
 ### Requirement: Release build matrix has a single reusable source of truth
 
@@ -14,8 +13,10 @@ composition, probes) SHALL live in exactly one reusable workflow
 The tag wrapper (`release.yml`) SHALL contain no inline matrix: it
 declares the tag trigger, the publish permissions
 (`contents: write`, `packages: write`, `id-token: write`), the
-secrets handoff (`secrets: inherit`), and a single call with
-`publish: true`. The tag wrapper SHALL also home the crates.io
+secrets handoff (`secrets: inherit`), a single call with
+`publish: true`, and the fail-closed `ci-preflight` job of
+Requirement: CI preflight gates the tag pipeline on a tested commit.
+The tag wrapper SHALL also home the crates.io
 publish job (see Requirement: Publish side effects are gated on the
 publish input) — this homing is a hard constraint: crates.io
 trusted publishing matches the OIDC `job_workflow_ref` (the
@@ -42,9 +43,11 @@ representative dev subset.
 - **WHEN** the tag wrapper file is inspected
 - **THEN** it declares the `v*` tag trigger, the three publish
   permissions, `secrets: inherit`, exactly one job that calls the
-  reusable workflow with `publish: true`, and the crates.io
+  reusable workflow with `publish: true`, the crates.io
   publish job (with `environment: crates-io` and
-  `needs: call-release-matrix`), and contains no build matrix and
+  `needs: call-release-matrix`), and the `ci-preflight` job gating the
+  reusable-workflow call (`call-release-matrix` carries
+  `needs: [ci-preflight]`), and it contains no build matrix and
   no probe steps
 
 #### Scenario: dev wrapper calls the same matrix
@@ -174,4 +177,82 @@ SHALL ship after the first tarball release.
 - **THEN** the uploading legs pack and checksum exactly like tag legs,
   and the gnu docker variant verifies and extracts its tarball in the
   dev run
+
+### Requirement: CI preflight gates the tag pipeline on a tested commit
+
+The tag wrapper (`release.yml`) SHALL contain a `ci-preflight` job, the
+first job in the workflow, that fails closed before any build or publish
+side effect unless the pushed tag points at a tested commit:
+
+- It SHALL resolve the tagged commit (`git rev-parse 'HEAD^{commit}'`,
+  correct for annotated and lightweight tags).
+- It SHALL query the GitHub Actions API for `ci.yml` workflow runs with
+  `head_sha` equal to that commit (`repos/{owner}/{repo}/actions/workflows/ci.yml/runs?head_sha=<sha>&per_page=100`,
+  reading `workflow_runs[].id`, `.conclusion`, `.event`, and
+  `.head_branch`), and keep only completed successful runs that are
+  **push-triggered on main** (`event == "push"`,
+  `head_branch == "main"`, `conclusion == "success"`). PR-triggered
+  runs SHALL NOT qualify as evidence even when their conclusion reads
+  `success`, because they test a synthetic merge commit rather than the
+  tagged tree. For each qualifying run query its jobs
+  (`repos/{owner}/{repo}/actions/runs/<id>/jobs?per_page=100`, reading
+  `jobs[].name`, `jobs[].conclusion`, `jobs[].steps[].name`,
+  `jobs[].steps[].conclusion`).
+- It SHALL consider the commit tested if and only if at least one
+  qualifying (push-on-main, successful) CI run has a job named
+  `Full Tests (ubuntu-latest)` whose conclusion is `success` and whose
+  `Test (full workspace)` and `Test camel-cli (exec flavor)` steps both
+  concluded `success`.
+- It SHALL treat as NOT tested — and fail the job with an error naming
+  the commit — every other case: no CI run for the sha, no qualifying
+  run, only PR-triggered runs, a cancelled or failed run, the Full
+  Tests job absent, failed, or skipped, or either test step not
+  concluded `success`.
+- It SHALL fail on any API error (nonzero `gh` exit under
+  `set -euo pipefail`; no `|| true`, no `continue-on-error`).
+- It SHALL authenticate with the built-in `GITHUB_TOKEN` and declare the
+  `actions: read` permission (plus `contents: read` for checkout), with
+  a comment stating that scope; no additional secret SHALL be required.
+- The `call-release-matrix` job SHALL declare
+  `needs: [ci-preflight]`, so an untested SHA fails the run before the
+  build matrix, the GitHub Release, the docker images, or the crates.io
+  publish start. The `publish` job SHALL keep `needs: call-release-matrix`
+  (transitively gated).
+
+#### Scenario: tag on an untested SHA fails closed before any side effect
+
+- **GIVEN** a tag `v*` whose commit has no successful CI run (never ran,
+  or its latest runs are failed or cancelled)
+- **WHEN** the tag push triggers `release.yml`
+- **THEN** the `ci-preflight` job fails with an error naming the commit,
+  and neither `call-release-matrix` nor `publish` starts (no matrix
+  build, no GitHub Release, no docker push, no crates.io publish)
+
+#### Scenario: a skipped Full Tests step blocks the release
+
+- **GIVEN** a tag whose commit's only successful-looking CI run has the
+  Full Tests job's workspace test step skipped (an earlier step failed)
+- **WHEN** the preflight inspects that run's job steps
+- **THEN** the step conclusion `skipped` fails the "tests ran and
+  passed" check, the preflight fails, and the release does not start
+
+#### Scenario: PR-triggered evidence alone does not qualify
+
+- **GIVEN** a tag whose commit has CI runs triggered only by
+  `pull_request` events (all otherwise green)
+- **WHEN** the preflight filters the runs list on
+  `event == "push"` and `head_branch == "main"`
+- **THEN** no run qualifies, the preflight fails with an error naming
+  the commit, and the release does not start (PR runs test a synthetic
+  merge commit, not the tagged tree)
+
+#### Scenario: tag on a tested SHA proceeds unchanged
+
+- **GIVEN** a tag `v*` whose commit has a completed successful
+  push-on-main CI run in which the Full Tests job and both test steps
+  concluded `success`
+- **WHEN** the tag push triggers `release.yml`
+- **THEN** the preflight passes and the pipeline behaves exactly as
+  before this change (same matrix, same assets, same docker and publish
+  behaviour)
 
