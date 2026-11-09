@@ -16,6 +16,11 @@
 #   GATES_ONLY="fmt check lint-unwrap" bash scripts/gates-local.sh
 #   GATES_SKIP="" bash scripts/gates-local.sh   # also run the skipped ones
 #
+# The summary reports `passed:`, `failed:`, `skipped:` and `ran: X of Y`, so a
+# sweep always states how much of the registry it covered. A partial sweep
+# (GATES_ONLY non-empty) is labeled PARTIAL in the divider and names the
+# `not selected:` gates, so an incomplete report can never read as a full one.
+#
 # Exit: 0 only when every executed gate passed.
 set -uo pipefail
 
@@ -101,17 +106,23 @@ PY
 failed=()
 passed=()
 skipped=()
+not_selected=()
+
+if [[ -n "$ONLY" ]]; then
+    printf 'gates-local: PARTIAL sweep — GATES_ONLY="%s"\n' "$ONLY"
+fi
 
 for entry in "${GATES[@]}"; do
     name="${entry%%$'\t'*}"
     command="${entry#*$'\t'}"
     command="${command//\\n/$'\n'}"
 
-    if [[ -n "$ONLY" && " $ONLY " != *" $name "* ]]; then
-        continue
-    fi
     if [[ " $SKIP " == *" $name "* ]]; then
         skipped+=("$name")
+        continue
+    fi
+    if [[ -n "$ONLY" && " $ONLY " != *" $name "* ]]; then
+        not_selected+=("$name")
         continue
     fi
 
@@ -125,9 +136,20 @@ for entry in "${GATES[@]}"; do
     fi
 done
 
-printf '\n──────── gates-local summary ────────\n'
+ran=$(( ${#passed[@]} + ${#failed[@]} ))
+total=${#GATES[@]}
+
+if [[ -n "$ONLY" ]]; then
+    printf '\n──── gates-local summary (PARTIAL — GATES_ONLY set) ────\n'
+else
+    printf '\n──────── gates-local summary ────────\n'
+fi
 printf 'passed:  %d\n' "${#passed[@]}"
 printf 'failed:  %d%s\n' "${#failed[@]}" "${failed:+ — ${failed[*]}}"
 printf 'skipped: %d%s\n' "${#skipped[@]}" "${skipped:+ — ${skipped[*]}}"
+if [[ -n "$ONLY" ]]; then
+    printf 'not selected: %d%s\n' "${#not_selected[@]}" "${not_selected:+ — ${not_selected[*]}}"
+fi
+printf 'ran:     %d of %d\n' "$ran" "$total"
 
 [[ ${#failed[@]} -eq 0 ]]

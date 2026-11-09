@@ -1,0 +1,40 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "r_glm",
+  "session": "ses_e3e644fd1ffeOiVW5WnOmYtvlN",
+  "impl_hash": "sha256:d8e9bbd2ca172539fffdef0339e22a3ac8d34ffac07603f7824c01674632a2b5",
+  "date": "2026-11-09",
+  "findings": [
+    {
+      "severity": "important",
+      "finding": "fix commit did not exist yet at review time (change uncommitted)",
+      "disposition": "DISCHARGED",
+      "evidence": "single commit fix(scripts): make a partial gates-local sweep self-describing + Bd: rc-p8vfu on feature/gatereport; script + .review.json committed together"
+    },
+    {
+      "severity": "important",
+      "finding": "partial-failure-still-fails had no recorded real-repo run",
+      "disposition": "DISCHARGED",
+      "evidence": "conductor re-ran the fmt probe on the real worktree: printf 'fn gatereport_fmt_probe(){} \\n' >> scripts/xtask/src/main.rs; GATES_ONLY=\"fmt check\" bash scripts/gates-local.sh -> PROBE_EXIT=1, FAIL fmt check, 'failed:  1 — fmt check', accounting intact (0+1+4+27=32), output at /tmp/nix-shell.EdxbNl/opencode/gatereport-partial-fail.txt, probe reverted (git checkout --), residue 0; worker had run it earlier with identical result"
+    },
+    {
+      "severity": "minor",
+      "finding": "tasks.md matched by main repo .git/info/exclude:7 — archive-time git add will need -f for openspec/changes/archive/2026-11-09-gate-report-partial/tasks.md (or drop the exclude entry)",
+      "disposition": "HANDOFF_NOTE",
+      "evidence": "recorded in park gatereport-parked.json handoff_notes"
+    },
+    {
+      "severity": "informational",
+      "finding": "early exits (no AGENTS.md, no python3, 0 gates parsed) bypass the summary — pre-change behavior identical, not a regression",
+      "disposition": "NO_ACTION",
+      "evidence": "reviewer-confirmed consistent with pre-change script"
+    }
+  ],
+  "verification": {
+    "full_sweep": "exit 0 — passed: 28, failed: 0, skipped: 4 (lint-commits lint-bridge-releases doc-guide-test cargo-audit), ran: 28 of 32; four summary lines byte-identical to pre-change baseline; no PARTIAL line in full mode",
+    "partial_green": "GATES_ONLY=\"fmt check\" exit 0 — preamble before first gate header, PARTIAL divider, skipped: 4, not selected: 27 — (27 names), ran: 1 of 32; independently reproduced by reviewer",
+    "partial_failure": "exit 1 — failed:  1 — fmt check (see findings[1])",
+    "skip_semantics": "SKIP= assignment byte-unchanged; full sweep skip set identical to baseline"
+  }
+}
