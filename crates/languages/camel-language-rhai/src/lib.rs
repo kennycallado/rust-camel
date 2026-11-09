@@ -4997,6 +4997,21 @@ mod tests {
         });
     }
 
+    /// True when the suite runs under cargo-llvm-cov instrumentation.
+    /// Verified empirically by the Task 1.1 probe (variable named in the
+    /// probe evidence, rc-gb4un).
+    fn running_under_instrumentation() -> bool {
+        std::env::var_os("CARGO_LLVM_COV").is_some()
+            || std::env::var_os("LLVM_PROFILE_FILE").is_some()
+    }
+
+    /// Instrumented-variant workload size: a few ms of normal runtime, an
+    /// order of magnitude of headroom under instrumentation against the
+    /// 200ms per-clause timeout. Fixed iterations are NOT fixed runtime —
+    /// a throttled runner can still miss the deadline; see design.md
+    /// (instrumented-timing-test) for the residual-risk statement.
+    const SEMANTIC_LOOP_COUNT: u64 = 20_000;
+
     #[tokio::test]
     async fn group_timeouts_are_independent_per_clause() {
         use std::time::Duration;
@@ -5019,10 +5034,31 @@ mod tests {
         let calibration_lang = group_lang(OP_LIMIT, 60_000);
         let lang = group_lang(OP_LIMIT, TIMEOUT_MS);
 
+        if running_under_instrumentation() {
+            eprintln!("branch=semantic-instrumented");
+            let script = budget_loop_script(SEMANTIC_LOOP_COUNT);
+            let group = rhai_group(&lang, &[script.as_str(), script.as_str()]);
+            assert_eq!(
+                group
+                    .first_match(&exchange)
+                    .await
+                    .expect("per-clause timeouts must let both clauses complete",),
+                None,
+                "no clause may be cut under per-clause timeouts",
+            );
+            assert_eq!(
+                group.eval_log(),
+                vec![0, 1],
+                "both clauses evaluated in order"
+            );
+            return;
+        }
+
         let mut count =
             calibrate_loop_count_for_duration(&calibration_lang, &exchange, target).await;
         let mut measurements = String::new();
 
+        eprintln!("branch=strict");
         for attempt in 0..4 {
             let script = budget_loop_script(count);
             let (first_elapsed, first_outcome) = timed_standalone(&lang, &script, &exchange).await;
@@ -5033,6 +5069,7 @@ mod tests {
                 "attempt {attempt}: count={count}, first={first_elapsed:?} ({first_outcome:?}), \
                  second={second_elapsed:?} ({second_outcome:?}), sum={sum:?}"
             );
+            eprintln!("{measurements}");
 
             let outcomes_ok =
                 matches!(&first_outcome, Ok(false)) && matches!(&second_outcome, Ok(false));
