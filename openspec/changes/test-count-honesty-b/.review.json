@@ -1,0 +1,37 @@
+{
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "impl_hash": "621237484",
+  "date": "2026-11-09",
+  "findings": {
+    "critical": [],
+    "important": [],
+    "minor_resolved": [
+      "crates/camel-cli/README.md summary-format prose stale — fixed in this commit",
+      "crates/camel-cli/CONTEXT.md:445 summary prose stale — fixed in this commit",
+      "docs/src/testing/camel-test.md --junit paragraph omits skipped testcases — fixed in this commit"
+    ],
+    "minor_discarded": [
+      "skipped_cases computed twice per suite (pure fn, no drift)",
+      "delta scenarios settle/fully-evaluated covered compositionally rather than by one literal fixture (post-merge belt-and-suspenders optional)"
+    ]
+  },
+  "hard_limits": {
+    "camel_integration_test_diff_lines": 0,
+    "exit_codes_unchanged": true,
+    "clean_runs_byte_identical": true,
+    "passing_junit_suite_unchanged": true,
+    "parse_failed_declare_nothing": true,
+    "settle_single_verdict_row": true,
+    "junit_identity": "tests = passed + failed + errors + skipped holds at suite and root levels"
+  },
+  "verification": {
+    "gates_local": "exit 0, passed 28, failed 0, skipped 4 (lint-commits lint-bridge-releases doc-guide-test cargo-audit)",
+    "cargo_build_workspace": "exit 0",
+    "cargo_test_workspace_lib": "exit 0, 13152 passed, 0 failed",
+    "hexagonal_architecture_boundaries_test": "exit 0, 33 passed",
+    "targeted_change_tests": "48 passed, 0 failed",
+    "real_cli_evidence": "before: '1 passed, 1 failed, 1 parse-error doc (skipped)' / after: '1 passed, 1 failed, 3 not run, 1 parse-error doc (skipped) — 5 cases in 3 docs', exit 2 both, junit skipped 0 -> 4"
+  },
+  "notes": "Doc prose fixes reviewed verbatim against reviewer prescriptions. Registry drift note for merge gate: main AGENTS.md doc-build gate gained -p camel-component-api mid-mission; local sweep ran the base registry from the worktree."
+}

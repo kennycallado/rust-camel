@@ -26,6 +26,7 @@
 //! openspec/changes/integration-tier-contract (ADR-0069 sections 1, 7).
 
 mod beans;
+mod declared;
 pub mod document;
 pub mod filters;
 pub mod runner;
@@ -141,6 +142,8 @@ pub struct TestRunSummary {
     /// skipped before producing rows; never counted in `passed` or
     /// `failed`.
     pub parse_errors: usize,
+    /// Declared cases that produced no verdict row.
+    pub not_run: usize,
 }
 
 /// Directory names skipped during expansion, at any depth.
@@ -490,6 +493,7 @@ pub async fn run_tests_full(
                     rows: Vec::new(),
                     doc_error: Some(e.to_string()),
                     tier: None,
+                    declared: Vec::new(),
                 });
                 continue;
             }
@@ -514,10 +518,15 @@ pub async fn run_tests_full(
                     rows: Vec::new(),
                     doc_error: Some(e),
                     tier: None,
+                    declared: Vec::new(),
                 });
                 continue;
             }
         };
+        // Declared labels are computed once here, before the parsed
+        // document is consumed by the tier-load match: the later branch
+        // sites can no longer borrow it.
+        let declared = declared::declared_labels(&doc);
         // Tier derivation: scenario documents are FULL unconditionally;
         // unit documents need their route source loaded (the same load
         // the runner performs, done once here and reused for the run).
@@ -545,6 +554,7 @@ pub async fn run_tests_full(
                             rows: Vec::new(),
                             doc_error: Some(message),
                             tier: None,
+                            declared,
                         });
                         continue;
                     }
@@ -565,6 +575,7 @@ pub async fn run_tests_full(
                     rows: Vec::new(),
                     doc_error: Some(e),
                     tier: None,
+                    declared,
                 });
                 continue;
             }
@@ -591,6 +602,8 @@ pub async fn run_tests_full(
                     rows: Vec::new(),
                     doc_error: Some(message),
                     tier: Some(label),
+                    // A collision document declares nothing (design D8).
+                    declared: Vec::new(),
                 });
             }
             continue;
@@ -651,6 +664,7 @@ pub async fn run_tests_full(
                         rows: Vec::new(),
                         doc_error: Some(doc_error),
                         tier: Some(label),
+                        declared,
                     });
                     continue;
                 }
@@ -679,6 +693,7 @@ pub async fn run_tests_full(
                     rows: result.action_results,
                     doc_error: None,
                     tier: Some(label),
+                    declared,
                 });
             }
             LoadedDoc::Unit(unit_doc, defs) => {
@@ -702,6 +717,7 @@ pub async fn run_tests_full(
                         rows: Vec::new(),
                         doc_error: Some(doc_error),
                         tier: Some(label),
+                        declared,
                     });
                     continue;
                 }
@@ -723,6 +739,7 @@ pub async fn run_tests_full(
                     rows: result.endpoint_results,
                     doc_error: None,
                     tier: Some(label),
+                    declared,
                 });
             }
         }
@@ -735,6 +752,21 @@ pub async fn run_tests_full(
         let _ = writeln!(err, "{}", filter_misuse_message(config));
     }
 
+    // Declared-vs-produced accounting for the summary segment: attempted
+    // documents, those that ran to completion, declared cases across all
+    // reports, and declared cases with no verdict row.
+    let attempted = doc_reports.len();
+    let completed = doc_reports
+        .iter()
+        .filter(|report| report.doc_error.is_none())
+        .count();
+    let total_declared: usize = doc_reports.iter().map(|report| report.declared.len()).sum();
+    let not_run: usize = doc_reports
+        .iter()
+        .filter(|report| !report.declared.is_empty())
+        .map(|report| declared::not_run_deficit(&report.declared, &report.rows))
+        .sum();
+
     // Derived: every parse-class site records its name; see parse_error_names.
     let had_parse_error = !parse_error_names.is_empty();
     let mut exit_code = if had_parse_error || had_misuse || had_apparatus {
@@ -744,21 +776,30 @@ pub async fn run_tests_full(
     } else {
         0
     };
-    if parse_error_names.is_empty() {
-        let _ = writeln!(out, "{passed} passed, {failed} failed");
-    } else {
-        let n = parse_error_names.len();
+    let n = parse_error_names.len();
+    if n > 0 {
         let noun = if n == 1 { "doc" } else { "docs" };
         let _ = writeln!(
             err,
             "{n} parse-error {noun} (skipped): {}",
             parse_error_names.join(", ")
         );
-        let _ = writeln!(
-            out,
-            "{passed} passed, {failed} failed, {n} parse-error {noun} (skipped)"
-        );
     }
+    let mut summary_line = format!("{passed} passed, {failed} failed");
+    if not_run > 0 {
+        summary_line.push_str(&format!(", {not_run} not run"));
+    }
+    if n > 0 {
+        let noun = if n == 1 { "doc" } else { "docs" };
+        summary_line.push_str(&format!(", {n} parse-error {noun} (skipped)"));
+    }
+    if not_run > 0 {
+        summary_line.push_str(&format!(" — {total_declared} cases"));
+        if attempted > completed {
+            summary_line.push_str(&format!(" in {attempted} docs"));
+        }
+    }
+    let _ = writeln!(out, "{summary_line}");
     // JUnit report: written on exit-0/1/2 runs alike, after the human
     // summary line. A write failure is stderr + exit 2 (raise only).
     if let Some(path) = &config.junit
@@ -774,6 +815,7 @@ pub async fn run_tests_full(
         passed,
         failed,
         parse_errors: parse_error_names.len(),
+        not_run,
     }
 }
 
@@ -786,6 +828,7 @@ fn discovery_cap_failure(err: &mut dyn Write, message: String) -> TestRunSummary
         passed: 0,
         failed: 0,
         parse_errors: 1,
+        not_run: 0,
     }
 }
 

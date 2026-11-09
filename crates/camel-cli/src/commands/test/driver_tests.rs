@@ -266,6 +266,251 @@ async fn parse_error_with_failures_mixes_counts() {
     );
 }
 
+/// Declared cases without verdict rows surface as a `not run` segment plus
+/// a `— N cases` trailer when the document count is not all-completed. Here
+/// a settle-timeout document declares two expects but produces only its
+/// single `<settle>` row.
+///
+/// Runs ~5.1 s by design: the proven unbounded-flood pattern
+/// (`timer_unstable_traffic_times_out_exit_1`) never quiesces, so the
+/// settle deadline fires at route start + quiet + SETTLE_DEADLINE.
+#[tokio::test(flavor = "multi_thread")]
+async fn settle_timeout_shows_not_run_segment() {
+    let dir = temp_dir("not-run-settle");
+    let passed = write_passing(&dir, "a.test.yaml");
+    let flood = dir.join("b.test.yaml");
+    fs::write(
+        &flood,
+        r#"
+routes:
+  - id: r1
+    from: "timer:flood?period=5"
+    steps:
+      - to: "mock:result"
+expects:
+  mock:result:
+    count: 1
+  mock:other:
+    count: 0
+"#,
+    )
+    .expect("write flood doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![passed.clone(), flood.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[passed, flood], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    assert_eq!(summary.not_run, 1, "one declared case has no verdict row");
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    let last = out
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    assert_eq!(
+        last, "1 passed, 1 failed, 1 not run — 3 cases",
+        "out: {out}"
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|line| line.starts_with("FAIL") && line.contains("#<settle>"))
+            .count(),
+        1,
+        "the settle verdict must print one FAIL row: {out}"
+    );
+}
+
+/// A unit document that parses but fails at route load (missing
+/// `routeFiles` target) produces no rows: all three declared cases are
+/// `not run`, and the parse-error segment plus the doc-count trailer render.
+#[tokio::test(flavor = "multi_thread")]
+async fn unit_doc_error_shows_not_run_and_parse_segment() {
+    let dir = temp_dir("not-run-unit-doc-error");
+    let passed = write_passing(&dir, "a.test.yaml");
+    let bad = dir.join("b.test.yaml");
+    fs::write(
+        &bad,
+        r#"
+routeFiles: [missing-does-not-exist.yaml]
+expects:
+  mock:a: {count: 1}
+  mock:b: {count: 1}
+  mock:c: {count: 1}
+"#,
+    )
+    .expect("write route-load-failure doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![passed.clone(), bad.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[passed, bad], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.not_run, 3);
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    let last = out
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    assert_eq!(
+        last, "1 passed, 0 failed, 3 not run, 1 parse-error doc (skipped) — 4 cases in 2 docs",
+        "out: {out}"
+    );
+    let err = String::from_utf8(err).expect("err is utf-8"); // allow-unwrap
+    assert!(err.contains("missing-does-not-exist.yaml"), "err: {err}");
+}
+
+/// An in-run document error (input delivery to an unserved `direct:`
+/// URI) produces no rows: the three declared cases are `not run`. This
+/// reaches the unit doc-error report site the route-load test does not.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_delivery_error_shows_not_run_segment() {
+    let dir = temp_dir("not-run-input-delivery");
+    let passed = dir.join("a.test.yaml");
+    fs::write(
+        &passed,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:a"
+      - to: "mock:b"
+inputs:
+  - to: "direct:start"
+    body: "x"
+expects:
+  mock:a: {count: 1}
+  mock:b: {count: 1}
+"#,
+    )
+    .expect("write two-case passing doc"); // allow-unwrap
+    let bad = dir.join("b.test.yaml");
+    fs::write(
+        &bad,
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:a"
+inputs:
+  - to: "direct:missing"
+    body: "x"
+expects:
+  mock:a: {count: 1}
+  mock:b: {count: 1}
+  mock:c: {count: 1}
+"#,
+    )
+    .expect("write input-delivery-failure doc"); // allow-unwrap
+    let _guard = CleanupPaths(vec![passed.clone(), bad.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[passed, bad], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 2);
+    assert_eq!(summary.not_run, 3);
+    let err = String::from_utf8(err).expect("err is utf-8"); // allow-unwrap
+    assert!(
+        err.contains("b.test.yaml"),
+        "err must name the document: {err}"
+    );
+    assert!(
+        err.contains("direct:missing"),
+        "the input-error diagnostic must name the dead target: {err}"
+    );
+    assert!(err.contains("failed"), "err: {err}");
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    assert!(
+        !out.contains("b.test.yaml#"),
+        "the failing document renders no verdict rows: {out}"
+    );
+    let last = out
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    assert_eq!(
+        last, "2 passed, 0 failed, 3 not run, 1 parse-error doc (skipped) — 5 cases in 2 docs",
+        "out: {out}"
+    );
+}
+
+/// A scenario that fails mid-action stops early: the trailing action
+/// produces no row, so its declared case is `not run`.
+#[tokio::test(flavor = "multi_thread")]
+async fn scenario_early_stop_shows_not_run_segment() {
+    let dir = temp_dir("not-run-scenario-stop");
+    fs::write(dir.join("Camel.toml"), "# minimal\n").expect("write Camel.toml"); // allow-unwrap
+    fs::write(
+        dir.join("routes.yaml"),
+        r#"
+routes:
+  - id: r1
+    from: "direct:start"
+    steps:
+      - to: "mock:out"
+"#,
+    )
+    .expect("write scenario routes"); // allow-unwrap
+    let path = dir.join("a.test.yaml");
+    let _guard = CleanupPaths(vec![
+        dir.join("Camel.toml"),
+        dir.join("routes.yaml"),
+        path.clone(),
+        dir.clone(),
+    ]);
+    fs::write(
+        &path,
+        r#"
+routeFiles: [routes.yaml]
+scenario:
+  - sleep: {duration: 1ms}
+  - sleep: {duration: 1ms}
+  - receive:
+      from: "fake:idle"
+      deadline: "10ms"
+  - sleep: {duration: 1ms}
+"#,
+    )
+    .expect("write early-stop scenario doc"); // allow-unwrap
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    assert_eq!(summary.not_run, 1);
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    assert!(
+        !out.contains("#scenario[3] sleep"),
+        "the action after the failure must not run: {out}"
+    );
+    let last = out
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    assert_eq!(
+        last, "2 passed, 1 failed, 1 not run — 4 cases",
+        "out: {out}"
+    );
+}
+
+/// Regression guard: a produced failure row consumes the only declared
+/// case, so no `not run` segment or trailer renders.
+#[tokio::test(flavor = "multi_thread")]
+async fn not_run_segment_absent_when_row_present() {
+    let dir = temp_dir("not-run-absent");
+    let path = write_failing(&dir, "a.test.yaml");
+    let _guard = CleanupPaths(vec![path.clone(), dir.clone()]);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let summary = run_tests(&[path], &mut out, &mut err).await;
+    assert_eq!(summary.exit_code, 1);
+    assert_eq!(summary.not_run, 0);
+    let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
+    let last = out
+        .lines()
+        .rfind(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    assert_eq!(last, "0 passed, 1 failed", "out: {out}");
+    assert!(!out.contains("not run"), "out: {out}");
+}
+
 /// An empty directory argument is an expansion (parse-class) error: it
 /// counts in `parse_errors`, the naming line names the directory, and
 /// stdout is exactly the zero-ran summary with the skipped segment.
@@ -829,7 +1074,9 @@ scenario:
     );
     let out = String::from_utf8(out).expect("out is utf-8"); // allow-unwrap
     assert!(
-        out.contains("1 passed, 0 failed, 1 parse-error doc (skipped)"),
+        out.contains(
+            "1 passed, 0 failed, 1 not run, 1 parse-error doc (skipped) — 2 cases in 2 docs"
+        ),
         "out: {out}"
     );
     let err = String::from_utf8(err).expect("err is utf-8"); // allow-unwrap
@@ -866,18 +1113,25 @@ scenario:
     );
     assert!(
         text.contains(&format!(
-            "<testsuite name=\"{}\" tests=\"1\" failures=\"0\" errors=\"1\">",
+            "<testsuite name=\"{}\" tests=\"2\" failures=\"0\" errors=\"1\" skipped=\"1\">",
             bad.display()
         )),
-        "scenario suite must count the single error testcase: {text}"
+        "scenario suite must count the error testcase plus the skipped case: {text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "<testcase name=\"scenario[0] send\" classname=\"{}\"><skipped message=\"not run: document error\"/></testcase>",
+            bad.display()
+        )),
+        "the declared scenario action must render as a skipped testcase: {text}"
     );
     assert!(
         text.contains("tests=\"1\" failures=\"0\" errors=\"0\""),
         "the passing suite keeps its row: {text}"
     );
     assert!(
-        text.contains("<testsuites tests=\"2\" failures=\"0\" errors=\"1\">"),
-        "root totals must count the passing row plus the doc error: {text}"
+        text.contains("<testsuites tests=\"3\" failures=\"0\" errors=\"1\" skipped=\"1\">"),
+        "root totals must count the passing row, the doc error, and the skipped case: {text}"
     );
 }
 

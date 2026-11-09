@@ -253,7 +253,10 @@ document plus a final `N passed, M failed` summary. When documents (or
 directory-expansion entries) were skipped by a parse-class error, the
 summary gains an additive segment — `N passed, M failed, K parse-error
 docs (skipped)` — and stderr names each skipped entry on the line
-immediately before the summary. Parse-error docs never count toward
+immediately before the summary. When a parsed document declares more cases
+than produced verdict rows, the summary gains a `, N not run` segment and a
+` — N cases` trailer, with ` in M docs` when the run attempted more
+documents than completed. Parse-error docs never count toward
 `passed` or `failed`.
 
 ### Non-interference with `camel run`

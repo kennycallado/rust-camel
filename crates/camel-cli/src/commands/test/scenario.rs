@@ -123,7 +123,10 @@ pub(super) fn is_apparatus(failure: &camel_integration_test::ScenarioFailure) ->
 }
 
 /// The row label for one scenario action: `scenario[i] <kind>`.
-fn action_label(index: usize, action: &camel_integration_test::ScenarioAction) -> String {
+pub(crate) fn action_label(
+    index: usize,
+    action: &camel_integration_test::ScenarioAction,
+) -> String {
     use camel_integration_test::ScenarioAction as A;
     let kind = match action {
         A::Send { .. } => "send",
