@@ -48,6 +48,12 @@ pub(super) struct SmtpMetadataDescriptor {
 
     #[uri_param(name = "allowCleartext", default = "false")]
     pub _allow_cleartext: bool,
+
+    #[uri_param(name = "connectTimeout", default = "60000")]
+    pub _connect_timeout: u64,
+
+    #[uri_param(name = "ioTimeout", default = "600000")]
+    pub _io_timeout: u64,
 }
 
 pub(crate) fn smtp_metadata(scheme: MailScheme) -> ComponentMetadata {
@@ -113,6 +119,12 @@ pub(super) struct ImapMetadataDescriptor {
 
     #[uri_param(name = "raw", default = "false")]
     pub _raw: bool,
+
+    #[uri_param(name = "connectTimeout", default = "30000")]
+    pub _connect_timeout: u64,
+
+    #[uri_param(name = "ioTimeout", default = "60000")]
+    pub _io_timeout: u64,
 }
 
 pub(crate) fn imap_metadata(scheme: MailScheme) -> ComponentMetadata {
@@ -143,6 +155,8 @@ mod tests {
                 "contentType" => Some("text/plain"),
                 "maxRecipients" => Some("50"),
                 "allowCleartext" => Some("false"),
+                "connectTimeout" => Some("60000"),
+                "ioTimeout" => Some("600000"),
                 _ => None,
             };
             if d.is_some() {
@@ -173,6 +187,8 @@ mod tests {
                 "maxAttempts" => Some("3"),
                 "delete" => Some("false"),
                 "raw" => Some("false"),
+                "connectTimeout" => Some("30000"),
+                "ioTimeout" => Some("60000"),
                 _ => None,
             };
             assert_eq!(o.default_value.as_deref(), d, "{}", o.name);

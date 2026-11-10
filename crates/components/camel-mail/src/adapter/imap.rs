@@ -121,11 +121,16 @@ impl AsyncImapConnector {
     }
 
     /// Override the whole-connect and per-operation deadlines.
-    #[cfg(test)]
-    pub(crate) fn with_timeouts(mut self, connect: Duration, io: Duration) -> Self {
+    pub(crate) fn with_configured_timeouts(mut self, connect: Duration, io: Duration) -> Self {
         self.connect_timeout = connect;
         self.io_timeout = io;
         self
+    }
+
+    /// Effective `(connect, io)` deadlines, for tests.
+    #[cfg(test)]
+    pub(crate) fn timeouts(&self) -> (Duration, Duration) {
+        (self.connect_timeout, self.io_timeout)
     }
 
     pub(crate) fn from_endpoint(
@@ -150,7 +155,8 @@ impl AsyncImapConnector {
                 password: password.clone(),
             },
             tls::client_config(&roots)?,
-        ))
+        )
+        .with_configured_timeouts(cfg.connect_timeout, cfg.io_timeout))
     }
 
     async fn tls_wrap(&self, tcp: TcpStream) -> Result<ImapStream, MailError> {
@@ -256,7 +262,12 @@ impl MailStoreConnector for AsyncImapConnector {
     async fn connect(&self) -> Result<Box<dyn MailStore>, MailError> {
         tokio::time::timeout(self.connect_timeout, self.connect_inner())
             .await
-            .map_err(|_| MailError::Connect("connect timed out".to_string()))?
+            .map_err(|_| {
+                MailError::Connect(format!(
+                    "IMAP connect timed out after {} ms (connectTimeout)",
+                    self.connect_timeout.as_millis()
+                ))
+            })?
     }
 }
 
@@ -345,11 +356,15 @@ fn store_err(e: async_imap::error::Error) -> MailError {
 /// it maps to a retryable error and the session is dropped.
 async fn with_timeout<T>(
     limit: Duration,
+    phase: &str,
     fut: impl std::future::Future<Output = Result<T, MailError>>,
 ) -> Result<T, MailError> {
-    tokio::time::timeout(limit, fut)
-        .await
-        .map_err(|_| MailError::Store("IMAP operation timed out".to_string()))?
+    tokio::time::timeout(limit, fut).await.map_err(|_| {
+        MailError::Store(format!(
+            "IMAP {phase} timed out after {} ms (ioTimeout)",
+            limit.as_millis()
+        ))
+    })?
 }
 
 struct AsyncImapStore {
@@ -361,7 +376,7 @@ struct AsyncImapStore {
 impl MailStore for AsyncImapStore {
     async fn capabilities(&mut self) -> Result<StoreCapabilities, MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "capabilities", async {
             let caps = self.session.capabilities().await.map_err(store_err)?;
             Ok(StoreCapabilities {
                 uidplus: caps.has_str("UIDPLUS"),
@@ -373,7 +388,7 @@ impl MailStore for AsyncImapStore {
 
     async fn select(&mut self, folder: &str) -> Result<SelectedFolder, MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "select", async {
             let mailbox = self.session.select(folder).await.map_err(store_err)?;
             let uid_validity = mailbox
                 .uid_validity
@@ -385,7 +400,7 @@ impl MailStore for AsyncImapStore {
 
     async fn search_unseen(&mut self) -> Result<Vec<u32>, MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "search", async {
             let found = self.session.uid_search("UNSEEN").await.map_err(store_err)?;
             let mut uids: Vec<u32> = found.into_iter().collect();
             uids.sort_unstable();
@@ -396,7 +411,7 @@ impl MailStore for AsyncImapStore {
 
     async fn fetch_sizes(&mut self, uids: &[u32]) -> Result<Vec<MessageSize>, MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "fetch sizes", async {
             if uids.is_empty() {
                 return Ok(Vec::new());
             }
@@ -428,7 +443,7 @@ impl MailStore for AsyncImapStore {
 
     async fn fetch_body(&mut self, uid: u32) -> Result<Option<Vec<u8>>, MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "fetch body", async {
             let fetches: Vec<_> = self
                 .session
                 .uid_fetch(uid.to_string(), "BODY.PEEK[]")
@@ -444,7 +459,7 @@ impl MailStore for AsyncImapStore {
 
     async fn mark_seen(&mut self, uid: u32) -> Result<(), MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "mark seen", async {
             let _: Vec<_> = self
                 .session
                 .uid_store(uid.to_string(), "+FLAGS (\\Seen)")
@@ -460,7 +475,7 @@ impl MailStore for AsyncImapStore {
 
     async fn copy(&mut self, uid: u32, folder: &str) -> Result<(), MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "copy", async {
             self.session
                 .uid_copy(uid.to_string(), folder)
                 .await
@@ -471,7 +486,7 @@ impl MailStore for AsyncImapStore {
 
     async fn move_to(&mut self, uid: u32, folder: &str) -> Result<(), MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "move", async {
             self.session
                 .uid_mv(uid.to_string(), folder)
                 .await
@@ -482,7 +497,7 @@ impl MailStore for AsyncImapStore {
 
     async fn delete_uid(&mut self, uid: u32) -> Result<(), MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "delete", async {
             let _: Vec<_> = self
                 .session
                 .uid_store(uid.to_string(), "+FLAGS.SILENT (\\Deleted)")
@@ -506,7 +521,7 @@ impl MailStore for AsyncImapStore {
 
     async fn logout(&mut self) -> Result<(), MailError> {
         let limit = self.io_timeout;
-        with_timeout(limit, async {
+        with_timeout(limit, "logout", async {
             self.session.logout().await.map_err(store_err)
         })
         .await
@@ -632,7 +647,7 @@ mod tests {
             login,
             tls::client_config(&[]).expect("tls config"),
         )
-        .with_timeouts(Duration::from_millis(300), Duration::from_millis(300))
+        .with_configured_timeouts(Duration::from_millis(300), Duration::from_millis(300))
     }
 
     #[tokio::test]
@@ -641,7 +656,31 @@ mod tests {
         let r = timeout(BOUND, cleartext(port).connect())
             .await
             .expect("bounded");
-        assert!(matches!(r, Err(MailError::Connect(_))));
+        let msg = match r {
+            Err(MailError::Connect(msg)) => msg,
+            Err(other) => panic!("expected Connect, got {other}"),
+            Ok(_) => panic!("expected Connect, got Ok"),
+        };
+        assert!(msg.contains("connectTimeout"), "{msg}");
+        assert!(msg.contains("300"), "{msg}");
+        assert!(msg.contains("ms"), "{msg}");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn connect_timeout_error_names_option_and_bound() {
+        let (port, task) = scripted(None, "OK done", None).await;
+        let connector = cleartext(port)
+            .with_configured_timeouts(Duration::from_millis(300), Duration::from_secs(60));
+        let r = timeout(BOUND, connector.connect()).await.expect("bounded");
+        let msg = match r {
+            Err(MailError::Connect(msg)) => msg,
+            Err(other) => panic!("expected Connect, got {other}"),
+            Ok(_) => panic!("expected Connect, got Ok"),
+        };
+        assert!(msg.contains("connectTimeout"), "{msg}");
+        assert!(msg.contains("300"), "{msg}");
+        assert!(msg.contains("ms"), "{msg}");
         task.abort();
     }
 
@@ -655,8 +694,50 @@ mod tests {
         let r = timeout(BOUND, store.select("INBOX"))
             .await
             .expect("bounded");
-        assert!(matches!(r, Err(MailError::Store(_))));
+        let msg = match r {
+            Err(MailError::Store(msg)) => msg,
+            Err(other) => panic!("expected Store, got {other}"),
+            Ok(_) => panic!("expected Store, got Ok"),
+        };
+        assert!(msg.contains("select"), "{msg}");
+        assert!(msg.contains("ioTimeout"), "{msg}");
+        assert!(msg.contains("300"), "{msg}");
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn io_timeout_error_names_phase_option_and_bound() {
+        let (port, task) = scripted(Some("* OK ready\r\n"), "OK done", None).await;
+        let connector = cleartext(port)
+            .with_configured_timeouts(Duration::from_secs(60), Duration::from_millis(300));
+        let mut store = timeout(BOUND, connector.connect())
+            .await
+            .expect("bounded")
+            .expect("connect");
+        let r = timeout(BOUND, store.select("INBOX"))
+            .await
+            .expect("bounded");
+        let msg = match r {
+            Err(MailError::Store(msg)) => msg,
+            Err(other) => panic!("expected Store, got {other}"),
+            Ok(_) => panic!("expected Store, got Ok"),
+        };
+        assert!(msg.contains("select"), "{msg}");
+        assert!(msg.contains("ioTimeout"), "{msg}");
+        assert!(msg.contains("300"), "{msg}");
+        task.abort();
+    }
+
+    #[test]
+    fn endpoint_config_threads_timeouts() {
+        let cfg = ImapEndpointConfig::from_uri("imap://h?connectTimeout=15000&ioTimeout=25000")
+            .expect("uri");
+        let connector =
+            AsyncImapConnector::from_endpoint(&cfg, &account(None, true)).expect("connector");
+        assert_eq!(
+            connector.timeouts(),
+            (Duration::from_millis(15_000), Duration::from_millis(25_000))
+        );
     }
 
     #[tokio::test]

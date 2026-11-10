@@ -12,6 +12,9 @@ pub enum SmtpBehavior {
     Accept,
     RejectRcpt550,
     DropAfterData,
+    /// Accepts and records the message like `Accept`, then goes silent forever
+    /// (no reply, no close) so the client can trip its own I/O timeout.
+    StallAfterData,
 }
 
 #[derive(Clone)]
@@ -24,6 +27,9 @@ pub enum SmtpTls {
 pub struct FakeSmtpOptions {
     pub behavior: SmtpBehavior,
     pub tls: SmtpTls,
+    /// Behavior for the first accepted connection only; later connections use
+    /// `behavior`.
+    pub first_connection: Option<SmtpBehavior>,
 }
 
 #[derive(Clone, Default)]
@@ -82,11 +88,17 @@ impl FakeSmtpServer {
         let port = listener.local_addr().expect("addr").port();
         let recording = Arc::new(Mutex::new(SmtpRecording::default()));
         let rec = recording.clone();
+        let mut first = true;
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 lock(&rec).connections += 1;
                 let rec = rec.clone();
-                let behavior = opts.behavior;
+                let behavior = if first {
+                    first = false;
+                    opts.first_connection.unwrap_or(opts.behavior)
+                } else {
+                    opts.behavior
+                };
                 let tls = opts.tls.clone();
                 tokio::spawn(async move {
                     let _ = serve(stream, behavior, tls, rec).await;
@@ -270,6 +282,13 @@ where
             if matches!(behavior, SmtpBehavior::DropAfterData) {
                 return Ok(None);
             }
+            if matches!(behavior, SmtpBehavior::StallAfterData) {
+                // allow-test-wait: deliberate stall (no reply, no close) so the
+                // client trips its own ioTimeout; the parked task is cancelled
+                // when the test runtime drops (Drop aborts only the accept loop).
+                tokio::time::sleep(STALL).await;
+                return Ok(None);
+            }
             reply(&mut io, &format!("250 2.0.0 queued as FAKE{msg_no}\r\n")).await?;
         } else if upper == "RSET" || upper == "NOOP" {
             reply(&mut io, "250 2.0.0 ok\r\n").await?;
@@ -302,6 +321,10 @@ fn addr(rest: &str) -> String {
 
 /// Per-iteration deadline: a stalled client ends the session instead of hanging.
 const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Deliberate post-DATA silence for `SmtpBehavior::StallAfterData`; unbounded by
+/// `IDLE` on purpose.
+const STALL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Line read; callers wrap it in `timeout(IDLE, ..)`.
 async fn read_line<S: AsyncRead + Unpin>(

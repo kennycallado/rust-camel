@@ -64,6 +64,7 @@ fn opts(behavior: SmtpBehavior) -> FakeSmtpOptions {
     FakeSmtpOptions {
         behavior,
         tls: SmtpTls::None,
+        first_connection: None,
     }
 }
 

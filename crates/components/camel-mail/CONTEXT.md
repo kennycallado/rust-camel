@@ -29,6 +29,12 @@ type appears in a public signature (ADR-0020, ADR-0060). Unit tests use a fake t
   verify-off flag. An account `caFile` adds trust anchors. IMAP pins the ring provider; SMTP uses the process-default provider (camel-cli installs ring); the crate reaches
   rustls through the workspace `tokio-rustls` entry. `lettre` 0.11 has no provider injection point
   and takes the process default provider (bd rc-2bofp).
+- Timeouts. `connectTimeout` and `ioTimeout` are milliseconds on all four schemes. IMAP threads the
+  connect and per-operation bounds from the endpoint config (defaults 30000 and 60000, the pre-change
+  constants). SMTP sets the connect bound through lettre's builder timeout (per resolved address,
+  default 60000) and wraps `send_raw` in a whole-transaction `ioTimeout` (default 600000), because
+  the pinned lettre 0.11.23 async path has no per-phase or socket hooks (residual: bd rc-xabg3).
+  Pool reuse is disabled (`max_size(0)`), so a timed-out send cannot recycle a desynced connection.
 - Header classes. Headers use exact CamelCase names, because the HTTP consumer copies Title-Case
   request headers. Class A (content) is validated and names `CamelMailSubject`,
   `CamelMailContentType`, `CamelMailHtmlBody`, `CamelMailListUnsubscribe` and

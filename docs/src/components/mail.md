@@ -70,6 +70,8 @@ routes:
 | `contentType` | `text/plain` | Body type: `text/plain` or `text/html`. |
 | `allowedRecipients` | none | Exact addresses or `@domain` entries. Arms the recipient fence. |
 | `maxRecipients` | `50` | Maximum total recipient count. |
+| `connectTimeout` | `60000` | Milliseconds bounding each TCP-connect attempt (per resolved address). Name resolution and the TLS handshake fall under `ioTimeout`. |
+| `ioTimeout` | `600000` | Milliseconds bounding the whole send: name resolution, TLS handshake, greeting, EHLO, AUTH, MAIL/DATA. A send that exceeds it fails with an error naming the bound. Connection cleanup (QUIT) runs in the background and is not covered. |
 | `allowCleartext` | `false` | Allow a server without TLS. Not valid on `smtps`. |
 
 The body must be a string (a text body, or a JSON string such as the one `set_body` and a DSL `constant` produce) or UTF-8 bytes. Other JSON values, XML and an absent body (`Body::Empty`) fail the Exchange. A `set_body` step with `value: ""` sets an empty `Body::Text`, so the Producer sends a 0-byte `text/plain` body. The send needs a `from` address and at least one recipient. After an accepted send, the Producer sets the header `CamelMailMessageId`. The Producer does not retry. It never resends a message after an ambiguous failure past the SMTP DATA command.
@@ -98,13 +100,15 @@ Set `raw=true` to get the message unparsed. The body is then `Body::Bytes` holdi
 | `maxMessagesPerPoll` | `100` | Maximum messages whose body is fetched in one poll. |
 | `maxMessageSize` | `10485760` | Maximum message size in bytes. Larger messages are skipped. |
 | `maxAttempts` | `3` | Failed attempts (route, body download, or a disposition that leaves the message unseen) before the message is skipped. |
+| `connectTimeout` | `30000` | Milliseconds bounding the whole connect sequence: TCP connect, greeting, CAPABILITY, STARTTLS, TLS handshake, LOGIN. |
+| `ioTimeout` | `60000` | Milliseconds bounding each server operation (fetch, search, flag update, disposition steps). |
 | `raw` | `false` | Return the message unparsed as raw RFC 822 bytes. |
 | `delete` | `false` | Delete the message after a successful route. Needs UIDPLUS. |
 | `moveTo` | none | Move the message to this folder after a successful route. |
 | `copyTo` | none | Copy the message to this folder before it is marked `\Seen`. |
 | `idempotentRepository` | none | Name of a registered idempotent repository for Message-ID duplicate suppression. |
 
-`delay`, `maxMessagesPerPoll`, `maxMessageSize` and `maxAttempts` must be at least 1. `initialDelay` may be 0. `folder`, `moveTo` and `copyTo` must not be empty or contain CR, LF or NUL. The component sends a folder name to the server as given, so a folder with non-ASCII characters needs the modified UTF-7 name that the server lists.
+`delay`, `maxMessagesPerPoll`, `maxMessageSize` and `maxAttempts` must be at least 1. `initialDelay` may be 0. `folder`, `moveTo` and `copyTo` must not be empty or contain CR, LF or NUL. The component sends a folder name to the server as given, so a folder with non-ASCII characters needs the modified UTF-7 name that the server lists. `connectTimeout` and `ioTimeout` reject `0` and an empty value with an error that names the option. A timeout error names the phase and the bound that fired.
 
 Each Exchange carries these headers. A header is absent when the message does not have the value.
 
@@ -247,6 +251,14 @@ A pull shares the receive pipeline of the push Consumer, with these differences:
 - `camel_component_operations_total{component="mail",operation="send"}` counts SMTP sends. The `operation="poll"` series counts IMAP poll cycles. Both split into success and failure. Both series are emitted only when `[observability.metrics] components = true`; the default is `false`.
 - Error labels: `b-prime:mail:skip` (a message skipped), `b-prime:mail:dispose` (a failed disposition), `b-prime:mail:idempotent` (a failed repository read or `add`). Only the push Consumer counts them. These labels come from the error family, so they are always emitted, also when `components = false`.
 - Each IMAP endpoint registers one health check named `mail`. It reports healthy until a push Consumer is created for the endpoint, so an endpoint used only by `poll_enrich` is never probed. It then reports the outcome of the latest poll, including a poll the server refused. When that outcome is older than twice the `delay`, the check opens a probe connection with a 5 s timeout. After the Consumer stopped for good (a missing capability, a refused login or exhausted reconnects), the check stays unhealthy until the route starts again and connects.
+
+## Timeouts
+
+Every scheme has a connect bound and an I/O bound, in milliseconds.
+
+On `smtp` and `smtps`, `connectTimeout` bounds each TCP-connect attempt for a resolved address. Name resolution and the TLS handshake are not part of it. `ioTimeout` bounds the whole send: name resolution, TLS handshake, greeting, EHLO, AUTH and the MAIL/DATA exchange. It is a whole-transaction bound, so size it for the largest message and the slowest uplink. A 50 MiB message over a ~1 Mbit/s uplink needs several minutes. A send that exceeds the bound fails with `mail transport error`. That error is not retryable, and the Producer does not resend. A route error handler may still retry the whole exchange. The QUIT cleanup runs in the background, so the bound does not cover it.
+
+On `imap` and `imaps`, `connectTimeout` bounds the whole connect sequence: TCP connect, greeting, CAPABILITY, STARTTLS, TLS handshake and LOGIN. `ioTimeout` bounds each server operation, such as a fetch, a search, a flag update or a disposition step. A timeout drops the session, and the Consumer reconnects with backoff (see the reconnect policy above).
 
 ## Not supported
 

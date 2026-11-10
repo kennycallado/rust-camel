@@ -20,6 +20,7 @@ async fn start(behavior: SmtpBehavior) -> FakeSmtpServer {
         FakeSmtpServer::start(FakeSmtpOptions {
             behavior,
             tls: SmtpTls::None,
+            first_connection: None,
         }),
     )
     .await
@@ -226,6 +227,64 @@ async fn failure_after_data_not_resent() {
     let rec = server.recording();
     assert_eq!(rec.data_commands, 1);
     assert_eq!(rec.connections, 1);
+}
+
+/// Deviation from the spec scenario: the stall point (after DATA) is deeper than
+/// the scenario's minimal accept-then-silence server; the scenario pins the THEN
+/// (a named `ioTimeout` error naming the send phase), which this exercises at the
+/// harshest stall point.
+#[tokio::test]
+async fn stalled_after_data_trips_io_timeout_named_error() {
+    let server = start(SmtpBehavior::StallAfterData).await;
+    let mut p = producer_for(
+        &uri(server.port, "&ioTimeout=500"),
+        MailComponentConfig::default(),
+    )
+    .await;
+    let err = send(&mut p, ex("hello"))
+        .await
+        .expect_err("a stalled send must trip ioTimeout");
+    let msg = err.to_string();
+    for needle in ["send", "ioTimeout", "500"] {
+        assert!(msg.contains(needle), "missing {needle:?} in {msg}");
+    }
+}
+
+#[tokio::test]
+async fn timed_out_send_does_not_poison_next_send() {
+    let server = timeout(
+        BOUND,
+        FakeSmtpServer::start(FakeSmtpOptions {
+            behavior: SmtpBehavior::Accept,
+            tls: SmtpTls::None,
+            first_connection: Some(SmtpBehavior::StallAfterData),
+        }),
+    )
+    .await
+    .expect("server start timeout");
+    let mut p = producer_for(
+        &uri(server.port, "&ioTimeout=500"),
+        MailComponentConfig::default(),
+    )
+    .await;
+
+    let err = send(&mut p, ex("first"))
+        .await
+        .expect_err("first send must trip ioTimeout");
+    assert!(err.to_string().contains("ioTimeout"), "{err}");
+
+    send(&mut p, ex("second"))
+        .await
+        .expect("second send must succeed through the same producer");
+
+    let rec = server.recording();
+    assert_eq!(rec.connections, 2);
+    assert_eq!(rec.messages.len(), 2);
+    assert!(
+        rec.messages[1].data.contains("second"),
+        "second message not on the wire: {}",
+        rec.messages[1].data
+    );
 }
 
 #[tokio::test]

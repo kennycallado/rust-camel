@@ -376,6 +376,8 @@ impl TlsMode {
 /// URI options of `smtp` and `smtps`; `metadata` must declare the same set.
 pub(crate) const SMTP_OPTIONS: &[&str] = &[
     "account",
+    "connectTimeout",
+    "ioTimeout",
     "from",
     "to",
     "cc",
@@ -388,6 +390,14 @@ pub(crate) const SMTP_OPTIONS: &[&str] = &[
 ];
 
 const DEFAULT_MAX_RECIPIENTS: usize = 50;
+
+/// TCP connect timeout when `connectTimeout` is absent. Preserves lettre's
+/// `DEFAULT_TIMEOUT` (60 s) connect behaviour.
+const DEFAULT_SMTP_CONNECT_TIMEOUT_MS: u64 = 60_000;
+/// Whole-transaction I/O bound when `ioTimeout` is absent. New bound: lettre's
+/// async path bounds only the TCP connect (60 s default) and sets no read/write
+/// timeouts, so a stalled relay today parks a send indefinitely.
+const DEFAULT_SMTP_IO_TIMEOUT_MS: u64 = 600_000;
 
 /// Parsed `smtp://` / `smtps://` endpoint.
 #[derive(Clone, Debug)]
@@ -404,6 +414,8 @@ pub(crate) struct SmtpEndpointConfig {
     pub(crate) allowed_recipients: Option<AllowedRecipients>,
     pub(crate) max_recipients: usize,
     pub(crate) tls: TlsMode,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) io_timeout: Duration,
 }
 
 fn opt_list(params: &HashMap<String, String>, key: &str) -> Result<Vec<MailAddress>, CamelError> {
@@ -496,6 +508,9 @@ impl SmtpEndpointConfig {
             },
         };
         let tls = TlsMode::resolve(scheme, bool_param(params, "allowCleartext")?)?;
+        let connect_timeout =
+            parse_timeout_ms(params, "connectTimeout", DEFAULT_SMTP_CONNECT_TIMEOUT_MS)?;
+        let io_timeout = parse_timeout_ms(params, "ioTimeout", DEFAULT_SMTP_IO_TIMEOUT_MS)?;
         Ok(Self {
             scheme,
             server,
@@ -509,6 +524,8 @@ impl SmtpEndpointConfig {
             allowed_recipients,
             max_recipients,
             tls,
+            connect_timeout,
+            io_timeout,
         })
     }
 }
@@ -516,6 +533,8 @@ impl SmtpEndpointConfig {
 /// URI options of `imap` and `imaps`; `metadata` must declare the same set.
 pub(crate) const IMAP_OPTIONS: &[&str] = &[
     "account",
+    "connectTimeout",
+    "ioTimeout",
     "allowCleartext",
     "folder",
     "delay",
@@ -536,6 +555,12 @@ const DEFAULT_INITIAL_DELAY_MS: u64 = 1_000;
 const DEFAULT_MAX_MESSAGES_PER_POLL: usize = 100;
 const DEFAULT_MAX_MESSAGE_SIZE: u64 = 10_485_760;
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+/// Connect timeout when `connectTimeout` is absent; preserves the 30 s
+/// `CONNECT_TIMEOUT` constant at `adapter::imap`.
+const DEFAULT_IMAP_CONNECT_TIMEOUT_MS: u64 = 30_000;
+/// Per-I/O-operation timeout when `ioTimeout` is absent; preserves the 60 s
+/// `IO_TIMEOUT` constant at `adapter::imap`.
+const DEFAULT_IMAP_IO_TIMEOUT_MS: u64 = 60_000;
 
 /// Reject empty folder names and names carrying CR, LF or NUL. Other bytes
 /// reach the server as an IMAP quoted string; a non-ASCII folder needs the
@@ -573,6 +598,27 @@ where
     }
 }
 
+/// Parse a positive millisecond timeout. Absent means `default_ms`; empty,
+/// unparseable and zero are rejected (a zero timeout would disable the bound).
+fn parse_timeout_ms(
+    params: &HashMap<String, String>,
+    key: &str,
+    default_ms: u64,
+) -> Result<Duration, CamelError> {
+    match params.get(key) {
+        None => Ok(Duration::from_millis(default_ms)),
+        Some(raw) if raw.is_empty() => {
+            Err(CamelError::InvalidUri(format!("{key} must not be empty")))
+        }
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(v) if v > 0 => Ok(Duration::from_millis(v)),
+            _ => Err(CamelError::InvalidUri(format!(
+                "invalid {key} '{raw}': expected positive milliseconds"
+            ))),
+        },
+    }
+}
+
 /// Parsed `imap://` / `imaps://` endpoint.
 #[derive(Clone, Debug)]
 pub(crate) struct ImapEndpointConfig {
@@ -592,6 +638,8 @@ pub(crate) struct ImapEndpointConfig {
     pub(crate) idempotent_repository: Option<String>,
     /// Deliver the exact fetched message bytes as the exchange body.
     pub(crate) raw: bool,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) io_timeout: Duration,
 }
 
 impl ImapEndpointConfig {
@@ -620,6 +668,9 @@ impl ImapEndpointConfig {
         };
         let delete = bool_param(params, "delete")?;
         let raw = bool_param(params, "raw")?;
+        let connect_timeout =
+            parse_timeout_ms(params, "connectTimeout", DEFAULT_IMAP_CONNECT_TIMEOUT_MS)?;
+        let io_timeout = parse_timeout_ms(params, "ioTimeout", DEFAULT_IMAP_IO_TIMEOUT_MS)?;
         let folder_opt = |key: &str| -> Result<Option<String>, CamelError> {
             params
                 .get(key)
@@ -662,6 +713,8 @@ impl ImapEndpointConfig {
             )?,
             max_message_size: parse_min_one(params, "maxMessageSize", DEFAULT_MAX_MESSAGE_SIZE)?,
             max_attempts: parse_min_one(params, "maxAttempts", DEFAULT_MAX_ATTEMPTS)?,
+            connect_timeout,
+            io_timeout,
         })
     }
 }
@@ -859,6 +912,47 @@ mod tests {
     }
 
     #[test]
+    fn smtp_timeout_defaults() {
+        let c = SmtpEndpointConfig::from_uri("smtp://h?from=bot@corp.test").unwrap();
+        assert_eq!(c.connect_timeout, Duration::from_millis(60_000));
+        assert_eq!(c.io_timeout, Duration::from_millis(600_000));
+    }
+
+    #[test]
+    fn smtp_timeouts_parse_ms() {
+        let c = SmtpEndpointConfig::from_uri(
+            "smtp://h?from=bot@corp.test&connectTimeout=5000&ioTimeout=10000",
+        )
+        .unwrap();
+        assert_eq!(c.connect_timeout, Duration::from_millis(5_000));
+        assert_eq!(c.io_timeout, Duration::from_millis(10_000));
+    }
+
+    #[test]
+    fn smtp_timeout_rejects_zero() {
+        let e = err("smtp://h?from=a@x.test&connectTimeout=0");
+        assert!(e.contains("connectTimeout"), "{e}");
+        let e = err("smtp://h?from=a@x.test&ioTimeout=0");
+        assert!(e.contains("ioTimeout"), "{e}");
+    }
+
+    #[test]
+    fn smtp_timeout_rejects_empty() {
+        let e = err("smtp://h?from=a@x.test&connectTimeout=");
+        assert!(e.contains("connectTimeout"), "{e}");
+        assert!(e.contains("must not be empty"), "{e}");
+        let e = err("smtp://h?from=a@x.test&ioTimeout=");
+        assert!(e.contains("ioTimeout"), "{e}");
+        assert!(e.contains("must not be empty"), "{e}");
+    }
+
+    #[test]
+    fn smtp_timeout_rejects_non_numeric() {
+        let e = err("smtp://h?from=a@x.test&ioTimeout=abc");
+        assert!(e.contains("ioTimeout"), "{e}");
+    }
+
+    #[test]
     fn smtp_config_rejects_crlf_subject() {
         assert!(err("smtp://h?from=a@x.test&subject=a%0D%0ABcc:x").contains("subject"));
     }
@@ -888,6 +982,8 @@ mod tests {
         assert_eq!(c.max_message_size, 10_485_760);
         assert_eq!(c.max_attempts, 3);
         assert_eq!(c.scheme, MailScheme::Imap);
+        assert_eq!(c.connect_timeout, Duration::from_millis(30_000));
+        assert_eq!(c.io_timeout, Duration::from_millis(60_000));
     }
 
     #[test]
@@ -920,10 +1016,24 @@ mod tests {
             "maxMessagesPerPoll",
             "maxMessageSize",
             "delay",
+            "connectTimeout",
+            "ioTimeout",
         ] {
             let e = imap_err(&format!("imap://h?{opt}=0"));
             assert!(e.contains(opt), "{opt}: {e}");
         }
+    }
+
+    #[test]
+    fn imap_timeouts_parse_and_reject() {
+        let c =
+            ImapEndpointConfig::from_uri("imap://h?connectTimeout=15000&ioTimeout=25000").unwrap();
+        assert_eq!(c.connect_timeout, Duration::from_millis(15_000));
+        assert_eq!(c.io_timeout, Duration::from_millis(25_000));
+        let e = imap_err("imap://h?connectTimeout=0");
+        assert!(e.contains("connectTimeout"), "{e}");
+        let e = imap_err("imap://h?ioTimeout=");
+        assert!(e.contains("ioTimeout"), "{e}");
     }
 
     #[test]

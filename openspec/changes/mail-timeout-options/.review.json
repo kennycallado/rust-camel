@@ -1,0 +1,18 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e39a63a63ffelPPv2XNuv5RicS",
+  "impl_hash": "sha256:9f1f8321e8fb38ce9539a11cb3c7a9eddd667456921d7c467ab7ca8405a31734",
+  "head": "2841ba2558b0b8af71383f6067d8ff1ea8967db5",
+  "date": "2026-11-10",
+  "findings": [
+    "minor (accepted): SMTP integration stall point is after-DATA (strictly harsher, same single timeout wrap), not the scenario's minimal accept-then-silence; deviation documented in the test doc-comment and sanctioned by the blessed plan",
+    "minor (out-of-scope, pre-existing convention): timeout defaults pinned in 4 surfaces (config consts, metadata descriptors, docs, CONTEXT.md) without a cross-check test; suggested follow-up test not in this change's scope"
+  ],
+  "discarded": [
+    "absurd: fully-qualified std::time::Duration in two test assertions (cosmetic, ADR-0091)",
+    "absurd: IMAP connectTimeout= empty-value not separately tested (same single parse_timeout_ms helper; SMTP covers both options)"
+  ],
+  "verification": "cargo test -p camel-component-mail all green (273 lib + 43 integration); clippy -p -D warnings clean; fmt --all clean; lettre 0.11.23 claims re-verified against pinned source; no public API signature change verified"
+}

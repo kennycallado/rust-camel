@@ -35,6 +35,7 @@ async fn start(tls: SmtpTls) -> FakeSmtpServer {
         FakeSmtpServer::start(FakeSmtpOptions {
             behavior: SmtpBehavior::Accept,
             tls,
+            first_connection: None,
         }),
     )
     .await

@@ -1,0 +1,10 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "hash": "sha256:550ff8c2ca9f7c4e5346ae1e996c3e88ecdb4a9ffb551181f5c9a2cf2d67df88",
+  "expert": "experts/e_gpt",
+  "session": "ses_e39ee0272ffeiXaWxDXfIGE6LH",
+  "rounds": 2,
+  "date": "2026-11-10",
+  "notes": "Supersedes the spec blessing (spec hash sha256:1788d6e1264d281f1361bdebd1d739f765f35a11536b24a1d2ebf16c9aa62d0c, ses_e3a050b0bffeOLOsZcunCYs3VD). Round 1 APPROVED-WITH-FIXES (dead_code gate ordering, SMTP test-first ordering, overclaimed is_timeout coverage); round 2 APPROVED. Independent r_glm plan review ran 2 rounds before the bless (REJECT -> fixes -> APPROVE-WITH-FINDINGS -> minor fixed)."
+}

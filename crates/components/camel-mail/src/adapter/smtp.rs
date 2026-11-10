@@ -1,5 +1,7 @@
 //! lettre-backed SMTP helpers. Third-party types stay in this module.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use lettre::address::Envelope;
 use lettre::message::header::{HeaderName, HeaderValue};
@@ -68,6 +70,13 @@ fn transport_err(e: impl std::fmt::Display) -> MailError {
     MailError::Transport(e.to_string())
 }
 
+fn smtp_timeout_err(phase: &str, option: &str, bound: Duration) -> MailError {
+    MailError::Transport(format!(
+        "SMTP {phase} timed out after {} ms ({option})",
+        bound.as_millis()
+    ))
+}
+
 /// Render the message to RFC 5322 bytes. `Bcc` is never written; the SMTP
 /// envelope is built explicitly so Bcc-only messages still render.
 pub(crate) fn render_mime(msg: &OutboundMessage) -> Result<Vec<u8>, MailError> {
@@ -112,9 +121,12 @@ pub(crate) fn render_mime(msg: &OutboundMessage) -> Result<Vec<u8>, MailError> {
     Ok(message.formatted())
 }
 
-/// Pooled lettre SMTP transport (rustls with the ring provider).
+/// lettre SMTP transport (rustls with the ring provider). One fresh connection
+/// per send: a send abandoned on timeout can never poison the next one.
 pub(crate) struct LettreSmtpTransport {
     inner: AsyncSmtpTransport<Tokio1Executor>,
+    connect_timeout: Duration,
+    io_timeout: Duration,
 }
 
 impl LettreSmtpTransport {
@@ -160,8 +172,23 @@ impl LettreSmtpTransport {
                 .authentication(vec![Mechanism::Plain, Mechanism::Login]);
         }
 
-        let inner = builder.pool_config(PoolConfig::new()).build();
-        Ok(Self { inner })
+        let inner = builder
+            // Bounds only the per-address TCP connect (lettre's `timeout`).
+            .timeout(Some(cfg.connect_timeout))
+            // No pooling: a connection dropped mid-transaction is never reused.
+            .pool_config(PoolConfig::new().max_size(0))
+            .build();
+        Ok(Self {
+            inner,
+            connect_timeout: cfg.connect_timeout,
+            io_timeout: cfg.io_timeout,
+        })
+    }
+
+    /// Effective `(connect, io)` deadlines, for tests.
+    #[cfg(test)]
+    pub(crate) fn timeouts(&self) -> (Duration, Duration) {
+        (self.connect_timeout, self.io_timeout)
     }
 }
 
@@ -170,11 +197,16 @@ impl MailTransport for LettreSmtpTransport {
     async fn send(&self, message: &OutboundMessage) -> Result<(), MailError> {
         let envelope = build_envelope(message)?;
         let raw = render_mime(message)?;
-        let response = self
-            .inner
-            .send_raw(&envelope, &raw)
+        let response = tokio::time::timeout(self.io_timeout, self.inner.send_raw(&envelope, &raw))
             .await
-            .map_err(transport_err)?;
+            .map_err(|_| smtp_timeout_err("send", "ioTimeout", self.io_timeout))?
+            .map_err(|e| {
+                if e.is_timeout() {
+                    smtp_timeout_err("connect", "connectTimeout", self.connect_timeout)
+                } else {
+                    transport_err(e)
+                }
+            })?;
         debug!(
             reply = %response.message().collect::<Vec<_>>().join(" "),
             "mail accepted by server"
@@ -355,6 +387,44 @@ mod tests {
             LettreSmtpTransport::new(&cfg, Some(&account)),
             Err(MailError::Tls(_))
         ));
+    }
+
+    #[test]
+    fn smtp_timeout_error_names_phase_option_and_bound() {
+        let send = smtp_timeout_err("send", "ioTimeout", std::time::Duration::from_millis(500));
+        match &send {
+            MailError::Transport(msg) => assert!(
+                msg.contains("SMTP send timed out after 500 ms (ioTimeout)"),
+                "{msg}"
+            ),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+        let connect = smtp_timeout_err(
+            "connect",
+            "connectTimeout",
+            std::time::Duration::from_millis(60_000),
+        );
+        match &connect {
+            MailError::Transport(msg) => assert!(msg.contains("connectTimeout"), "{msg}"),
+            other => panic!("expected Transport, got {other:?}"),
+        }
+    }
+
+    // lettre's Pool::new spawns its cleanup loop at construction — building the transport needs a runtime.
+    #[tokio::test]
+    async fn smtp_transport_threads_configured_timeouts() {
+        let cfg = SmtpEndpointConfig::from_uri(
+            "smtp://h?from=a@x.test&ioTimeout=1000&connectTimeout=2000",
+        )
+        .expect("uri");
+        let t = LettreSmtpTransport::new(&cfg, None).expect("transport");
+        assert_eq!(
+            t.timeouts(),
+            (
+                std::time::Duration::from_millis(2000),
+                std::time::Duration::from_millis(1000)
+            )
+        );
     }
 
     #[test]
