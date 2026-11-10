@@ -1,0 +1,27 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "r_glm",
+  "session": "ses_e3a1d93c0ffeINRN6eXGmyWFUn",
+  "date": "2026-11-10",
+  "impl_hash": "sha256:e2cd7813d7bd4d4ddbb49bdc52ad9a893abf0256a9ddbfff6476f10656a8dad0",
+  "findings": [
+    "minor: row 18 (IMAP) tracked via rc-jpcqt paraphrase only — RESOLVED post-review: verbatim row-18 comment added to rc-jpcqt (id c0a3e228)",
+    "minor: rc-k1n5y -> rc-jpcqt prose-only link — RESOLVED post-review: formal relates-to edge added (bd dep relate)",
+    "minor: exclusion list cites representative examples (rabbitmq tls.rs, config context_ext.rs, bench/cli/xj rustls installs) — ACCEPTED as-is: category labels cover, none are production outbound clients"
+  ],
+  "acceptance": {
+    "table_complete": "38/38 rows, enumeration reproduced, spot-checks zero factual errors",
+    "issues_filed": "17 issues (3xP2, 7xP3, 7xP4) all discovered-from rc-s8itn, rows byte-identical",
+    "rc_jpcqt": "accuracy comment recorded on the issue + row-18 verbatim comment + formal relates-to edge from rc-k1n5y",
+    "rc_9pfby": "closed, untouched, no duplicate",
+    "zero_source_changes": "diff vs merge-base 4637270ac = 4 openspec files only"
+  },
+  "gates": {
+    "fmt_check": "PASS exit 0 (systemd-run --user scope)",
+    "rust_gates": "N/A — no Rust changed (28 gates enumerated)",
+    "lint_commits": "conductor-skipped, CI owns",
+    "doc_guide_test": "N/A — no docs diff",
+    "cargo_audit": "CI owns"
+  }
+}
