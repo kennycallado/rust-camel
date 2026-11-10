@@ -166,22 +166,32 @@ impl SurrealDbProducer {
 
         let client = self.resolve_client().await?;
 
-        match self.config.operation {
-            SurrealDbOperation::Query => self.execute_query(&client, exchange).await,
-            SurrealDbOperation::Select => self.execute_select(&client).await,
-            SurrealDbOperation::Create => self.execute_create(&client, exchange).await,
-            SurrealDbOperation::Update => self.execute_update(&client, exchange).await,
-            SurrealDbOperation::Upsert => self.execute_upsert(&client, exchange).await,
-            SurrealDbOperation::Delete => self.execute_delete(&client).await,
-            SurrealDbOperation::Patch => self.execute_patch(&client, exchange).await,
-            SurrealDbOperation::Relate => self.execute_relate(&client, exchange).await,
-            SurrealDbOperation::Vector => self.execute_vector(&client, exchange).await,
-            SurrealDbOperation::Search => self.execute_search(&client, exchange).await,
-            SurrealDbOperation::Run => self.execute_run(&client, exchange).await,
-            SurrealDbOperation::Live => Err(SurrealDbError::NotSupported(
-                "live operation is consumer-only, not producer".into(),
-            )),
-        }
+        // Design site 7: only the statement dispatch is bounded. Client
+        // resolution stays outside so pool-establishment stalls surface with
+        // their own factory phase names (sites 1-4).
+        crate::error::bound_op(
+            "statement execution",
+            self.config.operation_timeout,
+            async {
+                match self.config.operation {
+                    SurrealDbOperation::Query => self.execute_query(&client, exchange).await,
+                    SurrealDbOperation::Select => self.execute_select(&client).await,
+                    SurrealDbOperation::Create => self.execute_create(&client, exchange).await,
+                    SurrealDbOperation::Update => self.execute_update(&client, exchange).await,
+                    SurrealDbOperation::Upsert => self.execute_upsert(&client, exchange).await,
+                    SurrealDbOperation::Delete => self.execute_delete(&client).await,
+                    SurrealDbOperation::Patch => self.execute_patch(&client, exchange).await,
+                    SurrealDbOperation::Relate => self.execute_relate(&client, exchange).await,
+                    SurrealDbOperation::Vector => self.execute_vector(&client, exchange).await,
+                    SurrealDbOperation::Search => self.execute_search(&client, exchange).await,
+                    SurrealDbOperation::Run => self.execute_run(&client, exchange).await,
+                    SurrealDbOperation::Live => Err(SurrealDbError::NotSupported(
+                        "live operation is consumer-only, not producer".into(),
+                    )),
+                }
+            },
+        )
+        .await
     }
 
     /// Run a SurrealQL query with bindings and return the first result set.
@@ -1229,6 +1239,127 @@ mod tests {
         assert!(
             matches!(err, SurrealDbError::MissingParam(_)),
             "expected MissingParam, got {err:?}"
+        );
+    }
+
+    // --- design site 7: bounded statement dispatch ---
+
+    use camel_api::datasource::{
+        DatasourceCatalog, DatasourceConfig, DatasourceHandle, GetPoolFuture, PoolFactory,
+    };
+    use camel_component_api::CamelError;
+    use std::sync::Arc;
+
+    use crate::pool_factory::SurrealDbPoolFactory;
+
+    /// Catalog stub whose `get_pool` lazily creates a real `mem://` pool via
+    /// [`SurrealDbPoolFactory`] and caches it, mirroring the runtime
+    /// catalog's create-once behaviour.
+    struct MemPoolCatalog {
+        config: DatasourceConfig,
+        pool: tokio::sync::OnceCell<Arc<dyn std::any::Any + Send + Sync>>,
+    }
+
+    impl MemPoolCatalog {
+        fn new(config: DatasourceConfig) -> Self {
+            Self {
+                config,
+                pool: tokio::sync::OnceCell::new(),
+            }
+        }
+    }
+
+    impl DatasourceCatalog for MemPoolCatalog {
+        fn get_config(&self, name: &str) -> Option<DatasourceConfig> {
+            (name == "memds").then(|| self.config.clone())
+        }
+
+        fn get_pool<'a>(&'a self, name: &'a str) -> GetPoolFuture<'a> {
+            Box::pin(async move {
+                if name != "memds" {
+                    return Err(CamelError::Config(format!(
+                        "MemPoolCatalog has no datasource '{name}'"
+                    )));
+                }
+                let inner = self
+                    .pool
+                    .get_or_try_init(|| async { SurrealDbPoolFactory.create(&self.config).await })
+                    .await?;
+                Ok(DatasourceHandle::new(
+                    name.to_string(),
+                    "surrealdb".into(),
+                    Arc::clone(inner),
+                ))
+            })
+        }
+
+        fn register_factory(
+            &self,
+            _kind: &str,
+            _factory: Arc<dyn PoolFactory>,
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    fn mem_datasource() -> DatasourceConfig {
+        DatasourceConfig {
+            db_url: "mem://".to_string(),
+            provider: Some("surrealdb".into()),
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn producer_query_on_mem_succeeds_with_default_bounds() {
+        // The statement wrapper must be transparent: a healthy mem:// query
+        // returns its rows with the default 30s operation bound untripped.
+        let catalog = Arc::new(MemPoolCatalog::new(mem_datasource()));
+        let config =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=memds&query=RETURN%201")
+                .expect("the test URI must parse");
+        let producer = SurrealDbProducer::new(config, Some(catalog), "test-route");
+        let exchange = Exchange::new(Message::new(Body::Empty));
+
+        let result = producer
+            .execute(&exchange)
+            .await
+            .expect("a mem:// query must succeed under the default bounds");
+        let rows = result
+            .as_array()
+            .expect("query results must be a JSON array");
+        assert!(!rows.is_empty(), "RETURN 1 must yield a row: {result}");
+    }
+
+    #[tokio::test]
+    async fn statement_elapsed_arm_trips_named_timeout() {
+        // The SAME production wrapper `execute` uses: a pending statement
+        // future must trip the bound and name the phase and deadline.
+        tokio::time::pause();
+        let err = crate::error::bound_op::<serde_json::Value, _>(
+            "statement execution",
+            std::time::Duration::from_millis(30000),
+            std::future::pending(),
+        )
+        .await
+        .expect_err("a pending statement must trip the deadline");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("statement execution"),
+            "error must name the phase: {msg}"
+        );
+        assert!(msg.contains("30000ms"), "error must name the bound: {msg}");
+        assert!(
+            !err.is_retryable(),
+            "a timed-out statement must not be retried: {err:?}"
         );
     }
 }

@@ -43,6 +43,26 @@ use crate::error::SurrealDbError;
 use crate::headers;
 use crate::producer::SurrealClient;
 
+/// Establishes a LIVE SELECT subscription on `table`, bounded by
+/// `operation_timeout` (design site 8).
+///
+/// Extracted from `SurrealDbConsumer::start` so the production wrapper is
+/// directly testable. The SDK's `Select::live()` builder is awaited inside
+/// [`crate::error::bound_op`], which drops it at the deadline and returns the
+/// named [`SurrealDbError::Timeout`]; non-timeout SDK failures surface as
+/// [`SurrealDbError::Query`] with the source preserved.
+pub(crate) async fn subscribe_live(
+    client: &SurrealClient,
+    table: &str,
+    operation_timeout: Duration,
+) -> Result<surrealdb::Stream<Vec<SurrealValue>>, SurrealDbError> {
+    let builder = client.select::<Vec<SurrealValue>>(table).live();
+    crate::error::bound_op("live subscription", operation_timeout, async {
+        builder.await.map_err(SurrealDbError::query)
+    })
+    .await
+}
+
 /// Push-based consumer for SurrealDB LIVE SELECT notifications.
 ///
 /// Struct is deliberately simple — no `live_query_id` field. The
@@ -129,13 +149,15 @@ impl Consumer for SurrealDbConsumer {
 
             crate::query::validate_identifier(&table).map_err(CamelError::from)?;
 
-            // Start the LIVE SELECT stream using the SDK's fluent API.
-            let stream = client
-                .select::<Vec<SurrealValue>>(table.as_str())
-                .live()
+            // Start the LIVE SELECT stream using the SDK's fluent API, under
+            // the configured operation bound (design site 8).
+            let stream = subscribe_live(&client, &table, self.config.operation_timeout)
                 .await
-                .map_err(|e| {
-                    CamelError::ProcessorError(format!("surrealdb LIVE SELECT failed: {e}"))
+                .map_err(|e| match e {
+                    SurrealDbError::Timeout { .. } => CamelError::from(e),
+                    other => {
+                        CamelError::ProcessorError(format!("surrealdb LIVE SELECT failed: {other}"))
+                    }
                 })?;
 
             Ok((client, table, stream))
@@ -397,5 +419,71 @@ mod tests {
         } else {
             panic!("expected Body::Json");
         }
+    }
+
+    // --- design site 8: bounded live subscription ---
+
+    #[tokio::test]
+    async fn live_subscription_elapsed_arm_trips_named_timeout() {
+        // The SAME production wrapper `subscribe_live` routes through: a
+        // pending builder future must trip the bound and name the phase.
+        tokio::time::pause();
+        let err = crate::error::bound_op::<surrealdb::Stream<Vec<SurrealValue>>, _>(
+            "live subscription",
+            Duration::from_millis(5000),
+            std::future::pending(),
+        )
+        .await
+        .expect_err("a pending subscription must trip the deadline");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("live subscription"),
+            "error must name the phase: {msg}"
+        );
+        assert!(msg.contains("5000ms"), "error must name the bound: {msg}");
+    }
+
+    #[tokio::test]
+    async fn subscribe_live_on_mem_succeeds() {
+        use camel_api::datasource::{DatasourceConfig, PoolFactory};
+
+        use crate::pool_factory::SurrealDbPoolFactory;
+
+        let config = DatasourceConfig {
+            db_url: "mem://".to_string(),
+            provider: Some("surrealdb".into()),
+            max_connections: None,
+            min_connections: None,
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: None,
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        };
+        let handle = SurrealDbPoolFactory
+            .create(&config)
+            .await
+            .expect("mem:// create must succeed");
+        let client = handle
+            .downcast::<SurrealClient>()
+            .expect("handle must be a Surreal<Any> client");
+        // LIVE SELECT resolves the table up front; define it so the
+        // subscription targets a real (schemaless) table.
+        client
+            .query("DEFINE TABLE events SCHEMALESS")
+            .await
+            .expect("define-table transport must succeed")
+            .check()
+            .expect("define-table statement must succeed");
+
+        // The subscription wrapper must be transparent: the embedded tier
+        // supports LIVE queries, so a healthy subscribe returns the stream.
+        let stream = subscribe_live(&client, "events", Duration::from_secs(30))
+            .await
+            .expect("mem:// supports LIVE queries");
+        // Dropping the stream sends KILL (see the module docs).
+        drop(stream);
     }
 }

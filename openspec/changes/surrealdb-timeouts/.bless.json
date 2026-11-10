@@ -1,0 +1,8 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "expert": "experts/e_gpt",
+  "hash": "sha256:93296490c42a57ed866462a4ca32b8a4380c194f1cc8d8e8107597bf14de24b5",
+  "notes": "Spec blessed at sha256:9f94… after one REJECT round (7 findings fixed). Plan: first dispatch BLESS-WITH-FIXES (2 items: executable override seam via apply_datasource_timeouts; real elapsed-path tests through shared bound_op wrapper), fixed, second dispatch BLESS. Reviewer loop: 2 rounds (8 findings fixed, incl. toml as_integer, Stream<Vec<SurrealValue>>, lint-test-sleep annotation, impl IntoFuture helper bounds, honest CI-proof wording).",
+  "date": "2026-11-10"
+}

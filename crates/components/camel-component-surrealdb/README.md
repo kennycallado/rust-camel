@@ -60,6 +60,17 @@ password = "root"
 
 The `extra` map requires four fields: `namespace`, `database`, `username`, `password`.
 
+Two optional timeout keys are also accepted (TOML integers, milliseconds):
+
+| Key | Default | Bound |
+|-----|---------|-------|
+| `connect_timeout_ms` | `10000` | One connect attempt |
+| `operation_timeout_ms` | `30000` | Signin, namespace/database selection, statement execution, live subscription |
+
+Zero, negative, or non-integer values are rejected at datasource pool and endpoint creation with an error naming the key. There is no upper cap. Without the keys these calls are bounded by the defaults; they were unbounded before the timeout keys were introduced.
+
+The bounds are local: a timeout releases the caller, and the server may finish the orphaned work. No server-side cancellation is claimed. The health check and teardown run under a built-in `30000` ms bound that cannot be configured.
+
 **Protocols:** `ws://`, `wss://`, `http://`, `https://`. The `live` operation requires WebSocket (`ws`/`wss`) — HTTP-based live queries are rejected at endpoint creation.
 
 ## URI Options
@@ -91,6 +102,10 @@ mirror `camel-sql` exactly).
   `connect()` transport-establishment call using `NetworkRetryPolicy::default()`.
   Only `Connection`-class errors are retried. Post-connect steps (`signin`,
   `use_ns`, `use_db`) are not retried — auth failures are permanent.
+  A timed-out connect attempt (`connect_timeout_ms` elapsed) is also not
+  retried: the attempt already spent its full deadline, so re-arming it would
+  stack bounds on a stalled server. Fast transient failures (connection
+  refused, DNS, TLS drop) still retry under the same policy (ADR-0013).
 
 **Not yet consumed:**
 

@@ -8,6 +8,7 @@ use camel_component_api::NetworkRetryPolicy;
 use url::form_urlencoded;
 
 use crate::error::SurrealDbError;
+use crate::pool_factory::SurrealDbTimeouts;
 
 const DEFAULT_VECTOR_FIELD: &str = "embedding";
 
@@ -100,6 +101,15 @@ pub struct SurrealDbEndpointConfig {
     /// serialized. Mirrors `camel-sql`'s `retry_set_from_uri`. `pub(crate)` so
     /// same-crate tests can construct configs via struct-update syntax.
     pub(crate) retry_set_from_uri: bool,
+    /// Bound for one connect attempt. Datasource-scoped (`connect_timeout_ms`
+    /// extra), not a URI parameter; `create_endpoint` overrides the `Default`
+    /// value from the datasource extras.
+    pub connect_timeout: Duration,
+    /// Bound for one post-connect SDK operation (signin, namespace/database
+    /// selection, statement execution, live subscription). Datasource-scoped
+    /// (`operation_timeout_ms` extra), not a URI parameter; `create_endpoint`
+    /// overrides the `Default` value from the datasource extras.
+    pub operation_timeout: Duration,
 }
 
 impl Default for SurrealDbEndpointConfig {
@@ -122,6 +132,10 @@ impl Default for SurrealDbEndpointConfig {
             function: None,
             retry: NetworkRetryPolicy::default(),
             retry_set_from_uri: false,
+            connect_timeout: Duration::from_millis(SurrealDbTimeouts::DEFAULT_CONNECT_TIMEOUT_MS),
+            operation_timeout: Duration::from_millis(
+                SurrealDbTimeouts::DEFAULT_OPERATION_TIMEOUT_MS,
+            ),
         }
     }
 }
@@ -320,6 +334,12 @@ impl SurrealDbEndpointConfig {
             function,
             retry,
             retry_set_from_uri,
+            // Datasource-scoped extras, not URI parameters: `create_endpoint`
+            // overrides these from the datasource config.
+            connect_timeout: Duration::from_millis(SurrealDbTimeouts::DEFAULT_CONNECT_TIMEOUT_MS),
+            operation_timeout: Duration::from_millis(
+                SurrealDbTimeouts::DEFAULT_OPERATION_TIMEOUT_MS,
+            ),
         })
     }
 
@@ -940,5 +960,15 @@ mod tests {
             "allow_dynamic_query=1 must be rejected (only true/false accepted)"
         );
         assert!(matches!(result.unwrap_err(), CamelError::InvalidUri(_)));
+    }
+
+    // --- Datasource-scoped timeouts (defaults ride the config struct) ---
+
+    #[test]
+    fn endpoint_config_timeout_defaults() {
+        let cfg =
+            SurrealDbEndpointConfig::from_uri("surrealdb:query?datasource=main").expect("uri");
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(10));
+        assert_eq!(cfg.operation_timeout, Duration::from_secs(30));
     }
 }

@@ -23,7 +23,8 @@ _Avoid_: command, action
 
 **SurrealDB datasource**:
 A named `Camel.toml` datasource. `db_url` selects the server. The `extra` map
-contains `namespace`, `database`, `username`, and `password`.
+contains `namespace`, `database`, `username`, and `password`, plus the optional
+`connect_timeout_ms` and `operation_timeout_ms` bounds.
 _Avoid_: connection string, database config
 
 ## Log-level policy
@@ -133,3 +134,37 @@ Producer operations do not retry. A non-idempotent write can reach the server
 before the client observes a transport failure, so automatic replay can create
 duplicates. `SurrealDbEndpointConfig.retry` preserves the public contract for a
 future read-side retry classifier. ADR-0013 owns the retry semantics.
+
+## Timeouts
+
+Both bounds are datasource `extra` keys (TOML integers, milliseconds), parsed
+by `SurrealDbTimeouts::from_extra` at pool and endpoint creation:
+
+| Key | Default | Covers |
+| --- | --- | --- |
+| `connect_timeout_ms` | `10000` | One `connect()` attempt |
+| `operation_timeout_ms` | `30000` | `signin`, `use_ns`, `use_db`, producer statement dispatch, live subscription |
+
+A present key must be a positive integer. Zero, negative, and non-integer
+values fail pool creation with `CamelError::Config` (endpoint creation
+surfaces it as `EndpointCreationFailed`); both name the key. There is no
+upper cap.
+
+The health check (`INFO FOR DB`) and `invalidate()` run under the built-in
+`DEFAULT_OPERATION_TIMEOUT_MS` (30000). Their `DatasourceHandle` carries no
+configuration, so the extras do not reach them. Health expiry reports
+`HealthStatus::Unhealthy`; teardown expiry returns an error.
+
+A timeout surfaces as `SurrealDbError::Timeout { phase, deadline_ms }` and is
+not retryable: the attempt already consumed its deadline, so a retry would
+stack bounds on a stalled server. Fast transient failures still retry under
+the ADR-0013 policy. Setup-phase expiry travels as an internal `surrealdb`
+error, so the setup transaction-conflict classifier fails fast.
+
+Cancellation is local. `tokio::time::timeout` drops the future. The SDK has no
+cancellation point, and the server may finish the orphaned work. No server-side
+cancellation is claimed.
+
+Residual: notification delivery after the live subscription starts is not
+bounded, because the subscription is long-lived by design. A stalled
+subscription is undetectable without a heartbeat. Tracked as bd `rc-lft0b`.

@@ -1,7 +1,10 @@
 //! SurrealDB PoolFactory — creates Surreal\<Any\> clients and registers with the datasource catalog.
 
 use std::any::Any as StdAny;
+use std::collections::HashMap;
+use std::future::IntoFuture;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_api::datasource::{
     CheckFuture, CloseFuture, CreatePoolFuture, DatasourceConfig, PoolFactory,
@@ -72,6 +75,143 @@ fn extra_str_or_default(
     }
 }
 
+/// Datasource-scoped deadlines for the SDK calls the component owns.
+///
+/// Parsed from the datasource `extra` map as TOML integers in milliseconds
+/// (`connect_timeout_ms`, `operation_timeout_ms`). Both are connection/server
+/// concerns, so they live on the datasource (which already owns the URL and
+/// credentials) rather than on the endpoint URI.
+#[derive(Debug)]
+pub(crate) struct SurrealDbTimeouts {
+    /// Bound for one connect attempt in the factory's `create`.
+    pub connect: Duration,
+    /// Bound for one post-connect operation (signin, namespace/database
+    /// selection, statement execution, live subscription).
+    pub operation: Duration,
+}
+
+impl SurrealDbTimeouts {
+    /// Default connect bound: 10s (workspace precedent for connect).
+    pub(crate) const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
+    /// Default per-operation bound: 30s (workspace precedent for a request).
+    pub(crate) const DEFAULT_OPERATION_TIMEOUT_MS: u64 = 30_000;
+
+    /// Parses the timeout extras, applying the defaults for absent keys.
+    ///
+    /// A present key MUST be a positive TOML integer (milliseconds). Zero,
+    /// negative, and non-integer values (including strings and booleans) are
+    /// rejected with an error naming the offending option. There is no upper
+    /// cap: a very long bound is a deliberate operator choice.
+    pub(crate) fn from_extra(
+        extra: &HashMap<String, toml::Value>,
+    ) -> Result<Self, camel_api::CamelError> {
+        Ok(Self {
+            connect: Self::parse_ms(
+                extra,
+                "connect_timeout_ms",
+                Self::DEFAULT_CONNECT_TIMEOUT_MS,
+            )?,
+            operation: Self::parse_ms(
+                extra,
+                "operation_timeout_ms",
+                Self::DEFAULT_OPERATION_TIMEOUT_MS,
+            )?,
+        })
+    }
+
+    /// Parses one millisecond bound, falling back to `default_ms` when absent.
+    fn parse_ms(
+        extra: &HashMap<String, toml::Value>,
+        key: &str,
+        default_ms: u64,
+    ) -> Result<Duration, camel_api::CamelError> {
+        match extra.get(key) {
+            None => Ok(Duration::from_millis(default_ms)),
+            Some(value) => match value.as_integer() {
+                None => Err(camel_api::CamelError::Config(format!(
+                    "datasource extra field '{key}' must be a positive integer \
+                     (milliseconds), got {}",
+                    value.type_str()
+                ))),
+                Some(ms) if ms <= 0 => Err(camel_api::CamelError::Config(format!(
+                    "datasource extra field '{key}' must be a positive integer \
+                     (milliseconds), got {ms}"
+                ))),
+                Some(ms) => Ok(Duration::from_millis(ms as u64)),
+            },
+        }
+    }
+}
+
+/// Builds the SDK error a bounded setup call returns on deadline expiry.
+///
+/// The setup `retry_async` is typed `surrealdb::Error` and classifies via
+/// [`crate::error::is_transaction_conflict`]. An internal message is not a
+/// transaction conflict, so a setup timeout fails fast while the honest
+/// phase+bound text survives into the outer error.
+pub(crate) fn setup_timeout_error(phase: &'static str, deadline_ms: u64) -> surrealdb::Error {
+    surrealdb::Error::internal(format!(
+        "surrealdb {phase} exceeded the {deadline_ms}ms deadline"
+    ))
+}
+
+/// Runs one health-check query under the built-in operation bound.
+///
+/// The `check` hook receives only a [`camel_api::datasource::DatasourceHandle`],
+/// which carries no configuration, so the built-in
+/// [`SurrealDbTimeouts::DEFAULT_OPERATION_TIMEOUT_MS`] applies here. Deadline
+/// expiry and SDK failure both report [`HealthStatus::Unhealthy`]; only the
+/// log line distinguishes them.
+///
+/// Parameterized over the future so the elapsed branch is testable: a real
+/// client answers `INFO FOR DB` immediately on every tier, so the deadline
+/// can only be exercised with a future that never resolves. `name` is the
+/// datasource name echoed in the warn lines, mirroring [`invalidate_bound`].
+async fn health_probe(
+    fut: impl IntoFuture<Output = Result<surrealdb::IndexedResults, surrealdb::Error>>,
+    name: &str,
+) -> HealthStatus {
+    let deadline_ms = SurrealDbTimeouts::DEFAULT_OPERATION_TIMEOUT_MS;
+    match tokio::time::timeout(Duration::from_millis(deadline_ms), fut).await {
+        Ok(Ok(_)) => HealthStatus::Healthy,
+        Ok(Err(e)) => {
+            tracing::warn!("datasource '{}' health check failed: {}", name, e);
+            HealthStatus::Unhealthy
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                "datasource '{}' surrealdb health check exceeded the {}ms deadline",
+                name,
+                deadline_ms
+            );
+            HealthStatus::Unhealthy
+        }
+    }
+}
+
+/// Runs the teardown `invalidate()` call under the built-in operation bound.
+///
+/// Like [`health_probe`], the `close` hook carries no configuration, so the
+/// built-in [`SurrealDbTimeouts::DEFAULT_OPERATION_TIMEOUT_MS`] applies.
+/// Parameterized over the future for the same reason: a `mem://` client's
+/// `invalidate()` returns at once, so the elapsed branch needs a future that
+/// never resolves.
+async fn invalidate_bound(
+    fut: impl IntoFuture<Output = Result<(), surrealdb::Error>>,
+    name: &str,
+) -> Result<(), camel_api::CamelError> {
+    let deadline_ms = SurrealDbTimeouts::DEFAULT_OPERATION_TIMEOUT_MS;
+    match tokio::time::timeout(Duration::from_millis(deadline_ms), fut).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(camel_api::CamelError::ProcessorError(format!(
+            "datasource '{name}': surrealdb invalidate failed: {e}"
+        ))),
+        Err(_elapsed) => Err(camel_api::CamelError::ProcessorError(format!(
+            "datasource '{name}': surrealdb invalidate exceeded the {deadline_ms}ms deadline"
+        ))),
+    }
+}
+
 /// PoolFactory for SurrealDB. Creates a `Surreal<Any>` client per datasource.
 ///
 /// Auth order (per SDK examples + spike): connect → signin → use_ns → use_db.
@@ -119,6 +259,12 @@ impl PoolFactory for SurrealDbPoolFactory {
     fn create<'a>(&'a self, config: &'a DatasourceConfig) -> CreatePoolFuture<'a> {
         Box::pin(async move {
             let endpoint = &config.db_url;
+            // Deadline extras are parsed first so an invalid value fails
+            // before any credential lookup or connection attempt. The `?`
+            // maps `CamelError::Config` straight through, naming the option.
+            let timeouts = SurrealDbTimeouts::from_extra(&config.extra)?;
+            let connect_ms = timeouts.connect.as_millis() as u64;
+            let operation_ms = timeouts.operation.as_millis() as u64;
             // `mem://` spawns an isolated embedded instance with
             // authentication disabled per connect — there is no root user to
             // sign in, so credentials are not required and ns/db default to
@@ -152,8 +298,9 @@ impl PoolFactory for SurrealDbPoolFactory {
                 "surrealdb",
                 "connect",
                 || async {
-                    connect(endpoint)
+                    tokio::time::timeout(timeouts.connect, connect(endpoint))
                         .await
+                        .map_err(|_| crate::error::timeout_error("connect", connect_ms))?
                         .map_err(|source| SurrealDbError::Connection { source })
                 },
                 SurrealDbError::is_retryable,
@@ -178,15 +325,22 @@ impl PoolFactory for SurrealDbPoolFactory {
                 "setup",
                 || async {
                     if let Some((username, password)) = &credentials {
-                        client
-                            .signin(Root {
+                        tokio::time::timeout(
+                            timeouts.operation,
+                            client.signin(Root {
                                 username: username.clone(),
                                 password: password.clone(),
-                            })
-                            .await?;
+                            }),
+                        )
+                        .await
+                        .map_err(|_| setup_timeout_error("signin", operation_ms))??;
                     }
-                    client.use_ns(&ns).await?;
-                    client.use_db(&db).await?;
+                    tokio::time::timeout(timeouts.operation, client.use_ns(&ns))
+                        .await
+                        .map_err(|_| setup_timeout_error("namespace selection", operation_ms))??;
+                    tokio::time::timeout(timeouts.operation, client.use_db(&db))
+                        .await
+                        .map_err(|_| setup_timeout_error("database selection", operation_ms))??;
                     Ok(())
                 },
                 crate::error::is_transaction_conflict,
@@ -214,13 +368,7 @@ impl PoolFactory for SurrealDbPoolFactory {
     fn check<'a>(&'a self, handle: &'a camel_api::datasource::DatasourceHandle) -> CheckFuture<'a> {
         Box::pin(async move {
             match handle.downcast::<Surreal<SurrealAny>>() {
-                Ok(client) => match client.query("INFO FOR DB").await {
-                    Ok(_) => HealthStatus::Healthy,
-                    Err(e) => {
-                        tracing::warn!("datasource '{}' health check failed: {}", handle.name, e);
-                        HealthStatus::Unhealthy
-                    }
-                },
+                Ok(client) => health_probe(client.query("INFO FOR DB"), &handle.name).await,
                 Err(_) => HealthStatus::Unhealthy,
             }
         })
@@ -243,13 +391,9 @@ impl PoolFactory for SurrealDbPoolFactory {
             // the call is hygiene: nothing is revoked (the SDK's own doc
             // example runs `invalidate()` on a fresh `mem://` client and
             // expects Ok), but it must still complete Ok so a teardown
-            // reports real failures only.
-            client.invalidate().await.map_err(|e| {
-                camel_api::CamelError::ProcessorError(format!(
-                    "datasource '{}': surrealdb invalidate failed: {}",
-                    handle.name, e
-                ))
-            })?;
+            // reports real failures only. The call runs under the built-in
+            // operation bound so a wedged session cannot stall teardown.
+            invalidate_bound(client.invalidate(), &handle.name).await?;
             Ok(())
         })
     }
@@ -266,6 +410,7 @@ impl PoolFactory for SurrealDbPoolFactory {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::time::Duration;
 
     use camel_api::datasource::DatasourceConfig;
     use toml::Value as TomlValue;
@@ -362,6 +507,118 @@ mod tests {
         let config = make_test_config("ws://localhost:8000");
         let err = extra_str(&config, "nonexistent").unwrap_err();
         assert!(err.to_string().contains("nonexistent"));
+    }
+
+    // --- timeout extras (datasource-scoped deadlines) ---
+
+    #[test]
+    fn timeouts_default_when_extras_absent() {
+        let extra = HashMap::new();
+        let timeouts =
+            SurrealDbTimeouts::from_extra(&extra).expect("absent extras must use the defaults");
+        assert_eq!(timeouts.connect, Duration::from_secs(10));
+        assert_eq!(timeouts.operation, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn timeouts_explicit_values_used() {
+        let mut extra = HashMap::new();
+        extra.insert("connect_timeout_ms".into(), TomlValue::Integer(100));
+        extra.insert("operation_timeout_ms".into(), TomlValue::Integer(5000));
+        let timeouts =
+            SurrealDbTimeouts::from_extra(&extra).expect("valid integers must be accepted");
+        assert_eq!(timeouts.connect, Duration::from_millis(100));
+        assert_eq!(timeouts.operation, Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn timeouts_zero_rejected_naming_option() {
+        let mut connect_extra = HashMap::new();
+        connect_extra.insert("connect_timeout_ms".into(), TomlValue::Integer(0));
+        let err = SurrealDbTimeouts::from_extra(&connect_extra)
+            .expect_err("connect_timeout_ms = 0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("connect_timeout_ms"),
+            "error must name the option: {msg}"
+        );
+        assert!(
+            msg.contains("positive integer"),
+            "error must state the positive-integer rule: {msg}"
+        );
+
+        let mut operation_extra = HashMap::new();
+        operation_extra.insert("operation_timeout_ms".into(), TomlValue::Integer(0));
+        let err = SurrealDbTimeouts::from_extra(&operation_extra)
+            .expect_err("operation_timeout_ms = 0 must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("operation_timeout_ms"),
+            "error must name the option: {msg}"
+        );
+        assert!(
+            msg.contains("positive integer"),
+            "error must state the positive-integer rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn timeouts_negative_rejected() {
+        let mut extra = HashMap::new();
+        extra.insert("connect_timeout_ms".into(), TomlValue::Integer(-1));
+        let err = SurrealDbTimeouts::from_extra(&extra)
+            .expect_err("connect_timeout_ms = -1 must be rejected");
+        assert!(
+            err.to_string().contains("connect_timeout_ms"),
+            "error must name the option: {err}"
+        );
+    }
+
+    #[test]
+    fn timeouts_empty_string_rejected() {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "operation_timeout_ms".into(),
+            TomlValue::String(String::new()),
+        );
+        let err = SurrealDbTimeouts::from_extra(&extra)
+            .expect_err("operation_timeout_ms = \"\" must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("operation_timeout_ms"),
+            "error must name the option: {msg}"
+        );
+        assert!(
+            msg.contains("positive integer"),
+            "error must state the positive-integer rule: {msg}"
+        );
+    }
+
+    #[test]
+    fn timeouts_non_numeric_rejected() {
+        let mut extra = HashMap::new();
+        extra.insert("operation_timeout_ms".into(), TomlValue::Boolean(true));
+        let err = SurrealDbTimeouts::from_extra(&extra)
+            .expect_err("operation_timeout_ms = true must be rejected");
+        assert!(
+            err.to_string().contains("operation_timeout_ms"),
+            "error must name the option: {err}"
+        );
+    }
+
+    #[test]
+    fn setup_timeout_error_is_not_transaction_conflict() {
+        let err = setup_timeout_error("signin", 30000);
+        assert!(
+            !crate::error::is_transaction_conflict(&err),
+            "a setup deadline expiry must not be classified as a transaction conflict"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("signin"), "message must name the phase: {msg}");
+        assert!(
+            msg.contains("30000ms"),
+            "message must name the bound: {msg}"
+        );
     }
 
     // --- URL redaction tests (CRITICAL: secret leak prevention) ---
@@ -608,6 +865,182 @@ mod tests {
         assert!(
             err.to_string().contains("username"),
             "missing-extra error must name the field: {err}"
+        );
+    }
+
+    // --- deadline behaviour (design sites 1, 5, 6) ---
+
+    #[tokio::test]
+    async fn factory_parse_rejects_bad_timeout_before_connecting() {
+        // The timeout extras are parsed before the credential extras and
+        // before any connect attempt: a rejected value must surface with no
+        // network I/O (the URL below is never dialled).
+        let factory = SurrealDbPoolFactory;
+        let mut config = make_test_config("ws://127.0.0.1:1");
+        config
+            .extra
+            .insert("connect_timeout_ms".into(), TomlValue::Integer(0));
+        let err = factory
+            .create(&config)
+            .await
+            .expect_err("connect_timeout_ms = 0 must be rejected before connecting");
+        assert!(
+            err.to_string().contains("connect_timeout_ms"),
+            "error must name the rejected option: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_endpoint_trips_connect_bound() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener must bind");
+        let addr = listener
+            .local_addr()
+            .expect("a bound listener must expose its address");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept must not fail");
+            // Hold the socket open: dropping it would send a FIN and abort
+            // the ws handshake as a non-timeout transport error instead of
+            // letting the connect bound trip.
+            tokio::time::sleep(Duration::from_secs(30)).await; // allow-test-sleep: holds the accepted socket open so the ws handshake stalls (required by this test)
+            drop(stream);
+        });
+
+        let mut config = make_test_config(&format!("ws://{addr}"));
+        config
+            .extra
+            .insert("connect_timeout_ms".into(), TomlValue::Integer(100));
+
+        let factory = SurrealDbPoolFactory;
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), factory.create(&config))
+            .await
+            .expect("the connect bound must trip well inside the 5s outer guard");
+        let elapsed = started.elapsed();
+
+        let err = outcome.expect_err("a stalled endpoint must not yield a client");
+        assert!(
+            err.to_string()
+                .contains("surrealdb connect exceeded the 100ms deadline"),
+            "error must name the connect phase and bound: {err}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "the configured bound must have elapsed, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_connect_attempt_is_not_retried() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener must bind");
+        let addr = listener
+            .local_addr()
+            .expect("a bound listener must expose its address");
+        let accepts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accept_counter = Arc::clone(&accepts);
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept must not fail");
+            accept_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Hold the socket open so the handshake stalls (see the
+            // sibling test for why the stream must not be dropped).
+            tokio::time::sleep(Duration::from_secs(30)).await; // allow-test-sleep: holds the accepted socket open so the ws handshake stalls (required by this test)
+            drop(stream);
+        });
+
+        let mut config = make_test_config(&format!("ws://{addr}"));
+        config
+            .extra
+            .insert("connect_timeout_ms".into(), TomlValue::Integer(100));
+
+        let factory = SurrealDbPoolFactory;
+        let outcome = tokio::time::timeout(Duration::from_secs(5), factory.create(&config))
+            .await
+            .expect("the connect bound must trip well inside the 5s outer guard");
+        let err = outcome.expect_err("a stalled endpoint must not yield a client");
+        assert!(
+            err.to_string()
+                .contains("surrealdb connect exceeded the 100ms deadline"),
+            "error must name the connect phase and bound: {err}"
+        );
+        assert_eq!(
+            accepts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a timed-out connect attempt must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_check_timeout_maps_to_unhealthy() {
+        // Real clock for `create` and the happy arm: the mem:// engine
+        // hands the connect off to another thread, so a paused clock would
+        // auto-advance to the 10s connect deadline before that handoff
+        // completes. Only the elapsed arm needs a paused clock.
+        let factory = SurrealDbPoolFactory;
+        let config = make_mem_config();
+        let handle = factory
+            .create(&config)
+            .await
+            .expect("mem:// create must succeed");
+        let client = handle
+            .downcast::<Surreal<SurrealAny>>()
+            .expect("handle must be a Surreal<Any> client");
+
+        assert_eq!(
+            health_probe(client.query("INFO FOR DB"), "test-ds").await,
+            HealthStatus::Healthy,
+            "a probe that completes must report Healthy"
+        );
+
+        // With the clock paused the 30s operation bound fires as soon as the
+        // runtime is idle, so the pending future trips it immediately.
+        tokio::time::pause();
+        assert_eq!(
+            health_probe(
+                std::future::pending::<Result<surrealdb::IndexedResults, surrealdb::Error>>(),
+                "test-ds",
+            )
+            .await,
+            HealthStatus::Unhealthy,
+            "a probe past its deadline must report Unhealthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalidate_timeout_names_datasource_and_deadline() {
+        // Real clock for `create` and the happy arm (see the sibling test for
+        // why); paused only for the elapsed arm.
+        let factory = SurrealDbPoolFactory;
+        let config = make_mem_config();
+        let handle = factory
+            .create(&config)
+            .await
+            .expect("mem:// create must succeed");
+        let client = handle
+            .downcast::<Surreal<SurrealAny>>()
+            .expect("handle must be a Surreal<Any> client");
+
+        invalidate_bound(client.invalidate(), "statedb")
+            .await
+            .expect("a completing invalidate must return Ok");
+
+        tokio::time::pause();
+        let err = invalidate_bound(
+            std::future::pending::<Result<(), surrealdb::Error>>(),
+            "statedb",
+        )
+        .await
+        .expect_err("a stalled invalidate must trip the deadline");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("statedb"),
+            "error must name the datasource: {msg}"
+        );
+        assert!(
+            msg.contains("invalidate exceeded the 30000ms deadline"),
+            "error must name the teardown phase and bound: {msg}"
         );
     }
 }

@@ -133,7 +133,24 @@ username = "root"
 password = "root"
 ```
 
-The `extra` map carries `namespace`, `database`, `username`, and `password`. The transport schemes are `ws://`, `wss://`, `http://`, and `https://`. The `live` operation requires `ws` or `wss`. See the [Database](database.md#datasource-configuration) page for the shared datasource contract.
+The `extra` map requires `namespace`, `database`, `username`, and `password`. It also accepts two optional timeout keys, both TOML integers in milliseconds:
+
+| Key | Default | Bound |
+| --- | --- | --- |
+| `connect_timeout_ms` | `10000` | One connect attempt |
+| `operation_timeout_ms` | `30000` | Signin, namespace selection, database selection, statement execution, and the live subscription |
+
+There is no upper cap. A zero, negative, or non-integer value fails creation of the pool or the endpoint, and the error names the offending key.
+
+The bounds are a behaviour change: these calls were previously unbounded. The defaults apply when the keys are absent.
+
+The health check (`INFO FOR DB`) and the `invalidate()` teardown use the built-in `30000` ms bound. The handle those hooks receive carries no configuration, so `operation_timeout_ms` does not reach them.
+
+A timeout releases the caller only. The component wraps each call in `tokio::time::timeout`, which drops the local future. The SDK exposes no cancellation point, so the server may finish the orphaned work. The component does not claim server-side cancellation.
+
+The polling consumer (`select`, `query`) keeps its caller-supplied `receive(timeout)` bound (ADR-0015). The timeout keys do not change it. Notification delivery after a live subscription starts is not bounded: the subscription is long-lived by design.
+
+The transport schemes are `ws://`, `wss://`, `http://`, and `https://`. The `live` operation requires `ws` or `wss`. See the [Database](database.md#datasource-configuration) page for the shared datasource contract.
 
 ## Headers
 

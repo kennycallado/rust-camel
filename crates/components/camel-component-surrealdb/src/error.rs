@@ -3,6 +3,9 @@
 //! Preserves source errors for diagnosis. Adds retryability classification
 //! for NetworkRetryPolicy.
 
+use std::future::IntoFuture;
+use std::time::Duration;
+
 /// Errors produced by the SurrealDB component.
 ///
 /// Note: `thiserror` can only derive one `From<surrealdb::Error>` per type.
@@ -58,6 +61,50 @@ pub enum SurrealDbError {
     /// Operation not supported in this context (e.g. Live on producer).
     #[error("operation not supported: {0}")]
     NotSupported(String),
+
+    /// An SDK call exceeded its configured deadline.
+    ///
+    /// Deliberately carries no `surrealdb::Error` source: a deadline expiry is
+    /// a local cancellation, not a protocol/query failure. It maps through the
+    /// `_` arm of `From<SurrealDbError> for CamelError` to `ProcessorError`.
+    #[error("surrealdb {phase} exceeded the {deadline_ms}ms deadline")]
+    Timeout {
+        /// The phase that ran out of time (e.g. `connect`).
+        phase: &'static str,
+        /// The deadline that elapsed, in milliseconds.
+        deadline_ms: u64,
+    },
+}
+
+/// Constructor for [`SurrealDbError::Timeout`].
+///
+/// The deadline wrappers call this on `tokio::time::timeout` expiry, so the
+/// surfaced text always names the phase and the bound in milliseconds.
+pub fn timeout_error(phase: &'static str, deadline_ms: u64) -> SurrealDbError {
+    SurrealDbError::Timeout { phase, deadline_ms }
+}
+
+/// Runs one component-owned SDK round trip under `deadline`.
+///
+/// This is the single production wrapper for the statement-execution and
+/// live-subscription phases (design sites 7 and 8). On deadline expiry it
+/// returns [`SurrealDbError::Timeout`] naming `phase` and the bound in
+/// milliseconds; the inner future is dropped (local cancellation only — the
+/// SDK exposes no way to cancel server-side work).
+///
+/// Parameterized over [`IntoFuture`] so the SDK's builder types (`Select`,
+/// `Create`, `Query`, …) are accepted without an explicit `.into_future()`.
+pub async fn bound_op<T, F>(
+    phase: &'static str,
+    deadline: Duration,
+    fut: F,
+) -> Result<T, SurrealDbError>
+where
+    F: IntoFuture<Output = Result<T, SurrealDbError>>,
+{
+    tokio::time::timeout(deadline, fut)
+        .await
+        .map_err(|_| timeout_error(phase, deadline.as_millis() as u64))?
 }
 
 impl SurrealDbError {
@@ -354,5 +401,17 @@ mod tests {
     fn connection_error_is_not_transaction_conflict() {
         let err = surrealdb::Error::connection("refused".into(), None);
         assert!(!is_transaction_conflict(&err));
+    }
+
+    // --- Timeout variant (deadline expiry is not a protocol error) ---
+
+    #[test]
+    fn timeout_error_display_names_phase_and_bound() {
+        let err = timeout_error("connect", 100);
+        assert_eq!(
+            err.to_string(),
+            "surrealdb connect exceeded the 100ms deadline"
+        );
+        assert!(!err.is_retryable());
     }
 }
