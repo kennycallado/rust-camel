@@ -1,0 +1,36 @@
+{
+  "kind": "plan",
+  "change": "deterministic-clause-timing",
+  "verdict": "BLESS",
+  "hash": "sha256:0277e76005c224cfa309848e3d800ee782737dfb2d49ae4f3ed47ef278c94566",
+  "expert": "@experts/e_gpt",
+  "session": "ses_e3a8962d3ffeflR0F551Z5PcgH",
+  "rounds": 2,
+  "reviewer_loop": [
+    {
+      "reviewer": "@reviewers/r_glm",
+      "session": "ses_e3a9231dfffe1g2fsL2iR5R3Cs",
+      "rounds": 2,
+      "verdicts": ["APPROVE-WITH-FINDINGS", "APPROVE"]
+    }
+  ],
+  "history": [
+    {
+      "round": 1,
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:1a232ca6913fdd6a51f50ba3fc7b84bad772e685f7737a293f277b31a09a62ad",
+      "findings": [
+        "important: universal fleet-scope execution convention added",
+        "important: unique systemd unit names enforced for every invocation",
+        "minor: design.md constants paragraph aligned with tasks.md"
+      ]
+    },
+    {
+      "round": 2,
+      "verdict": "BLESS",
+      "hash": "sha256:0277e76005c224cfa309848e3d800ee782737dfb2d49ae4f3ed47ef278c94566"
+    }
+  ],
+  "spec_bless_superseded": "sha256:203291c23123dfbe09afd2c8deb5f6531472e471637e3baf84171f1818ede786",
+  "date": "2026-11-10"
+}

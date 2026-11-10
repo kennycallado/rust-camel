@@ -1525,6 +1525,8 @@ mod tests {
         Value, to_expression_failed,
     };
     use std::fs;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
     use tempfile::NamedTempFile;
 
     use super::{
@@ -4722,6 +4724,105 @@ mod tests {
         format!("let x = 0; while x < {iterations} {{ x += 1; }} false")
     }
 
+    /// Workload size for the strict-branch operation-cost probes.
+    const STRICT_LOOP_ITERATIONS: u64 = 100_000;
+
+    /// Two sequential busy workloads in ONE eval: the shared-budget
+    /// counterfactual (a counter shared across clauses pays for both, a
+    /// per-clause counter pays for one).
+    fn double_workload_script(iterations: u64) -> String {
+        format!(
+            "let x = 0; while x < {iterations} {{ x += 1; }} \
+             let y = 0; while y < {iterations} {{ y += 1; }} false"
+        )
+    }
+
+    /// Exact rhai operation count for `script`, measured over the same scope
+    /// shape and eval path production uses.
+    ///
+    /// The probe engine runs with a non-binding limit (`u64::MAX`), so the
+    /// `on_progress` callback — which rhai fires once per operation with the
+    /// running total — observes every operation until the script ends
+    /// naturally; its last value is the exact total. Two boundary engines then
+    /// re-run the same script to confirm the count against rhai's strict
+    /// `num_ops > max` comparison: `n` completes, `n - 1` trips the limit.
+    fn probe_exact_op_cost(script: &str) -> u64 {
+        let unbound = group_limits(u64::MAX, 60_000);
+        let ast = RhaiLanguage::compile_read_only(script, &unbound).expect("probe script compiles");
+
+        let ops = Arc::new(AtomicU64::new(0));
+        let capture = Arc::clone(&ops);
+        let mut engine = RhaiLanguage::create_base_engine(&unbound);
+        engine.on_progress(move |count| {
+            capture.store(count, Ordering::Relaxed);
+            None
+        });
+
+        // Same binding shape as `exchange_with_body("x")` through
+        // `eval_with_engine`: text body plus the two container variables.
+        let mut scope = rhai::Scope::new();
+        scope.push("body", "x");
+        scope.push("headers", rhai::Map::new());
+        scope.push("properties", rhai::Map::new());
+        let _: rhai::Dynamic = engine
+            .eval_ast_with_scope(&mut scope, &ast)
+            .expect("probe workload completes");
+
+        let n = ops.load(Ordering::Relaxed);
+        assert!(n > 0, "progress callback never fired: the probe is broken");
+
+        assert_probe_boundary(script, n, true);
+        assert_probe_boundary(script, n - 1, false);
+        n
+    }
+
+    /// Run `script` under `max_operations` and assert whether it completes.
+    fn assert_probe_boundary(script: &str, max_operations: u64, completes: bool) {
+        let limits = group_limits(max_operations, 60_000);
+        let ast = RhaiLanguage::compile_read_only(script, &limits).expect("probe script compiles");
+        let engine = RhaiLanguage::create_base_engine(&limits);
+        let mut scope = rhai::Scope::new();
+        scope.push("body", "x");
+        scope.push("headers", rhai::Map::new());
+        scope.push("properties", rhai::Map::new());
+        let outcome = engine.eval_ast_with_scope::<rhai::Dynamic>(&mut scope, &ast);
+        assert_eq!(
+            outcome.is_ok(),
+            completes,
+            "boundary probe at max_operations={max_operations} disagreed: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn strict_op_probe_is_exact_and_stable() {
+        let script = budget_loop_script(STRICT_LOOP_ITERATIONS);
+        let first = probe_exact_op_cost(&script);
+        let second = probe_exact_op_cost(&script);
+        eprintln!("probe measured: n={first}");
+        assert_eq!(first, second, "the probe must be deterministic across runs");
+        assert!(
+            first > STRICT_LOOP_ITERATIONS,
+            "each loop iteration costs at least one operation: n={first}"
+        );
+    }
+
+    #[test]
+    fn strict_double_workload_costs_more_than_double_single_minus_margin() {
+        let single = budget_loop_script(STRICT_LOOP_ITERATIONS);
+        let double = double_workload_script(STRICT_LOOP_ITERATIONS);
+        let n1 = probe_exact_op_cost(&single);
+        let n2 = probe_exact_op_cost(&double);
+        eprintln!("probe measured: n1={n1} n2={n2}");
+        assert!(
+            n2 > n1 + n1 / 2,
+            "double workload must cost more than 1.5x the single: n1={n1} n2={n2}"
+        );
+        assert!(
+            n2 < 3 * n1,
+            "double workload must stay below 3x the single: n1={n1} n2={n2}"
+        );
+    }
+
     async fn standalone_outcome(
         lang: &RhaiLanguage,
         script: &str,
@@ -5014,24 +5115,10 @@ mod tests {
 
     #[tokio::test]
     async fn group_timeouts_are_independent_per_clause() {
-        use std::time::Duration;
-
         const TIMEOUT_MS: u64 = 200;
         const OP_LIMIT: u64 = 1_000_000_000;
 
         let exchange = exchange_with_body("x");
-        let timeout = Duration::from_millis(TIMEOUT_MS);
-        let target = timeout.mul_f64(0.6);
-        let per_clause_bound = timeout.mul_f64(0.8);
-        // A shared budget cuts the pair once it exceeds one full timeout; with
-        // per-clause budgets each clause runs near `target`, so the sum clears
-        // the timeout itself. Keep the floor at the timeout, not a multiple:
-        // otherwise the property degrades into a machine-speed assertion.
-        let sum_floor = timeout;
-
-        // Non-binding timeout for natural-runtime measurements; the group's
-        // per-clause timeout is the only limiter in the assertion language.
-        let calibration_lang = group_lang(OP_LIMIT, 60_000);
         let lang = group_lang(OP_LIMIT, TIMEOUT_MS);
 
         if running_under_instrumentation() {
@@ -5054,54 +5141,50 @@ mod tests {
             return;
         }
 
-        let mut count =
-            calibrate_loop_count_for_duration(&calibration_lang, &exchange, target).await;
-        let mut measurements = String::new();
-
         eprintln!("branch=strict");
-        for attempt in 0..4 {
-            let script = budget_loop_script(count);
-            let (first_elapsed, first_outcome) = timed_standalone(&lang, &script, &exchange).await;
-            let (second_elapsed, second_outcome) =
-                timed_standalone(&lang, &script, &exchange).await;
-            let sum = first_elapsed + second_elapsed;
-            measurements = format!(
-                "attempt {attempt}: count={count}, first={first_elapsed:?} ({first_outcome:?}), \
-                 second={second_elapsed:?} ({second_outcome:?}), sum={sum:?}"
-            );
-            eprintln!("{measurements}");
+        let workload = budget_loop_script(STRICT_LOOP_ITERATIONS);
+        let n1 = probe_exact_op_cost(&workload);
+        let double_workload = double_workload_script(STRICT_LOOP_ITERATIONS);
+        let n2 = probe_exact_op_cost(&double_workload);
+        let budget = n1 + n1 / 2;
+        eprintln!(
+            "strict measured: single_ops={n1} double_ops={n2} budget={budget} per_iteration={}",
+            n1 / STRICT_LOOP_ITERATIONS
+        );
 
-            let outcomes_ok =
-                matches!(&first_outcome, Ok(false)) && matches!(&second_outcome, Ok(false));
-            let per_clause_ok =
-                first_elapsed < per_clause_bound && second_elapsed < per_clause_bound;
-            let sum_ok = sum > sum_floor;
+        // Per-clause counters: each clause pays `n1`, which fits `budget`, so
+        // both clauses complete. A shared counter would reach `n2 > budget`
+        // and cut the pair after the first clause.
+        let group = rhai_group(
+            &group_lang(budget, 5_000),
+            &[workload.as_str(), workload.as_str()],
+        );
+        assert_eq!(
+            group
+                .first_match(&exchange)
+                .await
+                .expect("per-clause budgets must let both clauses complete",),
+            None,
+            "no clause may be cut under per-clause budgets: each clause costs \
+             single_ops={n1} < budget={budget}; a shared budget would reach \
+             double_ops={n2} > budget"
+        );
+        assert_eq!(
+            group.eval_log(),
+            vec![0, 1],
+            "both clauses evaluated in order"
+        );
 
-            if outcomes_ok && per_clause_ok && sum_ok {
-                let group = rhai_group(&lang, &[script.as_str(), script.as_str()]);
-                assert_eq!(
-                    group
-                        .first_match(&exchange)
-                        .await
-                        .expect("both clauses fit their own timeout"),
-                    None,
-                    "per-clause timeouts must let both clauses run"
-                );
-                assert_eq!(group.eval_log(), vec![0, 1]);
-                return;
-            }
-
-            // Re-scale from the slower observed clause; the loop retries until
-            // the workload lands between the target and the per-clause bound.
-            let observed_ns = first_elapsed.max(second_elapsed).as_nanos().max(1);
-            let target_ns = target.as_nanos().max(1);
-            let rescaled = u128::from(count) * target_ns / observed_ns;
-            count = u64::try_from(rescaled.max(1)).expect("rescaled count fits u64");
-        }
-
-        panic!(
-            "independent-timeout workload validation failed after four attempts; \
-             required each < {per_clause_bound:?} and sum > {sum_floor:?}; {measurements}"
+        // Shared-budget counterfactual: one eval, one counter, one budget.
+        let shared = rhai_group(&group_lang(budget, 5_000), &[double_workload.as_str()]);
+        let err = shared.first_match(&exchange).await.expect_err(&format!(
+            "one eval paying double_ops={n2} must trip the shared budget={budget}"
+        ));
+        assert_eq!(err.index, 0, "the breached eval is clause 0");
+        assert_class(
+            &err.error,
+            ExpressionErrorClass::Limit,
+            "shared-budget counterfactual: one eval, one counter, one budget",
         );
     }
 
