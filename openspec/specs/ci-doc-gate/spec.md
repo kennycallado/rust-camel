@@ -26,10 +26,12 @@ of truth and referencing bd rc-o8pxk.
 
 - **GIVEN** a change that adds or removes a crate from the `doc-build`
   registry command in `AGENTS.md`
-- **WHEN** the same change does not update the "Build Rustdoc" step to the
-  same crate set
-- **THEN** the diff violates the `ci-doc-gate` requirement and the
-  reviewer rejects the change before merge
+- **WHEN** the same change does not update the "Build Rustdoc" step to
+  the same crate set
+- **THEN** `cargo xtask lint-gate-parity` exits 1 naming the
+  `doc-build` gate with the paste-ready expected and actual commands,
+  failing the local sweep and the change before merge
 
-Enforced at review; no mechanical check exists (no new tooling, per order).
+Enforced mechanically by the `lint-gate-parity` xtask gate (see the
+`gate-parity-lint` capability).
 
