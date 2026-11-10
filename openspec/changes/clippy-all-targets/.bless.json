@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:d23db550b52b9908971fa087a3066b476fee865d63f00c44a73a09ca9339a53a",
+  "expert": "experts/e_gpt",
+  "sessionID": "ses_e3ab46ce8ffe0V2fIy3avPJna5",
+  "date": "2026-11-10",
+  "notes": "Two BLESS-WITH-FIXES rounds (5 findings: sweep evidence executability x2, no-stray-edits diff mechanics, commit boundary, skip-list/registry mismatch). Supersedes spec bless sha256:cf34b677... Plan reviewed CLEAN by r_glm (session ses_e3ab7ce51ffe0ji2MOGvwr7Loo) before bless."
+}

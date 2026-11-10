@@ -230,7 +230,7 @@ impl Component for FlakyDelegateComponent {
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let prev = self
             .failures_remaining
-            .fetch_update(
+            .try_update(
                 std::sync::atomic::Ordering::SeqCst,
                 std::sync::atomic::Ordering::SeqCst,
                 |v| v.checked_sub(1),

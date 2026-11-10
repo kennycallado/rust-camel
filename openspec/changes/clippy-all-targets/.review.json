@@ -1,0 +1,14 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "sessionID": "ses_e3a881a91ffeu660oGhL9jp9e5",
+  "date": "2026-11-10",
+  "plan_hash": "sha256:d23db550b52b9908971fa087a3066b476fee865d63f00c44a73a09ca9339a53a",
+  "base": "70a696ae2d01e35b53fc7a47f6b4351534cd80a8",
+  "findings": [
+    "minor/informational: CI copy (.github/workflows/ci.yml:394-405) diverges from the widened registry line; pre-documented in design.md Enforcement boundary; tracked as bd rc-2s1vm (open, P2) — follow-up, not on this branch",
+    "minor/informational: .review.json not yet on disk at review time — resolves with this file"
+  ],
+  "notes": "Landed state matches design option (a) exactly: one-line AGENTS.md registry edit (--all-targets, 4 excludes kept) + one pure rename in camel-master test. Gate evidence: gates-local 28/28 passed (PASS clippy@141, failed 0, skipped 4, ran 28 of 32), exact new invocation green (runV-final), cargo build --workspace 0, cargo test --workspace --lib 103 passed, hexagonal test 33 passed, fmt --check --all 0."
+}

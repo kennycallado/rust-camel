@@ -43,6 +43,7 @@
       --exclude camel-component-kafka \
       --exclude security-keycloak \
       --exclude security-wasm-policy \
+      --all-targets \
       -- -D warnings
     cargo clippy -p camel-component-kafka --all-targets -- -D warnings
     cargo clippy -p camel-cli -- -D warnings
