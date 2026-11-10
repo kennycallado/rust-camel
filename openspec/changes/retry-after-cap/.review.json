@@ -1,0 +1,20 @@
+{
+  "kind": "holistic-review",
+  "change": "retry-after-cap",
+  "verdict": "APPROVE-WITH-FINDINGS-RESOLVED",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e39e63742ffeCsQwFog67mmgag",
+  "impl_hash": "sha256:9b0df90c4f56b0cecb089004e50725c4f396966ceb810572f990e9854254bd6b",
+  "blessed_plan_hash": "sha256:7bfcd905e3f2e81593ee769c9833f4e01e52c2ea8dad38b00f496d04993eeb8d",
+  "finding": "one minor: unpinned emergent composition (decide-default 120s x over-cap Retry-After) \u2014 resolved in-change by test decide_default_budget_outranks_cap_at_deadline_edge (Timeout(120s), calls()==2, guard-not-fired), green; budget rule outranks honest error at the deadline edge, spec-conformant",
+  "gates": {
+    "cargo_build_workspace": "pass (7m26s)",
+    "cargo_test_workspace_lib": "pass (all suites ok)",
+    "hexagonal_architecture_boundaries_test": "pass (33)",
+    "llm_lib_openai": "pass (378)",
+    "llm_lib_decisions": "pass (337, plus pin test => 303 plain)",
+    "gates_local": "exit 0, ran 28 of 32, failed 0; skipped: lint-commits (conductor: remote op, CI), lint-bridge-releases (network), doc-guide-test (covered manually: mdbook test exit 0), cargo-audit (network, CI)",
+    "fmt_check_all": "pass",
+    "mdbook_test": "exit 0"
+  }
+}

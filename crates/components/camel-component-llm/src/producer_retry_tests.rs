@@ -59,7 +59,7 @@ async fn retry_honors_retry_after_over_backoff() {
         max_attempts: 2,
         initial_delay: Duration::from_millis(1),
         multiplier: 1.0,
-        max_delay: Duration::from_millis(5),
+        max_delay: Duration::from_millis(200),
         jitter_factor: 0.0,
         max_attempts_absolute: None,
     };
@@ -114,16 +114,355 @@ async fn no_retry_after_content_start() {
 }
 
 // -----------------------------------------------------------------------
-// Composition: timeout fires during retry backoff
+// Composition: Retry-After sleeps are capped
 // -----------------------------------------------------------------------
 
-/// Verifies that the total deadline cuts a retry backoff sleep short.
+/// A header far above `max_delay` is capped, retried until attempts exhaust,
+/// and surfaced honestly naming both values.
 ///
-/// The provider always rate-limits with retry_after=200ms. The retry policy
-/// allows 10 attempts, but the total deadline is 50ms. The deadline must
-/// fire DURING the first backoff sleep (200ms), NOT after all retries.
-#[tokio::test]
-async fn total_timeout_fires_during_retry_backoff() {
+/// 3 attempts, 2 capped sleeps of 60s: inside the retry policy alone the
+/// virtual clock advances 120s, never the 86400s the header asked for.
+#[tokio::test(start_paused = true)]
+async fn capped_retry_after_sleeps_cap_and_names_both_values() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_secs(86_400))),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
+    let start = tokio::time::Instant::now();
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let elapsed = start.elapsed();
+    let msg = match result {
+        Ok(_) => panic!("exhausted retries must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("86400s"), "missing requested value: {msg}");
+    assert!(msg.contains("60s"), "missing cap value: {msg}");
+    assert!(
+        elapsed >= Duration::from_secs(120),
+        "two 60s capped sleeps must elapse, got {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(200),
+        "sleeps must use the 60s cap, not the 86400s header, got {elapsed:?}"
+    );
+    assert_eq!(mock.call_count(), 3);
+}
+
+/// A header below the cap is honoured as-is and the error is not annotated.
+#[tokio::test(start_paused = true)]
+async fn retry_after_under_cap_is_honoured_unchanged() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_secs(3))),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
+    let start = tokio::time::Instant::now();
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let elapsed = start.elapsed();
+    let msg = match result {
+        Ok(_) => panic!("exhausted retries must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        elapsed >= Duration::from_secs(6),
+        "two 3s header sleeps must elapse, got {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "header sleeps must stay uncapped, got {elapsed:?}"
+    );
+    assert!(msg.contains("rate limited"), "wrong error: {msg}");
+    assert!(!msg.contains("exceeds the"), "must not be annotated: {msg}");
+    assert_eq!(mock.call_count(), 3);
+}
+
+/// A header exactly equal to the cap is honoured, not annotated.
+#[tokio::test(start_paused = true)]
+async fn retry_after_equal_to_cap_is_honoured_not_annotated() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_secs(3))),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(3),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
+    let start = tokio::time::Instant::now();
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let elapsed = start.elapsed();
+    let msg = match result {
+        Ok(_) => panic!("exhausted retries must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        elapsed >= Duration::from_secs(6),
+        "two 3s sleeps must elapse, got {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "sleeps must stay at the header value, got {elapsed:?}"
+    );
+    assert!(!msg.contains("exceeds the"), "must not be annotated: {msg}");
+    assert_eq!(mock.call_count(), 3);
+}
+
+/// A rate limit WITHOUT a header keeps the exponential backoff schedule.
+#[tokio::test(start_paused = true)]
+async fn rate_limit_without_retry_after_keeps_exponential_backoff() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_fail_after(1, LlmError::RateLimit { retry_after: None }),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(100),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
+    let start = tokio::time::Instant::now();
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let elapsed = start.elapsed();
+    let out = match result {
+        Ok(out) => out,
+        Err(e) => panic!("retry must succeed, got: {e}"),
+    };
+    assert!(matches!(out.input.body, Body::Text(_)));
+    assert_eq!(mock.call_count(), 2);
+    assert!(
+        elapsed >= Duration::from_millis(100),
+        "exponential backoff must still elapse, got {elapsed:?}"
+    );
+}
+
+/// The remaining total deadline bounds the Retry-After sleep: a header above
+/// the remaining budget sleeps only to the deadline, then surfaces `Timeout`
+/// without launching another request.
+#[tokio::test(start_paused = true)]
+async fn retry_after_sleep_capped_at_remaining_deadline() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_secs(86_400))),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_timeout_and_retry(
+        provider,
+        /*stream=*/ false,
+        Duration::from_secs(10),
+        Some(policy),
+    );
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let msg = match result {
+        Ok(_) => panic!("remaining deadline must surface a timeout"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("timeout"), "wrong error: {msg}");
+    assert!(msg.contains("10s"), "must name the deadline: {msg}");
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "no request may launch at the deadline"
+    );
+}
+
+/// A positive header under a zero cap returns immediately with the annotated
+/// error — no sleep, no further attempt (guards against the unlimited-policy
+/// hang the old code had: `max_attempts == 0` means unlimited).
+#[tokio::test(start_paused = true)]
+async fn zero_max_delay_positive_header_returns_immediately() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_secs(86_400))),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 0, // unlimited
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::ZERO,
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
+    let result = match tokio::time::timeout(
+        Duration::from_secs(1),
+        producer.call(make_exchange(Body::Text("x".into()))),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_elapsed) => panic!("call hung: zero cap did not short-circuit"),
+    };
+    let msg = match result {
+        Ok(_) => panic!("positive header under a zero cap must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("86400s"), "missing requested value: {msg}");
+    assert!(msg.contains("0s"), "missing cap value: {msg}");
+    assert_eq!(mock.call_count(), 1);
+}
+
+/// A zero header under a zero cap is retried normally: the zero-cap
+/// short-circuit only applies to a POSITIVE header (rule ORDER guard).
+#[tokio::test(start_paused = true)]
+async fn zero_retry_after_under_zero_cap_keeps_raw_error() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into())).with_rate_limit(Some(Duration::ZERO)),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 2,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::ZERO,
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_retry(Arc::clone(&provider), false, Some(policy));
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let msg = match result {
+        Ok(_) => panic!("exhausted retries must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("rate limited"), "wrong error: {msg}");
+    assert!(!msg.contains("exceeds the"), "must not be annotated: {msg}");
+    assert_eq!(mock.call_count(), 2);
+}
+
+/// The embed path goes through the same retry loop, so the cap applies there
+/// too.
+#[tokio::test(start_paused = true)]
+async fn embed_retry_after_cap_applies() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_rate_limit(Some(Duration::from_secs(86_400))),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let config = LlmEndpointConfig {
+        operation: LlmOperation::Embed,
+        stream: false,
+        ..Default::default()
+    };
+    let mut producer = LlmProducer::new(config, provider, 32768, "test-route".into())
+        .with_retry(Some(policy))
+        .build();
+    let start = tokio::time::Instant::now();
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let elapsed = start.elapsed();
+    let msg = match result {
+        Ok(_) => panic!("exhausted retries must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("86400s"), "missing requested value: {msg}");
+    assert!(msg.contains("60s"), "missing cap value: {msg}");
+    assert!(
+        elapsed >= Duration::from_secs(120),
+        "two 60s capped sleeps must elapse, got {elapsed:?}"
+    );
+    assert_eq!(mock.call_count(), 3);
+}
+
+// -----------------------------------------------------------------------
+// Composition: outer deadline still cuts a backoff sleep short
+// -----------------------------------------------------------------------
+
+/// Regression guard for the retired premise: without a Retry-After header the
+/// outer total deadline still cuts a BACKOFF sleep short (behavior via
+/// `apply_timeout`, unchanged by the cap).
+#[tokio::test(start_paused = true)]
+async fn timeout_still_cuts_backoff_sleep() {
+    let mock = Arc::new(
+        MockProvider::new("t", MockMode::Fixed("ok".into()))
+            .with_fail_after(1, LlmError::Network("boom".into())),
+    );
+    let provider = mock.clone() as Arc<dyn LlmProvider>;
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(200),
+        multiplier: 1.0,
+        max_delay: Duration::from_millis(200),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = make_producer_with_timeout_and_retry(
+        provider,
+        /*stream=*/ false,
+        Duration::from_millis(50),
+        Some(policy),
+    );
+    let result = producer.call(make_exchange(Body::Text("x".into()))).await;
+    let msg = match result {
+        Ok(_) => panic!("deadline must cut the 200ms backoff short"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("timeout"), "wrong error: {msg}");
+    assert!(msg.contains("50ms"), "must name the deadline: {msg}");
+    assert!(
+        mock.call_count() <= 2,
+        "deadline must prevent excessive retries, got: {}",
+        mock.call_count()
+    );
+}
+
+/// 10 attempts x 5ms capped sleeps = 45ms virtual, all inside a 50ms
+/// deadline: attempts exhaust before the deadline and the error names both
+/// values (the old premise — the deadline cutting a 200ms header sleep — is
+/// retired by the cap).
+#[tokio::test(start_paused = true)]
+async fn capped_retry_after_exhausts_attempts_within_deadline() {
     let mock = Arc::new(
         MockProvider::new("t", MockMode::Fixed("ok".into()))
             .with_rate_limit(Some(Duration::from_millis(200))),
@@ -144,21 +483,23 @@ async fn total_timeout_fires_during_retry_backoff() {
         Duration::from_millis(50), // total timeout
         Some(policy),
     );
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let result = producer.call(make_exchange(Body::Text("x".into()))).await;
     let elapsed = start.elapsed();
-    // Must timeout (not succeed, not retry 10 times)
-    assert!(result.is_err(), "must error with timeout");
-    // Must fire around 50ms (the total deadline), NOT 200ms+ (the retry_after)
-    assert!(
-        elapsed < Duration::from_millis(150),
-        "total deadline must cut backoff short, elapsed: {elapsed:?}"
+    let msg = match result {
+        Ok(_) => panic!("exhausted retries must error"),
+        Err(e) => e.to_string(),
+    };
+    assert!(msg.contains("retry after"), "wrong error: {msg}");
+    assert!(msg.contains("exceeds the"), "wrong error: {msg}");
+    assert_eq!(
+        mock.call_count(),
+        10,
+        "all attempts fit inside the deadline"
     );
-    // Must NOT have retried many times (only 1-2 attempts before timeout)
     assert!(
-        mock.call_count() <= 2,
-        "total deadline must prevent excessive retries, got: {}",
-        mock.call_count()
+        elapsed >= Duration::from_millis(45),
+        "9 capped sleeps of 5ms must elapse, got {elapsed:?}"
     );
 }
 

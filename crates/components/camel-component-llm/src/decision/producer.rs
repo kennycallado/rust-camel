@@ -200,6 +200,7 @@ impl DecisionProducer {
         let fut = crate::producer::run_with_retry(
             self.semaphore.clone(),
             self.retry.clone(),
+            self.timeout,
             Arc::new(AtomicBool::new(false)),
             &self.route_id,
             op,

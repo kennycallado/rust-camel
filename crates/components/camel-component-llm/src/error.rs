@@ -17,6 +17,17 @@ pub enum LlmError {
         retry_after: Option<Duration>,
     },
 
+    /// Rate limited; the provider-requested wait exceeded the sleep cap.
+    /// `capped_to` is the calculated bound. Retryable.
+    #[error("rate limited; retry after {requested:?} exceeds the {capped_to:?} cap")]
+    RetryAfterCapped {
+        /// Wait the provider asked for.
+        requested: Duration,
+        /// Bound the sleep was capped to (retry policy `max_delay` or the
+        /// remaining total deadline, whichever is smaller).
+        capped_to: Duration,
+    },
+
     /// Usage quota exceeded (e.g., billing limit reached).
     #[error("quota exceeded: {detail}")]
     QuotaExceeded {
@@ -191,6 +202,7 @@ impl LlmError {
 ///
 /// Retryable errors:
 /// - [`LlmError::RateLimit`] — provider asks us to back off
+/// - [`LlmError::RetryAfterCapped`] — provider asked for a wait above the cap
 /// - [`LlmError::Network`] — transient connection issues
 /// - [`LlmError::ProviderUnavailable`] — server-side transient
 /// - [`LlmError::ModelUnavailable`] — model overloaded
@@ -200,6 +212,7 @@ pub fn is_retryable(err: &LlmError) -> bool {
     matches!(
         err,
         LlmError::RateLimit { .. }
+            | LlmError::RetryAfterCapped { .. }
             | LlmError::Network(_)
             | LlmError::ProviderUnavailable(_)
             | LlmError::ModelUnavailable(_)
@@ -254,6 +267,30 @@ mod tests {
         assert!(
             is_retryable(&throttled_with_retry_after),
             "rate limiting is retryable with retry-after"
+        );
+    }
+
+    #[test]
+    fn retry_after_capped_display_names_both_values() {
+        let err = LlmError::RetryAfterCapped {
+            requested: Duration::from_secs(86_400),
+            capped_to: Duration::from_secs(60),
+        };
+        let display = err.to_string();
+        assert!(display.contains("rate limited"), "missing kind: {display}");
+        assert!(display.contains("86400s"), "missing requested: {display}");
+        assert!(display.contains("60s"), "missing cap: {display}");
+    }
+
+    #[test]
+    fn retry_after_capped_is_retryable() {
+        let err = LlmError::RetryAfterCapped {
+            requested: Duration::from_secs(86_400),
+            capped_to: Duration::from_secs(60),
+        };
+        assert!(
+            is_retryable(&err),
+            "a capped rate limit stays retryable: {err:?}"
         );
     }
 

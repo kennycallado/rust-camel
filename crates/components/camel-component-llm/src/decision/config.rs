@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use camel_api::redact;
 use camel_component_api::CamelError;
@@ -33,15 +34,28 @@ fn default_predicate_probability() -> f64 {
 #[cfg(feature = "decisions")]
 pub(crate) const DEFAULT_ATTEMPT_TIMEOUT_SECS: u64 = 30;
 
+/// Total deadline, in seconds, for one decide call when neither the provider
+/// nor the global configuration sets `timeout_secs`. A latency budget, not a
+/// promise of a fixed attempt count.
+pub(crate) const DEFAULT_DECIDE_TOTAL_TIMEOUT_SECS: u64 = 120;
+
 /// Resolves the configured timeout in seconds. The provider value wins over the
 /// global one; `None` means neither is set.
 ///
 /// Adapters use it per attempt, as
 /// `effective_timeout_secs(..).unwrap_or(DEFAULT_ATTEMPT_TIMEOUT_SECS)`. The
-/// endpoint uses it as the optional total deadline of a call, where `None`
-/// means no deadline.
+/// endpoint uses it as the base of the total deadline of a call, which
+/// [`decide_total_timeout_secs`] supplies when neither value is set.
 pub(crate) fn effective_timeout_secs(provider: Option<u64>, global: Option<u64>) -> Option<u64> {
     provider.or(global)
+}
+
+/// Total deadline for one decide call. Provider value wins over global; the
+/// default applies when neither is set.
+pub(crate) fn decide_total_timeout_secs(provider: Option<u64>, global: Option<u64>) -> Duration {
+    effective_timeout_secs(provider, global)
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_DECIDE_TOTAL_TIMEOUT_SECS))
 }
 
 /// Configuration for an OpenAI decision provider.

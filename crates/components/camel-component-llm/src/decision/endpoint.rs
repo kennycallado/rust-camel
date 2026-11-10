@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use camel_component_api::{
     BoxProcessor, CamelError, Consumer, Endpoint, ProducerContext, RuntimeObservability,
@@ -60,9 +59,12 @@ impl Endpoint for DecisionEndpoint {
         let provider_timeout = provider_cfg.and_then(|pc| pc.timeout_secs());
         let network_retry = provider_cfg.and_then(|pc| pc.network_retry());
 
-        // Total deadline for a call: None means no deadline.
-        let timeout = config::effective_timeout_secs(provider_timeout, self.global.timeout_secs)
-            .map(Duration::from_secs);
+        // Total deadline for every decide call: provider or global
+        // `timeout_secs`, otherwise the default. Never `None`.
+        let timeout = Some(config::decide_total_timeout_secs(
+            provider_timeout,
+            self.global.timeout_secs,
+        ));
 
         let route_id = ctx.route_id().unwrap_or("unknown").to_string();
 
@@ -93,17 +95,51 @@ impl Endpoint for DecisionEndpoint {
 mod decide_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use async_trait::async_trait;
+    use camel_api::{Body, Exchange, Message};
     use camel_component_api::{
-        Component, NoOpComponentContext, NoopRuntimeObservability, ProducerContext,
+        Component, Endpoint, NoOpComponentContext, NoopRuntimeObservability, ProducerContext,
         RuntimeObservability,
     };
+    use tower::Service;
 
+    use super::DecisionEndpoint;
     use crate::LlmComponent;
+    use crate::LlmEndpointConfig;
     use crate::LlmGlobalConfig;
     use crate::decision::test_support::TRIAGE_TOML;
+    use crate::decision::test_support::triage_set;
+    use crate::decision::{
+        DecisionCapabilities, DecisionProvider, DecisionRequest, DecisionResponse,
+    };
+    use crate::error::LlmError;
 
     const DEFAULT_FAKE: &str = "default_decision_provider = \"fake\"\n";
+
+    /// Provider whose `decide` future never resolves, so only the producer's
+    /// total deadline can end the call.
+    struct PendingDecisionProvider;
+
+    #[async_trait]
+    impl DecisionProvider for PendingDecisionProvider {
+        fn id(&self) -> &str {
+            "pending"
+        }
+
+        fn default_model(&self) -> &str {
+            "pending-model"
+        }
+
+        fn capabilities(&self) -> DecisionCapabilities {
+            DecisionCapabilities::new(400)
+        }
+
+        async fn decide(&self, _req: DecisionRequest) -> Result<DecisionResponse, LlmError> {
+            std::future::pending::<Result<DecisionResponse, LlmError>>().await
+        }
+    }
 
     /// Builds a component with one mock decision provider named `fake` and the
     /// triage question set. `prefix` is prepended before any table header.
@@ -205,5 +241,44 @@ mod decide_tests {
             text.contains("with_decision_providers"),
             "error was: {text}"
         );
+    }
+
+    /// The endpoint injects the default total deadline when no `timeout_secs`
+    /// is configured, so a hanging provider cannot park the exchange forever.
+    ///
+    /// The 121 s virtual guard only fires when the wiring passes `None` through.
+    #[tokio::test(start_paused = true)]
+    async fn decide_endpoint_applies_default_total_when_unconfigured() {
+        let endpoint = DecisionEndpoint::new(
+            "llm:decide?questions=triage".into(),
+            LlmEndpointConfig::default(),
+            "pending".into(),
+            Arc::new(PendingDecisionProvider),
+            Arc::new(triage_set()),
+            Arc::new(LlmGlobalConfig::default()),
+        );
+        let ctx = ProducerContext::new().with_route_id("r");
+        let rt: Arc<dyn RuntimeObservability> = Arc::new(NoopRuntimeObservability);
+        let mut producer = endpoint.create_producer(rt, &ctx).expect("decide producer");
+
+        let guarded = tokio::time::timeout(
+            Duration::from_secs(121),
+            Service::call(
+                &mut producer,
+                Exchange::new(Message::new(Body::Text("refund please".into()))),
+            ),
+        )
+        .await;
+
+        let result = match guarded {
+            Ok(result) => result,
+            Err(_) => panic!(
+                "decide call outlived the 121s guard: the endpoint did not apply a total deadline"
+            ),
+        };
+        let err = result.expect_err("a pending provider must hit the total deadline");
+        let msg = err.to_string();
+        assert!(msg.contains("timeout"), "error was {msg}");
+        assert!(msg.contains("120s"), "error was {msg}");
     }
 }

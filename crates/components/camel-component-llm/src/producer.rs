@@ -128,13 +128,66 @@ where
     }
 }
 
+/// Remaining total deadline measured from the retry-loop entry.
+///
+/// `None` when no total deadline is configured; `Some(Duration::ZERO)` when
+/// the deadline is already spent.
+fn remaining_deadline(total: Option<Duration>, start: tokio::time::Instant) -> Option<Duration> {
+    total.map(|t| t.saturating_sub(start.elapsed()))
+}
+
+/// Sleep bound for a `Retry-After` value: `min(policy.max_delay, remaining)`.
+///
+/// `remaining` is the time left in the total deadline, or `max_delay` when no
+/// deadline is configured.
+fn retry_after_cap(
+    total: Option<Duration>,
+    start: tokio::time::Instant,
+    policy: &NetworkRetryPolicy,
+) -> Duration {
+    let remaining = match remaining_deadline(total, start) {
+        Some(r) => r,
+        None => policy.max_delay,
+    };
+    policy.max_delay.min(remaining)
+}
+
+/// Re-derive the surfaced error from a rate limit the loop chose to cap.
+///
+/// A `RateLimit` whose header exceeded the cap is reported as
+/// [`LlmError::RetryAfterCapped`] so the caller sees the wait that was asked
+/// for and the bound that applied. Every other error is returned unchanged.
+fn honest_rate_limit(e: &LlmError, cap: Duration) -> LlmError {
+    match e {
+        LlmError::RateLimit {
+            retry_after: Some(retry_after),
+        } if *retry_after > cap => LlmError::RetryAfterCapped {
+            requested: *retry_after,
+            capped_to: cap,
+        },
+        other => other.clone(),
+    }
+}
+
 /// Manual retry loop that honors `RateLimit.retry_after` over exponential
 /// backoff. Only runs when `retry` is `Some`. Does NOT retry after
 /// content-start (first non-empty Delta).
 ///
+/// ## Retry-After sleep cap
+/// A `Retry-After` value is bounded by `min(policy.max_delay, remaining total
+/// deadline)`. Rules, in order:
+/// 1. budget spent → `Timeout`;
+/// 2. cap is zero and the header is positive → `RetryAfterCapped` (no sleep);
+/// 3. header ≤ cap → sleep the header value unchanged;
+/// 4. header > cap → sleep the cap and log both values.
+///
+/// At exhaustion a capped rate limit is surfaced as `RetryAfterCapped`; a
+/// capped rate limit stays retryable. Accounting: `N attempts ≤ N - 1 sleeps`.
+///
 /// ## Composition
-/// - NO inner timeout — the total deadline wraps `run_with_retry`
-///   from outside, so one deadline covers all attempts + backoff.
+/// - `total` is the SAME deadline the caller passes to [`apply_timeout`]. It is
+///   used as a sleep bound only — never as a nested timeout, so one deadline
+///   covers all attempts + backoff (ADR-0021).
 /// - Semaphore permit is acquired PER ATTEMPT and released during backoff
 ///   sleep (see ADR-0021).
 ///
@@ -143,6 +196,7 @@ where
 pub(crate) async fn run_with_retry<F, Fut, T>(
     semaphore: Option<Arc<Semaphore>>,
     retry: Option<NetworkRetryPolicy>,
+    total: Option<Duration>,
     content_started: Arc<AtomicBool>,
     route_id: &str,
     mut op: F,
@@ -153,6 +207,7 @@ where
 {
     let policy = retry;
     let mut attempt: u32 = 0;
+    let start = tokio::time::Instant::now();
     loop {
         // Acquire permit per attempt — released during backoff (dropped
         // before sleep). Using .ok() is intentional (lint-unwrap gate).
@@ -176,13 +231,54 @@ where
                 }
                 // 0-indexed: attempt 0 = first try. should_retry(attempt+1) per ADR-0013.
                 if !is_retryable(&e) || !policy.should_retry(attempt + 1) {
-                    return Err(e);
+                    // Budget spent — the deadline, not the provider, ended it.
+                    if let (Some(t), Some(Duration::ZERO)) =
+                        (total, remaining_deadline(total, start))
+                    {
+                        return Err(LlmError::Timeout(t));
+                    }
+                    // The cap does not change the error kind: it only
+                    // annotates a rate limit whose header exceeded it.
+                    let cap = retry_after_cap(total, start, policy);
+                    return Err(honest_rate_limit(&e, cap));
                 }
-                // Compute delay: retry_after wins over exponential backoff.
+                // Compute delay: retry_after wins over exponential backoff,
+                // bounded by the sleep cap.
                 let delay = match &e {
                     LlmError::RateLimit {
-                        retry_after: Some(ra),
-                    } => *ra,
+                        retry_after: Some(retry_after),
+                    } => {
+                        // Rule 1: no time left to sleep.
+                        if let (Some(t), Some(Duration::ZERO)) =
+                            (total, remaining_deadline(total, start))
+                        {
+                            return Err(LlmError::Timeout(t));
+                        }
+                        let cap = retry_after_cap(total, start, policy);
+                        if cap == Duration::ZERO && *retry_after > Duration::ZERO {
+                            // Rule 2: nothing to sleep — surface the cap now
+                            // instead of spinning or parking the exchange.
+                            return Err(LlmError::RetryAfterCapped {
+                                requested: *retry_after,
+                                capped_to: cap,
+                            });
+                        }
+                        if *retry_after <= cap {
+                            // Rule 3: within the cap — unchanged behavior.
+                            *retry_after
+                        } else {
+                            // Rule 4: cap a header above `max_delay`/remaining.
+                            tracing::warn!(
+                                route_id = %route_id,
+                                attempt,
+                                delay_ms = cap.as_millis() as u64,
+                                retry_after_ms = retry_after.as_millis() as u64,
+                                error = %e,
+                                "llm: Retry-After exceeds the sleep cap — retrying after the cap"
+                            );
+                            cap
+                        }
+                    }
                     _ => policy.delay_for(attempt),
                 };
                 tracing::warn!(
@@ -195,6 +291,12 @@ where
                 // Release permit during backoff (dropped here; re-acquired next loop).
                 drop(_permit);
                 tokio::time::sleep(delay).await;
+                // A sleep that ends at the deadline launches no further request.
+                if let Some(t) = total
+                    && start.elapsed() >= t
+                {
+                    return Err(LlmError::Timeout(t));
+                }
                 attempt += 1;
             }
         }
@@ -832,8 +934,14 @@ impl LlmProducer {
 
         let semaphore = self.semaphore.clone();
         let retry = self.retry.clone();
-        let fut =
-            crate::producer::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+        let fut = crate::producer::run_with_retry(
+            semaphore,
+            retry,
+            self.timeout,
+            content_started,
+            &self.route_id,
+            op,
+        );
         let result = self.apply_timeout(fut).await;
 
         // Leader handle: complete BEFORE propagating to caller.
@@ -921,8 +1029,14 @@ impl LlmProducer {
         let semaphore = self.semaphore.clone();
         let retry = self.retry.clone();
         let content_started = Arc::new(AtomicBool::new(false));
-        let fut =
-            crate::producer::run_with_retry(semaphore, retry, content_started, &self.route_id, op);
+        let fut = crate::producer::run_with_retry(
+            semaphore,
+            retry,
+            self.timeout,
+            content_started,
+            &self.route_id,
+            op,
+        );
         let response = self.apply_timeout(fut).await?;
 
         exchange.input.body = Body::Json(

@@ -3,10 +3,14 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use camel_api::{Body, CamelError, Exchange, Message};
+use camel_component_api::NetworkRetryPolicy;
 use serde_json::{Value, json};
 use tower::Service;
 
@@ -608,5 +612,216 @@ async fn undeclared_score_level_is_protocol() {
     assert!(
         err.contains("urgency"),
         "error must name the question with the undeclared level: {err}"
+    );
+}
+
+/// Provider whose `decide` future never resolves, so only the producer's total
+/// deadline can end the call.
+struct PendingDecisionProvider;
+
+#[async_trait]
+impl DecisionProvider for PendingDecisionProvider {
+    fn id(&self) -> &str {
+        "pending"
+    }
+
+    fn default_model(&self) -> &str {
+        "pending-model"
+    }
+
+    fn capabilities(&self) -> DecisionCapabilities {
+        DecisionCapabilities::new(400)
+    }
+
+    async fn decide(&self, _req: DecisionRequest) -> Result<DecisionResponse, LlmError> {
+        std::future::pending::<Result<DecisionResponse, LlmError>>().await
+    }
+}
+
+/// Provider that always rate limits, counting attempts.
+struct RateLimitingDecisionProvider {
+    retry_after: Option<Duration>,
+    calls: AtomicUsize,
+}
+
+impl RateLimitingDecisionProvider {
+    fn new(retry_after: Option<Duration>) -> Arc<Self> {
+        Arc::new(Self {
+            retry_after,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl DecisionProvider for RateLimitingDecisionProvider {
+    fn id(&self) -> &str {
+        "rate-limited"
+    }
+
+    fn default_model(&self) -> &str {
+        "rate-limited-model"
+    }
+
+    fn capabilities(&self) -> DecisionCapabilities {
+        DecisionCapabilities::new(400)
+    }
+
+    async fn decide(&self, _req: DecisionRequest) -> Result<DecisionResponse, LlmError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(LlmError::RateLimit {
+            retry_after: self.retry_after,
+        })
+    }
+}
+
+/// Jitter-free, fixed 1s backoff policy used by the deadline-bounded test.
+fn fixed_second_policy(max_attempts: u32) -> NetworkRetryPolicy {
+    NetworkRetryPolicy {
+        enabled: true,
+        max_attempts,
+        initial_delay: Duration::from_secs(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(1),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn decide_default_total_deadline_fires() {
+    let mut producer = DecisionProducer::new(
+        Arc::new(PendingDecisionProvider),
+        None,
+        Arc::new(triage_set()),
+        1024,
+        "test-route".into(),
+    )
+    .with_timeout(Some(Duration::from_secs(120)));
+    let err = call(&mut producer, Body::Text("refund please".into()))
+        .await
+        .expect_err("a pending provider must hit the total deadline");
+    let msg = err.to_string();
+    assert!(msg.contains("timeout"), "error was {msg}");
+    assert!(msg.contains("120s"), "error was {msg}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn decide_configured_timeout_wins_over_default() {
+    let mut producer = DecisionProducer::new(
+        Arc::new(PendingDecisionProvider),
+        None,
+        Arc::new(triage_set()),
+        1024,
+        "test-route".into(),
+    )
+    .with_timeout(Some(Duration::from_secs(5)));
+    let err = call(&mut producer, Body::Text("refund please".into()))
+        .await
+        .expect_err("a pending provider must hit the configured deadline");
+    let msg = err.to_string();
+    assert!(msg.contains("timeout"), "error was {msg}");
+    assert!(msg.contains("5s"), "error was {msg}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn decide_unlimited_retries_bounded_by_deadline() {
+    let provider = RateLimitingDecisionProvider::new(None);
+    let mut producer = DecisionProducer::new(
+        provider.clone(),
+        None,
+        Arc::new(triage_set()),
+        1024,
+        "test-route".into(),
+    )
+    .with_timeout(Some(Duration::from_secs(120)))
+    .with_retry(Some(fixed_second_policy(0)));
+    let err = call(&mut producer, Body::Text("refund please".into()))
+        .await
+        .expect_err("unlimited retries must be bounded by the total deadline");
+    let msg = err.to_string();
+    assert!(msg.contains("timeout"), "error was {msg}");
+    assert!(msg.contains("120s"), "error was {msg}");
+    let calls = provider.calls();
+    assert!(calls > 1, "retries must happen, got {calls} calls");
+    assert!(calls < 200, "deadline must stop retries, got {calls} calls");
+}
+
+#[tokio::test(start_paused = true)]
+async fn decide_retry_after_cap_applies() {
+    let provider = RateLimitingDecisionProvider::new(Some(Duration::from_secs(86_400)));
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = DecisionProducer::new(
+        provider.clone(),
+        None,
+        Arc::new(triage_set()),
+        1024,
+        "test-route".into(),
+    )
+    .with_timeout(Some(Duration::from_secs(300)))
+    .with_retry(Some(policy));
+    let err = call(&mut producer, Body::Text("refund please".into()))
+        .await
+        .expect_err("exhausted retries must error");
+    let msg = err.to_string();
+    assert!(msg.contains("86400s"), "missing requested value: {msg}");
+    assert!(msg.contains("60s"), "missing cap value: {msg}");
+    assert_eq!(provider.calls(), 3);
+}
+
+/// Pins the emergent composition of the decide default budget and the
+/// Retry-After cap: with a 120 s total and `max_delay = 60 s`, the second
+/// capped sleep ends exactly at the deadline, so the budget rule outranks
+/// the honest error and the surfaced error is `Timeout(120s)` after 2
+/// attempts — never `RetryAfterCapped`, never a third attempt.
+#[tokio::test(start_paused = true)]
+async fn decide_default_budget_outranks_cap_at_deadline_edge() {
+    let provider = RateLimitingDecisionProvider::new(Some(Duration::from_secs(86_400)));
+    let policy = NetworkRetryPolicy {
+        enabled: true,
+        max_attempts: 3,
+        initial_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_delay: Duration::from_secs(60),
+        jitter_factor: 0.0,
+        max_attempts_absolute: None,
+    };
+    let mut producer = DecisionProducer::new(
+        provider.clone(),
+        None,
+        Arc::new(triage_set()),
+        1024,
+        "test-route".into(),
+    )
+    .with_timeout(Some(Duration::from_secs(120)))
+    .with_retry(Some(policy));
+    let err = call(&mut producer, Body::Text("refund please".into()))
+        .await
+        .expect_err("spent budget must error");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("timeout") && msg.contains("120s"),
+        "budget spent must surface Timeout(120s), got: {msg}"
+    );
+    assert!(
+        !msg.contains("exceeds the"),
+        "capped error must not outrank the spent budget: {msg}"
+    );
+    assert_eq!(
+        provider.calls(),
+        2,
+        "no attempt may launch after a sleep that ends at the deadline"
     );
 }

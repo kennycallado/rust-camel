@@ -1,5 +1,7 @@
 //! Unit tests for the decision configuration types.
 
+use std::time::Duration;
+
 use super::*;
 
 use camel_component_api::CamelError;
@@ -8,6 +10,30 @@ use crate::LlmComponent;
 use crate::config::LlmGlobalConfig;
 use crate::decision::QuestionKind;
 use crate::decision::test_support::TRIAGE_TOML;
+
+#[test]
+fn decide_total_timeout_defaults_to_120s() {
+    assert_eq!(
+        decide_total_timeout_secs(None, None),
+        Duration::from_secs(120),
+        "the default total deadline must be 120s"
+    );
+    assert_eq!(
+        decide_total_timeout_secs(Some(5), None),
+        Duration::from_secs(5),
+        "a provider timeout must win over the default"
+    );
+    assert_eq!(
+        decide_total_timeout_secs(None, Some(30)),
+        Duration::from_secs(30),
+        "a global timeout must win over the default"
+    );
+    assert_eq!(
+        decide_total_timeout_secs(Some(5), Some(60)),
+        Duration::from_secs(5),
+        "the provider value must win over the global one"
+    );
+}
 
 #[test]
 fn triage_config_parses() {

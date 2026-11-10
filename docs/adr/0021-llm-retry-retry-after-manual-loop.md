@@ -72,3 +72,25 @@ a peer that trickles bytes under 600s of inactivity still holds a connection
 indefinitely when `timeout_secs` is unset. Set `timeout_secs` for a lifetime
 bound. Follow-ups: bd `rc-v8skx` (genai SDK-side bounds) and bd `rc-ucneu`
 (Keycloak hardened client).
+
+## Addendum (2026-11, retry-after-cap)
+
+The per-attempt delay override is bounded. A `Retry-After` above
+`min(network_retry.max_delay, remaining deadline)` is not slept as-is. The loop
+sleeps the cap, stays retryable, and surfaces
+`LlmError::RetryAfterCapped { requested, capped_to }`, whose text names both
+values. `capped_to` is the calculated bound, not proof of a completed sleep. A
+zero cap with a positive header returns the error at once, so an unlimited
+policy cannot spin on a truncated wait. A header at or under the cap is slept
+as-is, and exponential backoff is unchanged. bd `rc-76oc7` (retry-after cap) is
+implemented.
+
+The single-deadline rule is unchanged. The cap reads the existing deadline as a
+bound and adds no timeout. Backoff sleeps are not re-capped by the deadline:
+the outer `apply_timeout` cuts them short, as before.
+
+The decide path carries a default 120 s total
+(`DEFAULT_DECIDE_TOTAL_TIMEOUT_SECS`) when no `timeout_secs` is configured. The
+earlier note that the decision per-request total is unchanged still holds for
+the deadline itself: the total is configured-or-default, never absent. The
+default is not a config field; set `timeout_secs` for a different total.

@@ -59,7 +59,7 @@ Wraps provider work to enforce `max_concurrency`. For streaming, the permit is h
 _Avoid_: connection pool, rate limiter
 
 **Retry-after honoring**:
-The manual retry loop (ADR-0021) uses `RateLimit.retry_after` over exponential backoff when present. Materialized-only; no retry after content-start. Retry count follows the configured `NetworkRetryPolicy`. `max_attempts = 0` is unlimited unless `max_attempts_absolute` sets a cap.
+The manual retry loop (ADR-0021) uses `RateLimit.retry_after` over exponential backoff when present. Materialized-only; no retry after content-start. Retry count follows the configured `NetworkRetryPolicy`. `max_attempts = 0` is unlimited unless `max_attempts_absolute` sets a cap. The sleep is capped at `network_retry.max_delay`, tightened to the remaining total deadline when one is set. A header above the cap sleeps the cap and surfaces `RetryAfterCapped { requested, capped_to }`, which stays retryable; a zero cap with a positive header returns at once. A header at or under the cap is slept as-is. Backoff sleeps are unchanged and are not re-capped by the deadline.
 _Avoid_: backoff override, provider delay
 
 **Gemini resource exhaustion**:
@@ -79,7 +79,7 @@ Config-driven pricing (input/output per 1k tokens). Producer computes cost from 
 _Avoid_: billing, accounting
 
 **DecisionProvider**:
-Trait for typed decisions: one `decide()` call answers a batch of named questions about one input. It is separate from `LlmProvider` because it has no streaming semantics, and chat adapters carry no stub decision methods. `LlmComponent` owns the decision providers next to the `ProviderMap`. Providers: `openai` (POST `{base}/decisions`), `typesafe` and `ollama` (System One codec, POST `{base}/v1/systemone`), and `mock`. The direct reqwest adapters sit behind the `decisions` feature, which `all-providers` includes. Established by ADR-0020 addendum 2026-11-03. (camel-component-llm)
+Trait for typed decisions: one `decide()` call answers a batch of named questions about one input. It is separate from `LlmProvider` because it has no streaming semantics, and chat adapters carry no stub decision methods. `LlmComponent` owns the decision providers next to the `ProviderMap`. Providers: `openai` (POST `{base}/decisions`), `typesafe` and `ollama` (System One codec, POST `{base}/v1/systemone`), and `mock`. The direct reqwest adapters sit behind the `decisions` feature, which `all-providers` includes. Every decide call carries a total deadline: provider or global `timeout_secs` when configured, otherwise `DEFAULT_DECIDE_TOTAL_TIMEOUT_SECS` (120 s). The default is not a config field. Established by ADR-0020 addendum 2026-11-03. (camel-component-llm)
 _Avoid_: LlmProvider (chat and embed only), decision client, classifier
 
 **Question set**:
@@ -107,7 +107,7 @@ _Avoid_: TypeSafe client, Ollama client (those are provider names, not codecs)
 - `ChatMessage`: new field `tool_calls: Option<Vec<EmittedToolCall>>`
 - `build_chat_request`: return type changed from `ChatRequest` to `Result<ChatRequest, LlmError>`
 - `MetricsCollector` trait: new default method `record_histogram` (non-breaking; default no-op)
-- `LlmError::Timeout`: a lapsed deadline (producer `timeout_secs` total, decision per-request total). NEW `TransportTimeout { phase, after }` names the transport layer that fired (Connect | Idle); `LlmError::is_timeout()` covers both.
+- `LlmError::Timeout`: a lapsed deadline (producer `timeout_secs` total, decision per-request total — configured, or the 120 s default). NEW `TransportTimeout { phase, after }` names the transport layer that fired (Connect | Idle); `LlmError::is_timeout()` covers both.
 - `LlmOperation` gains `Decide` and becomes `#[non_exhaustive]`.
 - `LlmGlobalConfig` gains `default_decision_provider`, `decision_providers`, and `decision_question_sets`.
 - `LlmEndpointConfig` gains `questions`.
@@ -115,7 +115,7 @@ _Avoid_: TypeSafe client, Ollama client (those are provider names, not codecs)
 
 ## Error mapping
 
-**LlmError → CamelError** is intentionally lossy — 17 variants map to only 3 `CamelError` variants (`Unauthenticated`, `Io`, `ProcessorError`). Downstream handlers that need typed LLM errors should use `CamelError::ProcessorErrorWithSource` (available today) or parse the error string. Extending `CamelError` with LLM-specific variants is deferred until a concrete consumer requires it.
+**LlmError → CamelError** is intentionally lossy — 18 variants map to only 3 `CamelError` variants (`Unauthenticated`, `Io`, `ProcessorError`). Downstream handlers that need typed LLM errors should use `CamelError::ProcessorErrorWithSource` (available today) or parse the error string. Extending `CamelError` with LLM-specific variants is deferred until a concrete consumer requires it.
 
 ## Log-level policy
 

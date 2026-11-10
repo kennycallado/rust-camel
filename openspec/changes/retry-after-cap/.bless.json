@@ -1,0 +1,10 @@
+{
+  "kind": "plan",
+  "change": "retry-after-cap",
+  "verdict": "APPROVE",
+  "hash": "sha256:7bfcd905e3f2e81593ee769c9833f4e01e52c2ea8dad38b00f496d04993eeb8d",
+  "expert": "experts/e_gpt",
+  "session": "ses_e3a320f82ffeMpOGLZwLdJKE35",
+  "rounds": 2,
+  "notes": "Round 1: APPROVE-WITH-FIXES (hang guards for red-phase tests, drop real-elapsed asserts, file-inventory + double-visibility minors). Round 2: APPROVE. Supersedes spec blessing sha256:02e6d2ee09b73a6e3e212458ceaac2d1d2d30c17a553ce45b3760d753d171ae2 (experts/e_gpt, ses_e3a49ef20ffehJD3a7GDdhntHS, 4 rounds). Plan reviewed by reviewers/r_glm (ses_e3a4281d9ffePsiv75JP39DXVV): 5 important + 6 minor fixed, then APPROVE with 4 plan-text minors (fixed)."
+}
