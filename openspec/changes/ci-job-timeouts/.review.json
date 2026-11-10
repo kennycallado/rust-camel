@@ -1,0 +1,11 @@
+{
+  "change": "ci-job-timeouts",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e39ee885effeBZTPTec8pbPIiS",
+  "impl_hash": "d6a3f66e4",
+  "base": "fd938bbb3",
+  "date": "2026-11-10",
+  "findings": [],
+  "notes": "Independent 47-job re-derivation: 22 additions exact, 23 keeps byte-identical (fuzz expression verbatim), 2 callers key-clean, cumulative diff 11 workflows + 4 openspec artifacts, 192 insertions 0 deletions, all 23 files parse, no behavioural change beyond timeouts, commit format conformant. Gates: gates-local exit 0 under TMPDIR=/tmp (passed 28, failed 0, skipped 4, ran 28 of 32). actionlint: 22 pre-existing shellcheck infos, none timeout-related."
+}

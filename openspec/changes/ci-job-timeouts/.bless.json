@@ -1,0 +1,31 @@
+{
+  "kind": "plan",
+  "change": "ci-job-timeouts",
+  "verdict": "APPROVED",
+  "hash": "sha256:eeb6b394155fbbeb1bf411a4b87e6ca7398af8f7a0ac5d5bb6c925871b91a325",
+  "expert": "experts/e_gpt",
+  "session": "ses_e3a207378ffe6dkUtST9XDfeUd",
+  "date": "2026-11-10",
+  "spec_bless_hash": "sha256:bda030d677273d4baed12fb95eba014370add15135dda7da3d4bd8bbbd387911",
+  "history": [
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:86bbb97e8035660b1859f52be8878598b7bffa553c787cc91ae2b8a473adccf1",
+      "note": "file counts (6/11 not 7/12), per-job value assertions, park-evidence step"
+    },
+    {
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:fe6f7ce1756a4f27a74e1a961afa9b23aa8ccac0a5fcd08f24085efad683302a",
+      "note": "step 7 diff scoping: per-task check filtered to the 5 paths, cumulative baseline defined"
+    }
+  ],
+  "plan_review": "r_glm APPROVE (after 1 minor fix: orphaned gates-local acceptance criterion)",
+  "post_bless_amendments": [
+    {
+      "when": "after task 1.1 review (r_glm APPROVE-WITH-FINDINGS)",
+      "what": "verification command quoting fixed (python via heredoc temp file, Command-convention note added); no semantic change to any assertion, value, or scope",
+      "sanction": "reviewer explicitly ruled no re-bless needed",
+      "hash_after": "sha256:8528332d1f9754ac43f7757b096e09c8f83c8081ec1d08e8c347f91dafc35744"
+    }
+  ]
+}
