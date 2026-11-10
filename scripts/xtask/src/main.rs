@@ -4,6 +4,7 @@ mod lint_cancel_tokens;
 mod lint_component_deps;
 mod lint_context_citations;
 mod lint_gate_forwarding;
+mod lint_gate_parity;
 mod lint_metric_labels;
 mod lint_no_deprecated;
 mod lint_no_env_mutation_unguarded;
@@ -201,6 +202,11 @@ enum Commands {
     /// `camel-bundles` must forward the bundle gates it names, and boot
     /// consumers must forward all of them. Exits non-zero on violations.
     LintGateForwarding,
+    /// Enforce parity between the `AGENTS.md ## QUALITY GATES` registry and
+    /// the workflow steps that mirror its checked gates (`clippy`,
+    /// `doc-build`): same statements, same effective environment. Exits
+    /// non-zero on drift.
+    LintGateParity,
     /// Enforce ADR-0090: the pre-1.0 policy is delete, not hide — no
     /// `#[deprecated]` attributes (including `#[cfg_attr(.., deprecated)]`
     /// forms) anywhere in workspace Rust sources. Exits non-zero on
@@ -834,6 +840,28 @@ fn main() {
                 }
                 Err(e) => {
                     eprintln!("lint-gate-forwarding error: {e}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Commands::LintGateParity => {
+            let workspace_root = workspace_root_or_exit();
+            match lint_gate_parity::lint_gate_parity(&workspace_root) {
+                Ok(violations) if violations.is_empty() => {
+                    println!(
+                        "lint-gate-parity: OK ({} gates in parity)",
+                        lint_gate_parity::parity_gate_count()
+                    );
+                }
+                Ok(violations) => {
+                    for v in &violations {
+                        println!("{v}");
+                    }
+                    eprintln!("lint-gate-parity: FAILED");
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("lint-gate-parity error: {e}");
                     std::process::exit(2);
                 }
             }

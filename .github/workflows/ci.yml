@@ -386,6 +386,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libclang-dev
       - name: fmt check
         run: cargo fmt --check --all
+      # Source of truth: the clippy registry command in AGENTS.md ## QUALITY GATES
+      # (bd rc-2s1vm). If you change the clippy gate there, change this step in the
+      # same commit. cargo xtask lint-gate-parity fails the local sweep on drift.
       - name: clippy
         # --all-features activates dynamic-linking which requires system librdkafka
         # (unavailable on ubuntu-latest). Exclude camel-cli and camel-component-kafka
@@ -394,6 +397,9 @@ jobs:
           cargo clippy --workspace --all-features \
             --exclude camel-cli \
             --exclude camel-component-kafka \
+            --exclude security-keycloak \
+            --exclude security-wasm-policy \
+            --all-targets \
             -- -D warnings
           cargo clippy -p camel-component-kafka --all-targets -- -D warnings
           cargo clippy -p camel-cli -- -D warnings

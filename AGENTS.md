@@ -97,6 +97,8 @@
   run: cargo xtask lint-bridge-versions --check-releases
 - name: lint-gate-forwarding
   run: cargo xtask lint-gate-forwarding
+- name: lint-gate-parity
+  run: cargo xtask lint-gate-parity
 - name: lint-no-deprecated
   run: cargo xtask lint-no-deprecated
 - name: lint-context-citations

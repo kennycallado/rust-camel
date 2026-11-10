@@ -1,0 +1,36 @@
+{
+  "kind": "plan",
+  "change": "ci-clippy-parity",
+  "verdict": "APPROVE",
+  "hash": "sha256:0f6f9102ff6c4faec4826129e678fb41522c3605390d1f5252bdc2f79f3e8ab3",
+  "expert": "experts/e_gpt (GPT-6.1 Sol)",
+  "session": "ses_e397ee846ffexJ0V8ox66wIGN4",
+  "history": [
+    {
+      "verdict": "APPROVE-WITH-FIXES",
+      "hash": "sha256:6498c0e65cc190b31bc56896a5c40c1dc2bc0e7180de0fa6abd2f58c2db791f3",
+      "fixes": [
+        "fixture quoting: real YAML spelling RUSTDOCFLAGS: \"-D warnings\"; single-pair non-recursive quote strip",
+        "test count: eight fixture tests / nine cases, not nine tests"
+      ]
+    }
+  ],
+  "reviewer_loop": {
+    "reviewer": "reviewers/r_glm",
+    "session": "ses_e3985ca9fffe8Nkemtej2wm5am",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "resolved": [
+      "added doc_build_crate_set_drift_fails fixture test",
+      "registry-missing-gate variant folded into missing_mapped_step_fails",
+      "main.rs (not lib.rs) dispatch correction",
+      "Result<Vec<String>, String> signature pinned",
+      "folded plain-scalar separator rule",
+      "env quote normalization",
+      "ran: format match note",
+      "scripts/xtask/Cargo.toml diff path",
+      "10/12-space indentation note"
+    ]
+  },
+  "spec_bless": "sha256:3e32b09dd99b30f1062e613990cfa42c1a432084b7fc1df0c7a043c32f24fed1",
+  "date": "2026-11-10"
+}
