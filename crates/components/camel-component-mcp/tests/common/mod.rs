@@ -19,6 +19,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -85,6 +86,14 @@ pub struct MockOptions {
     /// `server/discover` still answers, so `connect` succeeds on a stalled
     /// remote.
     pub stall_requests: bool,
+    /// Never answer `server/discover` — the handler parks, so the connect
+    /// handshake hangs until the client's connect deadline fires. Ignored when
+    /// [`Self::discover_not_found`] is set (that branch answers immediately).
+    pub stall_discover: bool,
+    /// Sleep this long in `tools/call` before building the canned answer, so
+    /// a request outlives a short connect bound. Ignored when
+    /// [`Self::stall_requests`] is set (that branch never answers).
+    pub tool_delay_ms: u64,
     /// Loopback bind address of the mock listener. Tests pick a distinct
     /// `127.0.0.x` per test file to keep parallel binaries from colliding.
     pub bind: String,
@@ -99,6 +108,8 @@ impl MockOptions {
             discover_not_found: false,
             tool_error: false,
             stall_requests: false,
+            stall_discover: false,
+            tool_delay_ms: 0,
             bind: "127.0.0.1".to_owned(),
         }
     }
@@ -110,6 +121,8 @@ impl MockOptions {
             discover_not_found: true,
             tool_error: false,
             stall_requests: false,
+            stall_discover: false,
+            tool_delay_ms: 0,
             bind: "127.0.0.1".to_owned(),
         }
     }
@@ -139,6 +152,11 @@ impl rmcp::ServerHandler for MockHandler {
                 rmcp::model::DiscoverRequestMethod,
             >())
         } else {
+            // Stall knob: park forever, so the handshake never completes and
+            // the client's connect deadline is the only thing that can end it.
+            if self.options.stall_discover {
+                std::future::pending::<()>().await;
+            }
             Ok(DiscoverResult::new(
                 self.options.supported_versions.clone(),
                 ServerCapabilities::default(),
@@ -156,6 +174,11 @@ impl rmcp::ServerHandler for MockHandler {
         // `AbandonedRequestGuard` cancels the pending request.
         if self.options.stall_requests {
             std::future::pending::<()>().await;
+        }
+        // Delay knob: answer late but still answer, so a request can outlive a
+        // short connect bound while staying inside the request deadline.
+        if self.options.tool_delay_ms != 0 {
+            tokio::time::sleep(Duration::from_millis(self.options.tool_delay_ms)).await;
         }
         let content = vec![rmcp::model::ContentBlock::text(format!(
             "{}:{CANNED_TOOL_SUFFIX}",

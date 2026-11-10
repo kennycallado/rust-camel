@@ -144,6 +144,7 @@ async fn component_client(addr: SocketAddr) -> RmcpClient {
             allow_internal: true, // tests bind loopback
             allow_cleartext: false,
             request_timeout_secs: 120,
+            connect_timeout_secs: 15,
         },
     )
     .await

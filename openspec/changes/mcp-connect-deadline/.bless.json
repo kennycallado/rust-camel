@@ -1,0 +1,47 @@
+{
+  "kind": "plan",
+  "change": "mcp-connect-deadline",
+  "verdict": "BLESS",
+  "hash": "sha256:2eb05ce1a46a4079496213a1826a9eeddc9b7f4d512a1eaa0ab4985d7f6ab788",
+  "expert": "experts/e_gpt",
+  "session": "ses_e3941e23afferBGJhR7S2dyiTh",
+  "spec_bless": {
+    "verdict": "BLESS",
+    "hash": "sha256:93cdc7c9b3fb0d77546cc2d40d983baa9789a7925c563c362c170927d140e72e",
+    "session": "ses_e3950bd65ffeT7dd6gn4uBvfri"
+  },
+  "reviewer_loop": {
+    "reviewer": "reviewers/r_glm",
+    "session": "ses_e394c308effeTbfZynwK8M3d11",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "resolved": [
+      "important: Task 4 rewrites stale mcp.md:61 sentence",
+      "minor: Task 2 step numbering",
+      "minor: Task 3 acceptance cites exact owning tests for unchanged-budgets scenario"
+    ]
+  },
+  "plan_bless_rounds": [
+    {
+      "round": 1,
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e3947c755ffewtfmtCsy0i507r",
+      "hash": "sha256:df8680187ef6b3bbcda6be871b91e471350303e89bfaf45a07cdc5ad261c4efd",
+      "summary": "4 fixes: literal updates moved to Task 1 (clippy --all-targets ordering); false worker-drop claim in Task 2 doc line; test-expectation precision; mdbook build added."
+    },
+    {
+      "round": 2,
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e3943d021ffeh0KTJJIbDGNQFu",
+      "hash": "sha256:e54674ebd50997408571481f1515c547845d6224d3b570569b771c392b63c507",
+      "summary": "2 wording fixes: deny_unknown_fields claims in Task 1 expectations."
+    },
+    {
+      "round": 3,
+      "verdict": "BLESS",
+      "session": "ses_e3941e23afferBGJhR7S2dyiTh",
+      "hash": "sha256:2eb05ce1a46a4079496213a1826a9eeddc9b7f4d512a1eaa0ab4985d7f6ab788",
+      "summary": "Both wording fixes verified. Approved for implementation."
+    }
+  ],
+  "blessed_at": "2026-11-10"
+}

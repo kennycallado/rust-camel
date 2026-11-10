@@ -28,6 +28,7 @@ fn remote_config(url: String) -> McpRemoteConfig {
         allow_internal: true, // tests bind loopback
         allow_cleartext: false,
         request_timeout_secs: 120,
+        connect_timeout_secs: 15,
     }
 }
 

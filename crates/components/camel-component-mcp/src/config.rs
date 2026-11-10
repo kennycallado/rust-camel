@@ -9,8 +9,14 @@ use crate::error::McpError;
 
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 
+const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
+
 fn default_request_timeout_secs() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_SECS
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    DEFAULT_CONNECT_TIMEOUT_SECS
 }
 
 /// Deserialize `request_timeout_secs` as whole seconds of at least 1.
@@ -30,6 +36,28 @@ where
     if value == 0 {
         return Err(serde::de::Error::custom(
             "request_timeout_secs must be at least 1 (got 0)",
+        ));
+    }
+    Ok(value)
+}
+
+/// Deserialize `connect_timeout_secs` as whole seconds of at least 1.
+///
+/// A plain `u64` field cannot name itself in the rejection message, so a
+/// custom deserializer carries the option name for zero and non-numeric
+/// values alike (precedent: `non_empty_path`).
+fn deserialize_connect_timeout_secs<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::custom(
+            "connect_timeout_secs must be an integer number of seconds of at least 1",
+        )
+    })?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "connect_timeout_secs must be at least 1 (got 0)",
         ));
     }
     Ok(value)
@@ -376,6 +404,20 @@ pub struct McpRemoteConfig {
         deserialize_with = "deserialize_request_timeout_secs"
     )]
     pub request_timeout_secs: u64,
+
+    /// Connect deadline for this remote, in whole seconds. Bounds the
+    /// discover lifecycle future (TCP connect inside rmcp's transport plus
+    /// the `server/discover` POST), started after DNS pinning completes.
+    /// Default 15 — rmcp's own Auto-mode discover budget is 10 s; the
+    /// margin keeps that full budget available after a slow TCP connect.
+    /// Zero and non-numeric values are rejected at parse time naming the
+    /// option. Post-connect requests are bounded separately by
+    /// `request_timeout_secs`.
+    #[serde(
+        default = "default_connect_timeout_secs",
+        deserialize_with = "deserialize_connect_timeout_secs"
+    )]
+    pub connect_timeout_secs: u64,
 }
 
 impl McpRemoteConfig {
@@ -468,6 +510,7 @@ mod tests {
             allow_internal,
             allow_cleartext,
             request_timeout_secs: 120,
+            connect_timeout_secs: 15,
         }
     }
 
@@ -679,6 +722,54 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("request_timeout_secs"), "{msg}");
         assert!(msg.contains("integer number of seconds"), "{msg}");
+    }
+
+    // -----------------------------------------------------------------------
+    // connect_timeout_secs: connect deadline (default 15 s)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn connect_timeout_default_applies_when_option_absent() {
+        let cfg: McpRemoteConfig = serde_json::from_str(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.connect_timeout_secs, 15);
+    }
+
+    #[test]
+    fn connect_timeout_explicit_value_used() {
+        let cfg: McpRemoteConfig = serde_json::from_str(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http", "connect_timeout_secs": 300}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.connect_timeout_secs, 300);
+    }
+
+    #[test]
+    fn connect_timeout_zero_rejected_naming_option() {
+        let err = serde_json::from_str::<McpRemoteConfig>(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http", "connect_timeout_secs": 0}"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("connect_timeout_secs must be at least 1 (got 0)"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn connect_timeout_empty_rejected_naming_option() {
+        let err = serde_json::from_str::<McpRemoteConfig>(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http", "connect_timeout_secs": ""}"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("connect_timeout_secs must be an integer number of seconds of at least 1"),
+            "{msg}"
+        );
     }
 
     #[test]

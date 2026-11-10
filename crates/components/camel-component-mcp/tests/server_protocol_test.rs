@@ -377,6 +377,7 @@ async fn session_header_not_required() {
             allow_internal: true, // tests bind loopback
             allow_cleartext: false,
             request_timeout_secs: 120,
+            connect_timeout_secs: 15,
         },
     )
     .await

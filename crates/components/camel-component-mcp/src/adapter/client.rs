@@ -53,6 +53,12 @@ impl RmcpClient {
     /// Fail-fast: any remote that cannot be reached on protocol `2026-07-28`
     /// returns [`McpError::IncompatibleRemote`] (after a `warn!`) instead of
     /// falling back to the legacy `initialize` handshake.
+    ///
+    /// The discover handshake is bounded by `McpRemoteConfig::connect_timeout_secs`
+    /// (default 15 s); on expiry the discover future is dropped and connect
+    /// returns the named error (residual: rmcp 3.9.0 cannot cancel its
+    /// bootstrap POST — the worker/socket can persist until the POST resolves;
+    /// see `docs/src/components/mcp.md` and bd rc-s4xod).
     pub async fn connect(name: &str, config: &McpRemoteConfig) -> Result<Self, McpError> {
         // DNS pinning (audit 2026-08-31 R4 / rc-juqrd): resolve the remote
         // once, validate every resolved IP against the SSRF blocklist, and
@@ -79,15 +85,19 @@ impl RmcpClient {
             http_client,
             StreamableHttpClientTransportConfig::with_uri(config.url.clone()),
         );
-        let service = ()
-            .serve_with_lifecycle(
+        let connect_deadline = Duration::from_secs(config.connect_timeout_secs);
+        let service = tokio::time::timeout(
+            connect_deadline,
+            ().serve_with_lifecycle(
                 transport,
                 ClientLifecycleMode::Discover {
                     preferred_versions: vec![PROTOCOL_VERSION],
                 },
-            )
-            .await
-            .map_err(|error| map_connect_error(name, error))?;
+            ),
+        )
+        .await
+        .map_err(|_| connect_deadline_error(name, connect_deadline))?
+        .map_err(|error| map_connect_error(name, error))?;
         let request_deadline = Duration::from_secs(config.request_timeout_secs);
         Ok(Self {
             service,
@@ -151,6 +161,18 @@ fn map_connect_error(server: &str, error: ClientInitializeError) -> McpError {
 fn tcp_connect_timeout_message(server: &str, cause: &reqwest::Error) -> McpError {
     McpError::Endpoint(format!(
         "connect to remote '{server}' exceeded the 5s TCP connect limit ({cause})"
+    ))
+}
+
+/// Message for an elapsed connect-phase deadline — names the phase
+/// (discover handshake) and the configured bound. Distinct from the
+/// 5 s TCP/DNS budgets: those are rmcp/reqwest-internal and keep
+/// their own messages (567 honesty fix).
+fn connect_deadline_error(server: &str, deadline: Duration) -> McpError {
+    McpError::Endpoint(format!(
+        "connect to remote '{server}' did not complete the discover \
+         handshake within {}s",
+        deadline.as_secs()
     ))
 }
 
@@ -302,6 +324,20 @@ mod tests {
         DynamicTransportError::new::<StreamableHttpClientTransport<reqwest::Client>, RoleClient>(
             error,
         )
+    }
+
+    #[test]
+    fn connect_deadline_error_names_server_phase_and_bound() {
+        let message = connect_deadline_error("srv", Duration::from_secs(15)).to_string();
+        assert!(message.contains("srv"), "server name missing: {message}");
+        assert!(
+            message.contains("did not complete the discover handshake within 15s"),
+            "phase and bound missing: {message}"
+        );
+        assert!(
+            !message.contains("5s TCP connect limit"),
+            "the deadline message must not borrow the TCP budget wording: {message}"
+        );
     }
 
     #[tokio::test]

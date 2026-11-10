@@ -46,7 +46,8 @@ Global TOML key: `mcp` (`McpBundle`).
 - `mcp.servers.<name>` (`McpServerConfig`): `bind`, `tls`, `security_policy`,
   `max_tools`, `max_resources`, `allowed_hosts`.
 - `mcp.remotes.<name>` (`McpRemoteConfig`): `url`, `transport`,
-  `request_timeout_secs`, `allow_internal`, `allow_cleartext`.
+  `request_timeout_secs`, `connect_timeout_secs`, `allow_internal`,
+  `allow_cleartext`.
 
 `request_timeout_secs` (whole seconds, minimum 1, default 120) bounds every
 post-connect request to that remote — one `tools/call` or one
@@ -54,6 +55,14 @@ post-connect request to that remote — one `tools/call` or one
 (`notifications/cancelled`) and fails the dispatch with an error naming the
 operation and the bound (`tool call '<name>' exceeded the 120s request
 deadline`).
+
+`connect_timeout_secs` (whole seconds, minimum 1, default 15) bounds the
+connect phase — the TCP connect plus the `server/discover` handshake — after
+DNS pinning. On expiry connect fails naming the bound (`connect to remote
+'<server>' did not complete the discover handshake within 15s`). DNS
+resolution keeps its own fixed 5 s limit. Reclaiming the handshake's worker
+and socket in the wedge shape is an upstream rmcp limitation (the bootstrap
+POST is un-cancellable; route start is bounded regardless — bd rc-s4xod).
 
 Cleartext `http://` remotes to public targets are rejected (IP literals
 at config load, hostnames at connect) unless

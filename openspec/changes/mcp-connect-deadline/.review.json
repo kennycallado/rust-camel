@@ -1,0 +1,15 @@
+{
+  "kind": "holistic-review",
+  "change": "mcp-connect-deadline",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e390a6ce1ffez2nDOUJ0F6yBWB",
+  "impl_commit": "edda2e04b7e6ee68e2d10f5e3ec31cfa6ad65b2c",
+  "impl_hash_note": "bless hashes recomputed by reviewer and match .bless.json: spec sha256:93cdc7c9b3fb0d77546cc2d40d983baa9789a7925c563c362c170927d140e72e, plan sha256:2eb05ce1a46a4079496213a1826a9eeddc9b7f4d512a1eaa0ab4985d7f6ab788",
+  "findings": [
+    "absurd-minor (discarded): config.rs deserialize_connect_timeout_secs mirrors request_timeout_secs deserializer shape — blessed pattern, parameterize only if a third *_secs option lands",
+    "absurd-minor (discarded): docs mcp.md:65 summary omits the precedence nuance restated two paragraphs up — blessed sentence"
+  ],
+  "bless_integrity": "verified independently by reviewer: xtask hash-artifacts matches .bless.json byte-for-byte (checkbox-normalized scheme)",
+  "reviewed_at": "2026-11-10"
+}
