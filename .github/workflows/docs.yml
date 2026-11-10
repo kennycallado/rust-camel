@@ -40,6 +40,7 @@ jobs:
         uses: taiki-e/install-action@eba66cc6f87204a1e73f96e528e759b6c1fcf573 # cargo-binstall
         with:
           tool: mdbook@0.4.52,lychee@0.20.1
+      # Must match the doc-build registry command in AGENTS.md ## QUALITY GATES (bd rc-o8pxk): same eight crates, --no-deps, RUSTDOCFLAGS="-D warnings" from the workflow env above. If you change the crate set there, change it here in the same commit.
       - name: Build Rustdoc
         run: |
           cargo doc \
@@ -48,6 +49,7 @@ jobs:
             -p camel-builder \
             -p camel-dsl \
             -p camel-endpoint \
+            -p camel-component-api \
             -p camel-component-validator \
             -p camel-xslt \
             --no-deps

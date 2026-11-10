@@ -1,0 +1,70 @@
+name: Integration Rhai
+
+# Runs the rhai reconcile-budget control (bd rc-in54n). The control in
+# crates/camel-integration-test/tests/reconcile_budget_test.rs is gated
+# behind #![cfg(feature = "lang-rhai")], so it compiles out of every
+# build that skips the feature; this workflow is the only CI job that
+# passes --features lang-rhai.
+#
+# The control asserts the reply shape, NOT timing. Observed wall clock
+# for reconcile_budget_1200_control_replies_expected_shape on the
+# mission machine (2026-11-10) was ~6.6-7.4 s; timing is
+# machine-dependent — an observation, not a budget. The 5001-member
+# bench in the same file stays #[ignore]d (release-only recipe in the
+# test's doc comment; bd rc-m01r9): this job deliberately does not pass
+# --ignored.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/camel-api/**"
+      - "crates/camel-core/**"
+      - "crates/camel-integration-test/**"
+      - "crates/camel-language-api/**"
+      - "crates/languages/camel-language-rhai/**"
+      - ".github/workflows/integration-rhai.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/camel-api/**"
+      - "crates/camel-core/**"
+      - "crates/camel-integration-test/**"
+      - "crates/camel-language-api/**"
+      - "crates/languages/camel-language-rhai/**"
+      - ".github/workflows/integration-rhai.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # ENOSPC mitigation: strip debug info from dev/test profiles.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  integration-rhai:
+    name: Integration Rhai reconcile control (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Maximize disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/google/chrome /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - name: Rhai reconcile-budget control (camel-integration-test)
+        run: cargo test -p camel-integration-test --features lang-rhai --test reconcile_budget_test

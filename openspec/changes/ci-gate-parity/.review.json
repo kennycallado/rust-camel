@@ -1,0 +1,26 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE",
+  "reviewer": "r_glm",
+  "session": "ses_e3aaf3325ffeO0f5HtmjbnrqqC",
+  "impl_commit": "7f215c836",
+  "impl_diff_base": "70a696ae2",
+  "change_dir_hash": "sha256:1fc7e4b624ced205aed7653049f9d10f0f67a7ff8d47ecfc4e7efeaeecb6cba7",
+  "findings": [
+    {
+      "severity": "minor-observation",
+      "disposition": "pre-existing, out of scope, tracked as bd rc-6byj1",
+      "note": "docs.yml Test Rustdoc examples covers 5 crates vs 8 documented; newly visible asymmetry, no spec violation"
+    }
+  ],
+  "verification": {
+    "gates_local": "exit 0 — passed 28, failed 0, skipped 4 (lint-commits lint-bridge-releases doc-guide-test cargo-audit), ran 28 of 32",
+    "rust_diff_files": 0,
+    "doc_run": "8 crates + -D warnings exit 0, Finished 22.37s",
+    "rhai_control": "1 passed; 0 failed; 1 ignored; finished in 6.66s, exit 0",
+    "yaml_parse": "pyyaml safe_load OK both files",
+    "actionlint": "not available locally"
+  },
+  "date": "2026-11-10",
+  "bd": ["rc-o8pxk", "rc-in54n"]
+}
