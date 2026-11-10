@@ -1,0 +1,11 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:f7c5dd84e9caf9f415b02ead7a7a21cf15c786e82c46fb4645b09a874e787a77",
+  "expert": "experts/e_gpt",
+  "session": "ses_e3abd31c9ffeeaSKsuN2NRxh4Y",
+  "reviewer": "reviewers/r_glm (ses_e3ac85bcbffeTQ4g9ISo3lh54u) APPROVE round 2",
+  "rounds": 2,
+  "date": "2026-11-10",
+  "notes": "Round 1 BLESS-WITH-FIXES (instance-local cap override replacing global static; CAMEL_LLM_TEXT absent for text-only fixture). Round 2 BLESS. Spec bless: sha256:6d66d9bd... BLESS round 3."
+}

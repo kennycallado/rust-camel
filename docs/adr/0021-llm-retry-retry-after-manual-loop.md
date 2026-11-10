@@ -55,7 +55,20 @@ lifetime, so it is a different kind of bound than the per-attempt lifetime
 timeout this ADR forbids. The decision client carries no read-idle guard; its
 per-request total is unchanged.
 
-Accepted residual risk for `timeout_secs: None`: a peer that trickles bytes
-under 600s of inactivity is not bounded, and the chat/embed path has no
-body-size cap. Set `timeout_secs` for a lifetime bound. Follow-ups: bd
-`rc-kemrg` (body-size cap) and bd `rc-ucneu` (Keycloak hardened client).
+Response bodies are capped. Chat payloads are capped at 8 MiB while they
+stream or accumulate (the genai stream loop and the materialized producer
+loop); embed payloads are capped at 64 MiB at the conversion boundary, after
+the provider call returns. A breach fails the request with
+`LlmError::ResponseTooLarge { path, cap_bytes, read_bytes }`, which names the
+site (`chat_stream`, `chat_materialized`, or `embed`), the cap, and the bytes
+read. The error is not retryable. Payloads under the cap are unchanged. bd
+`rc-kemrg` (body-size cap) is implemented.
+
+Residual, not fixed here: genai SDK-internal buffering — SSE lines, oversized
+individual events, captured tool arguments, the embed JSON body, and genai
+error bodies — remains unbounded, as does direct streaming from non-genai
+providers through the producer passthrough. The caps bound payload size only:
+a peer that trickles bytes under 600s of inactivity still holds a connection
+indefinitely when `timeout_secs` is unset. Set `timeout_secs` for a lifetime
+bound. Follow-ups: bd `rc-v8skx` (genai SDK-side bounds) and bd `rc-ucneu`
+(Keycloak hardened client).

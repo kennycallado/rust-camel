@@ -92,6 +92,21 @@ pub enum LlmError {
     #[error("stream interrupted: {0}")]
     StreamInterrupted(String),
 
+    /// Accepted response payload breached the path's size cap.
+    ///
+    /// Non-retryable: retrying re-requests a payload that breaches the cap
+    /// again. Bounds accepted payloads (UTF-8 text bytes / f32 vector bytes),
+    /// not wire bodies or process memory.
+    #[error("response body exceeds {cap_bytes}-byte cap on {path}: counted {read_bytes} bytes")]
+    ResponseTooLarge {
+        /// Logical path that owns the cap (for example `chat_stream`, `embed`).
+        path: &'static str,
+        /// Cap that the accepted payload breached, in bytes.
+        cap_bytes: usize,
+        /// Bytes counted for the accepted payload.
+        read_bytes: usize,
+    },
+
     /// Provider-specific error (catch-all). Message is automatically truncated
     /// to 200 bytes with UTF-8 safety via [`LlmError::provider`].
     #[error("provider error: {0}")]
@@ -354,6 +369,41 @@ mod tests {
             "message too long: {} bytes",
             msg.len()
         );
+    }
+
+    #[test]
+    fn response_too_large_display_names_path_cap_and_count() {
+        let err = LlmError::ResponseTooLarge {
+            path: "chat_stream",
+            cap_bytes: 8 * 1024 * 1024,
+            read_bytes: 8 * 1024 * 1024 + 1,
+        };
+        let display = err.to_string();
+        assert!(display.contains("chat_stream"), "missing path: {display}");
+        assert!(display.contains("8388608"), "missing cap: {display}");
+        assert!(display.contains("8388609"), "missing count: {display}");
+    }
+
+    #[test]
+    fn response_too_large_is_not_retryable() {
+        let err = LlmError::ResponseTooLarge {
+            path: "embed",
+            cap_bytes: 64,
+            read_bytes: 65,
+        };
+        assert!(!is_retryable(&err), "cap breach must fail fast");
+    }
+
+    #[test]
+    fn max_cap_constants_have_documented_values() {
+        assert_eq!(crate::MAX_CHAT_RESPONSE_BYTES, 8 * 1024 * 1024);
+        #[cfg(any(
+            feature = "openai",
+            feature = "ollama",
+            feature = "generic-providers",
+            feature = "all-providers"
+        ))]
+        assert_eq!(crate::MAX_EMBED_RESPONSE_BYTES, 64 * 1024 * 1024);
     }
 
     #[test]

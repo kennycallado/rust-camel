@@ -19,6 +19,8 @@ use futures::future::BoxFuture;
 use futures::stream::{BoxStream, StreamExt};
 
 use crate::LlmHttpPolicy;
+use crate::MAX_CHAT_RESPONSE_BYTES;
+use crate::MAX_EMBED_RESPONSE_BYTES;
 #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
 use crate::config::LlmServiceKind;
 use crate::error::LlmError;
@@ -416,6 +418,10 @@ struct GenaiProvider {
     client_builds: Arc<AtomicUsize>,
     #[cfg(test)]
     build_override: Option<BuildOverride>,
+    /// Test-only embed cap override. Instance-local by design: a global seam
+    /// would leak a tiny cap into concurrently running success tests.
+    #[cfg(test)]
+    cap_override: Option<usize>,
 }
 
 impl GenaiProvider {
@@ -436,6 +442,8 @@ impl GenaiProvider {
             client_builds: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             build_override: None,
+            #[cfg(test)]
+            cap_override: None,
         }
     }
 
@@ -458,6 +466,34 @@ impl GenaiProvider {
             client: Arc::new(tokio::sync::OnceCell::new()),
             client_builds: Arc::new(AtomicUsize::new(0)),
             build_override: Some(override_),
+            cap_override: None,
+        }
+    }
+
+    /// Test-only constructor that additionally installs an embed cap override.
+    ///
+    /// The override is per-instance so a breach test cannot perturb
+    /// concurrently running success tests that read the real cap.
+    #[cfg(test)]
+    fn new_with_cap_override(
+        id: impl Into<String>,
+        default_model: impl Into<String>,
+        config: GenaiConfig,
+        transport_policy: LlmHttpPolicy,
+        override_: BuildOverride,
+        policy: SsrfPolicy,
+        cap_override: Option<usize>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            default_model: default_model.into(),
+            config,
+            policy,
+            transport_policy,
+            client: Arc::new(tokio::sync::OnceCell::new()),
+            client_builds: Arc::new(AtomicUsize::new(0)),
+            build_override: Some(override_),
+            cap_override,
         }
     }
 }
@@ -530,12 +566,25 @@ impl LlmProvider for GenaiProvider {
                 .map_err(|e| map_genai_error(&e, transport_policy))?;
 
             let mut stream = response.stream;
+            // Accepted-payload budget: count UTF-8 content bytes, never chars.
+            // Breach fails the stream without forwarding the breaching chunk.
+            let mut counted: usize = 0;
             // Per-id buffering: emit at most one ToolCall event per id, in the
             // order the complete calls appear in the captured stream end.
             let mut emitted_ids: HashSet<String> = HashSet::new();
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(ChatStreamEvent::Chunk(chunk)) => {
+                        // Overflow is unreachable: counted ≤ 8 MiB cap ≪ usize::MAX.
+                        let attempted = counted.saturating_add(chunk.content.len());
+                        if attempted > MAX_CHAT_RESPONSE_BYTES {
+                            Err(LlmError::ResponseTooLarge {
+                                path: "chat_stream",
+                                cap_bytes: MAX_CHAT_RESPONSE_BYTES,
+                                read_bytes: attempted,
+                            })?;
+                        }
+                        counted = attempted;
                         yield ChatEvent::Delta { text: chunk.content };
                     }
                     Ok(ChatStreamEvent::End(end)) => {
@@ -630,19 +679,49 @@ impl LlmProvider for GenaiProvider {
 
         let usage = convert_embed_usage(response.usage.prompt_tokens, response.usage.total_tokens);
         // genai maps response embeddings 1:1 and in request order; preserve it.
-        let embeddings = response
+        let vectors: Vec<Vec<f32>> = response
             .embeddings
             .into_iter()
             .map(|embedding| embedding.vector)
             .collect();
 
+        // Conversion-boundary budget: count decoded f32 payload bytes before
+        // any Camel-owned copy is built. Breach fails without an EmbedResponse.
+        #[cfg(test)]
+        let cap_bytes = self.cap_override.unwrap_or(MAX_EMBED_RESPONSE_BYTES);
+        #[cfg(not(test))]
+        let cap_bytes = MAX_EMBED_RESPONSE_BYTES;
+        let decoded = decoded_embed_bytes(&vectors);
+        // Overflow means the decoded size exceeds any cap; report the cap.
+        let read_bytes = decoded.unwrap_or(cap_bytes);
+        if decoded.is_none() || read_bytes > cap_bytes {
+            return Err(LlmError::ResponseTooLarge {
+                path: "embed",
+                cap_bytes,
+                read_bytes,
+            });
+        }
+
         Ok(EmbedResponse {
-            embeddings,
+            embeddings: vectors,
             usage,
             model,
             metadata: serde_json::Map::new(),
         })
     }
+}
+
+/// Decoded payload bytes of an embedding batch (`f32` vectors), or `None` on
+/// arithmetic overflow.
+///
+/// At this point genai has already allocated and parsed the JSON body; the cap
+/// promises no additional Camel-owned copy of the decoded vectors, not the
+/// absence of SDK allocation.
+fn decoded_embed_bytes(vectors: &[Vec<f32>]) -> Option<usize> {
+    vectors.iter().try_fold(0usize, |total, vector| {
+        let bytes = vector.len().checked_mul(std::mem::size_of::<f32>())?;
+        total.checked_add(bytes)
+    })
 }
 
 /// Convert a genai tool-call argument value into the Camel string form.

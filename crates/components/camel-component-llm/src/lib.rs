@@ -92,6 +92,26 @@ impl LlmHttpPolicy {
     }
 }
 
+/// Accepted chat payload budget (8 MiB of UTF-8 text bytes).
+///
+/// Fixed safety budget, same class as the decision path's
+/// `MAX_DECISION_RESPONSE_BYTES`; bounds accepted payloads, not wire bodies
+/// or process memory.
+pub(crate) const MAX_CHAT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Accepted embed payload budget (64 MiB of f32 vector bytes ≈ 5,461 ×
+/// 3072-dim v3-large vectors).
+///
+/// Fixed safety budget; bounds accepted payloads, not wire bodies or process
+/// memory.
+#[cfg(any(
+    feature = "openai",
+    feature = "ollama",
+    feature = "generic-providers",
+    feature = "all-providers"
+))]
+pub(crate) const MAX_EMBED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Build a hardened `reqwest::Client` for outbound LLM HTTP traffic.
 ///
 /// Hardening (H15):

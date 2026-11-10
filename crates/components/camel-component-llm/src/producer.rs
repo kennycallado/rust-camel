@@ -14,6 +14,7 @@ use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 use tower::Service;
 
+use crate::MAX_CHAT_RESPONSE_BYTES;
 use crate::config::{LlmEndpointConfig, LlmOperation, default_max_header_json_bytes};
 use crate::cost::PricingTable;
 use crate::error::LlmError;
@@ -744,7 +745,29 @@ impl LlmProducer {
                             if !text.is_empty() {
                                 cs.store(true, Ordering::SeqCst);
                             }
-                            full_text.push_str(&text);
+                            // Accepted-payload budget: the breaching delta is
+                            // never pushed, and the error propagates through
+                            // the loop's error arm so no partial
+                            // `MaterializedResult` escapes.
+                            match full_text.len().checked_add(text.len()) {
+                                Some(next) if next <= MAX_CHAT_RESPONSE_BYTES => {
+                                    full_text.push_str(&text);
+                                }
+                                Some(next) => {
+                                    return Err(LlmError::ResponseTooLarge {
+                                        path: "chat_materialized",
+                                        cap_bytes: MAX_CHAT_RESPONSE_BYTES,
+                                        read_bytes: next,
+                                    });
+                                }
+                                None => {
+                                    return Err(LlmError::ResponseTooLarge {
+                                        path: "chat_materialized",
+                                        cap_bytes: MAX_CHAT_RESPONSE_BYTES,
+                                        read_bytes: MAX_CHAT_RESPONSE_BYTES,
+                                    });
+                                }
+                            }
                         }
                         ChatEvent::ToolCall {
                             id,

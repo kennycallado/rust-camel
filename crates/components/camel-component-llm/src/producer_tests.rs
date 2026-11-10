@@ -1,5 +1,7 @@
 // Thin dispatcher — each thematic test family lives in its own file.
 
+#[path = "producer_body_cap_tests.rs"]
+mod producer_body_cap_tests;
 #[path = "producer_chat_tests.rs"]
 mod producer_chat_tests;
 #[path = "producer_dos_hardening_tests.rs"]

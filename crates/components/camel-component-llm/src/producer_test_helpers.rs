@@ -5,6 +5,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "openai")]
+use bytes::Bytes;
+#[cfg(feature = "openai")]
+use camel_api::CamelError;
 use camel_api::{Body, Exchange, Message};
 use camel_component_api::NetworkRetryPolicy;
 use futures::StreamExt;
@@ -167,6 +171,25 @@ pub(super) async fn collect_stream_frames(out: &mut Exchange) -> Vec<String> {
         *guard = None;
     }
     frames
+}
+
+/// Drain a streaming body to completion, returning every chunk result so
+/// terminal `Err` frames stay observable (unlike `collect_stream_frames`,
+/// which panics on them). Clears the inner stream option so the
+/// `PermitStream` (and its semaphore permit) is dropped.
+#[cfg(feature = "openai")]
+pub(super) async fn collect_stream_results(out: &mut Exchange) -> Vec<Result<Bytes, CamelError>> {
+    let mut results = Vec::new();
+    if let Body::Stream(sb) = &mut out.input.body {
+        let mut guard = sb.stream.lock().await;
+        if let Some(stream) = guard.as_mut() {
+            while let Some(chunk) = stream.next().await {
+                results.push(chunk);
+            }
+        }
+        *guard = None;
+    }
+    results
 }
 
 /// Pull exactly one event from a streaming body (to start it) without

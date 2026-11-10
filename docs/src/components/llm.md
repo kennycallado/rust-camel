@@ -44,7 +44,7 @@ llm:<operation>?provider=<name>[&model=<model>][&temperature=<n>][&max_tokens=<n
 | `stream` | `true` | `true` streams, `false` materializes |
 | `system_prompt` | — | System prompt override |
 
-`timeout_secs` is not a URI parameter. Configure it in the provider section of `Camel.toml` (or the global LLM config). It sets the streaming per-event activity timeout and the materialized total deadline. The transport adds no total cap: the chat/embed client bounds each attempt with a 10s connect timeout and a 600s transport read-idle guard, and the transport never reports a configured value it did not enforce.
+`timeout_secs` is not a URI parameter. Configure it in the provider section of `Camel.toml` (or the global LLM config). It sets the streaming per-event activity timeout and the materialized total deadline. The transport adds no total cap: the chat/embed client bounds each attempt with a 10s connect timeout and a 600s transport read-idle guard, and the transport never reports a configured value it did not enforce. Payload size is capped separately (see "Retry and timeout" below).
 
 ## Operations
 
@@ -288,6 +288,8 @@ The streaming `timeout_secs` covers each `stream.next()` call. A deadline lapse 
 The transport applies its bounds in this order: connect (10s) → transport read-idle guard (600s with no response activity; before the headers, the guard bounds time-to-headers) → the configured deadline (per-event in streaming, total in materialized). Which guard fires first depends on the configuration. With `timeout_secs` unset, the read-idle guard still bounds hung connections.
 
 Each error text names the layer that fired. `timeout: deadline {d:?} exceeded` means a configured deadline lapsed (streaming per-event, materialized total, or the decision per-request total). `timeout: connect not established within {after:?}` means the TCP connect bound lapsed. `timeout: no response activity for {after:?}` means the transport read-idle guard fired. Transport timeouts inside one attempt are retryable. The no-retry-after-content rule does not change.
+
+Response size caps bound the payload, not the connection. Chat payloads are capped at 8 MiB while they stream or accumulate; embed payloads are capped at 64 MiB at the conversion boundary. A breach fails the request with `ResponseTooLarge { path, cap_bytes, read_bytes }`, which names the site (`chat_stream`, `chat_materialized`, or `embed`), the cap, and the bytes read. `ResponseTooLarge` is not retryable. Responses under the cap are unchanged.
 
 ## Error handling
 

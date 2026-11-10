@@ -1536,6 +1536,156 @@ mod wiremock_embed {
             serde_json::from_slice(&requests[0].body).expect("json request body");
         assert_eq!(body["model"], "text-embed-9");
     }
+
+    // ========================================================================
+    // Embed conversion-boundary cap (task 1.4)
+    // ========================================================================
+
+    /// The conversion-boundary cap helper must count every vector's payload
+    /// bytes cumulatively, not just one vector's.
+    #[test]
+    fn decoded_embed_bytes_sums_cumulative_vector_bytes() {
+        let vectors = vec![vec![0.0_f32; 10], vec![0.0_f32; 20]];
+        assert_eq!(super::super::decoded_embed_bytes(&vectors), Some(120));
+    }
+
+    /// Pins the default embed budget the production read path falls back to
+    /// when no test override is installed.
+    #[test]
+    fn embed_cap_constant_pinned() {
+        assert_eq!(crate::MAX_EMBED_RESPONSE_BYTES, 64 * 1024 * 1024);
+    }
+
+    #[cfg(any(feature = "openai", feature = "all-providers"))]
+    fn openai_provider_with_cap(
+        server: &MockServer,
+        default_model: &str,
+        cap_override: Option<usize>,
+    ) -> GenaiProvider {
+        GenaiProvider::new_with_cap_override(
+            "wiremock-openai-embed-capped",
+            default_model,
+            GenaiConfig::OpenAi {
+                api_key: "sk-test".into(),
+                base_url: Some(format!("{}/v1", server.uri())),
+            },
+            LlmHttpPolicy::chat(),
+            build_override(),
+            SsrfPolicy::AllowInternal,
+            cap_override,
+        )
+    }
+
+    /// Stage an OpenAI-shaped embedding body with the given vectors, one
+    /// `data[]` entry per vector, and start a server answering it.
+    #[cfg(any(feature = "openai", feature = "all-providers"))]
+    async fn embed_server_with_vectors(vectors: &[Vec<f32>]) -> MockServer {
+        let data: Vec<serde_json::Value> = vectors
+            .iter()
+            .enumerate()
+            .map(|(index, vector)| {
+                serde_json::json!({
+                    "object": "embedding",
+                    "index": index,
+                    "embedding": vector,
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "object": "list",
+            "data": data,
+            "model": "embeddinggemma",
+            "usage": {"prompt_tokens": vectors.len(), "total_tokens": vectors.len()}
+        });
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Under the real (default) cap, the adapter must return the staged
+    /// vectors byte-identically and in request order.
+    #[cfg(any(feature = "openai", feature = "all-providers"))]
+    #[tokio::test]
+    async fn embed_under_cap_byte_identical() {
+        let server = openai_embed_server().await;
+        let provider = openai_provider(&server, "embeddinggemma");
+
+        let response = provider
+            .embed(EmbedRequest::new(
+                "",
+                vec!["alpha".into(), "beta".into(), "gamma".into()],
+            ))
+            .await
+            .expect("embed under the default cap must succeed");
+
+        assert_eq!(
+            response.embeddings,
+            vec![
+                vec![1.0_f32, 0.0, 0.5],
+                vec![1.0, 1.0, 0.5],
+                vec![1.0, 2.0, 0.5],
+            ],
+            "vectors must be returned byte-identically in request order"
+        );
+    }
+
+    /// A cap breach at the conversion boundary must fail with the named error
+    /// and never build an `EmbedResponse`. The override lives on the provider
+    /// instance, so concurrent success tests reading the real cap are isolated.
+    #[cfg(any(feature = "openai", feature = "all-providers"))]
+    #[tokio::test]
+    async fn embed_cap_override_breach_fails_with_named_error() {
+        // (a) One 3-float vector: 12 decoded bytes > cap 8.
+        let server = embed_server_with_vectors(&[vec![0.0_f32, 1.0, 2.0]]).await;
+        let provider = openai_provider_with_cap(&server, "embeddinggemma", Some(8));
+
+        let err = provider
+            .embed(EmbedRequest::new("", vec!["alpha".into()]))
+            .await
+            .expect_err("a 12-byte payload must breach the 8-byte cap");
+        match err {
+            crate::error::LlmError::ResponseTooLarge {
+                path,
+                cap_bytes,
+                read_bytes,
+            } => {
+                assert_eq!(path, "embed");
+                assert_eq!(cap_bytes, 8);
+                assert_eq!(read_bytes, 12, "one 3-float vector is 12 bytes");
+            }
+            other => panic!("expected ResponseTooLarge, got: {other}"),
+        }
+
+        // (b) Two 2-float vectors: 8 bytes each (exactly the cap alone), 16
+        // cumulative. The breach must fire on the cumulative total.
+        let server = embed_server_with_vectors(&[vec![0.0_f32, 1.0], vec![2.0, 3.0]]).await;
+        let provider = openai_provider_with_cap(&server, "embeddinggemma", Some(8));
+
+        let err = provider
+            .embed(EmbedRequest::new("", vec!["alpha".into(), "beta".into()]))
+            .await
+            .expect_err("a cumulative 16-byte payload must breach the 8-byte cap");
+        match err {
+            crate::error::LlmError::ResponseTooLarge {
+                path,
+                cap_bytes,
+                read_bytes,
+            } => {
+                assert_eq!(path, "embed");
+                assert_eq!(cap_bytes, 8);
+                assert_eq!(
+                    read_bytes, 16,
+                    "two 2-float vectors are 16 bytes cumulative, not 8"
+                );
+            }
+            other => panic!("expected ResponseTooLarge, got: {other}"),
+        }
+    }
 }
 
 /// End-to-end acceptance tests for the genai-backed Ollama chat stream. The
@@ -3219,5 +3369,329 @@ mod staged_deadline {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         drop(stalled);
         server.shutdown().await;
+    }
+}
+
+/// Accepted chat payload cap: inclusive limit over UTF-8 content bytes.
+#[cfg(any(feature = "openai", feature = "all-providers"))]
+mod response_body_cap {
+    use std::sync::Arc;
+
+    use camel_api::SsrfPolicy;
+    use futures::StreamExt;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::super::{BuildOverride, GenaiConfig, GenaiProvider};
+    use crate::LlmHttpPolicy;
+    use crate::MAX_CHAT_RESPONSE_BYTES;
+    use crate::error::LlmError;
+    use crate::provider::{ChatEvent, ChatMessage, ChatRequest, LlmProvider};
+
+    type Events = Vec<Result<ChatEvent, LlmError>>;
+
+    /// reqwest transport that bypasses any ambient proxy so the mock server on
+    /// `127.0.0.1` is always reached directly.
+    fn build_override() -> BuildOverride {
+        Arc::new(|| {
+            Box::pin(async {
+                let client = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .map_err(|err| LlmError::Network(format!("test reqwest client: {err}")))?;
+                Ok(genai::Client::builder().with_reqwest(client).build())
+            })
+        })
+    }
+
+    fn openai_provider(server: &MockServer) -> GenaiProvider {
+        GenaiProvider::new_with_build_override(
+            "wiremock-openai",
+            "gpt-4o",
+            GenaiConfig::OpenAi {
+                api_key: "sk-test".into(),
+                base_url: Some(format!("{}/v1", server.uri())),
+            },
+            LlmHttpPolicy::chat(),
+            build_override(),
+            SsrfPolicy::AllowInternal,
+        )
+    }
+
+    /// One OpenAI content delta, framed as an SSE event.
+    fn content_event(text: &str) -> String {
+        let payload = serde_json::json!({ "choices": [{ "delta": { "content": text } }] });
+        format!("data: {payload}\n\n")
+    }
+
+    /// Stop chunk plus stream terminator.
+    const FINISH: &str = concat!(
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    /// Wire body carrying exactly `chunks` as content deltas, in order.
+    fn sse_body(chunks: impl IntoIterator<Item = String>) -> String {
+        let mut body = String::new();
+        for chunk in chunks {
+            body.push_str(&content_event(&chunk));
+        }
+        body.push_str(FINISH);
+        body
+    }
+
+    async fn sse_server(body: String) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn request() -> ChatRequest {
+        ChatRequest {
+            model: "gpt-4o".into(),
+            messages: vec![ChatMessage::user("hello")],
+            temperature: None,
+            max_tokens: None,
+            stop: None,
+            system_prompt: None,
+            tools: vec![],
+            tool_choice: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    async fn collect(provider: &GenaiProvider) -> Events {
+        provider.chat_stream(request()).collect().await
+    }
+
+    fn delta_texts(events: &[Result<ChatEvent, LlmError>]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Ok(ChatEvent::Delta { text }) => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn error_count(events: &[Result<ChatEvent, LlmError>]) -> usize {
+        events.iter().filter(|event| event.is_err()).count()
+    }
+
+    fn finished_count(events: &[Result<ChatEvent, LlmError>]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, Ok(ChatEvent::Finished { .. })))
+            .count()
+    }
+
+    /// Compact event-kind summary for assertion messages; never dumps payloads.
+    fn summary(events: &[Result<ChatEvent, LlmError>]) -> String {
+        let parts: Vec<String> = events
+            .iter()
+            .map(|event| match event {
+                Ok(ChatEvent::Delta { text }) => format!("Delta({} bytes)", text.len()),
+                Ok(ChatEvent::Finished { .. }) => "Finished".to_string(),
+                Ok(ChatEvent::ToolCall { id, .. }) => format!("ToolCall({id})"),
+                Err(err) => format!("Err({err})"),
+            })
+            .collect();
+        let shown = if parts.len() > 8 {
+            let mut compact = parts[..3].to_vec();
+            compact.push("...".to_string());
+            compact.extend_from_slice(&parts[parts.len() - 3..]);
+            compact.join(", ")
+        } else {
+            parts.join(", ")
+        };
+        format!("{} events: [{shown}]", parts.len())
+    }
+
+    /// The single terminal `ResponseTooLarge`, asserting it is the last event.
+    fn response_too_large(events: &[Result<ChatEvent, LlmError>]) -> (usize, usize) {
+        let last = events.last().expect("stream must yield at least one event");
+        match last {
+            Err(LlmError::ResponseTooLarge {
+                path,
+                cap_bytes,
+                read_bytes,
+            }) => {
+                assert_eq!(*path, "chat_stream", "wrong path: {}", summary(events));
+                assert_eq!(*cap_bytes, MAX_CHAT_RESPONSE_BYTES);
+                (*cap_bytes, *read_bytes)
+            }
+            other => panic!(
+                "expected terminal ResponseTooLarge, got: {}",
+                summary(std::slice::from_ref(other))
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_under_cap_completes_byte_identical() {
+        let chunks = ["He", "llo", ", ", "world"];
+        let server = sse_server(sse_body(chunks.iter().map(|s| s.to_string()))).await;
+        let provider = openai_provider(&server);
+
+        let events = collect(&provider).await;
+
+        assert_eq!(delta_texts(&events), chunks);
+        assert_eq!(delta_texts(&events).concat(), "Hello, world");
+        assert_eq!(
+            error_count(&events),
+            0,
+            "unexpected error: {}",
+            summary(&events)
+        );
+        assert_eq!(
+            finished_count(&events),
+            1,
+            "expected one Finished: {}",
+            summary(&events)
+        );
+        assert!(
+            matches!(events.last(), Some(Ok(ChatEvent::Finished { .. }))),
+            "Finished must be last, got: {}",
+            summary(&events)
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_over_cap_aborts_with_named_error() {
+        let chunk = "a".repeat(8 * 1024);
+        let mut chunks: Vec<String> = std::iter::repeat_n(chunk, 1024).collect();
+        // 1024 * 8 KiB = exactly 8 MiB, then one byte beyond the cap.
+        chunks.push("b".repeat(1024));
+        let body = sse_body(chunks);
+        let server = sse_server(body).await;
+        let provider = openai_provider(&server);
+
+        let events = collect(&provider).await;
+
+        let (cap_bytes, read_bytes) = response_too_large(&events);
+        assert_eq!(
+            read_bytes,
+            cap_bytes + 1024,
+            "read_bytes must count the breaching chunk too: {}",
+            summary(&events)
+        );
+        assert!(read_bytes > cap_bytes);
+        assert_eq!(
+            finished_count(&events),
+            0,
+            "no Finished after breach: {}",
+            summary(&events)
+        );
+        assert_eq!(
+            error_count(&events),
+            1,
+            "exactly one error: {}",
+            summary(&events)
+        );
+        assert_eq!(
+            delta_texts(&events).len(),
+            1024,
+            "deltas before the breach must be retained"
+        );
+        assert!(
+            !delta_texts(&events).iter().any(|text| text.contains('b')),
+            "the breaching chunk must not be forwarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_oversized_first_delta_forwards_nothing() {
+        let body = sse_body(["a".repeat(MAX_CHAT_RESPONSE_BYTES + 1)]);
+        let server = sse_server(body).await;
+        let provider = openai_provider(&server);
+
+        let events = collect(&provider).await;
+
+        assert!(
+            delta_texts(&events).is_empty(),
+            "no delta may be forwarded: {}",
+            summary(&events)
+        );
+        assert_eq!(
+            events.len(),
+            1,
+            "only the terminal error: {}",
+            summary(&events)
+        );
+        let (cap_bytes, read_bytes) = response_too_large(&events);
+        assert_eq!(read_bytes, cap_bytes + 1);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_exactly_cap_accepted() {
+        let chunk = "a".repeat(8 * 1024);
+        let chunks: Vec<String> = std::iter::repeat_n(chunk, 1024).collect();
+        let body = sse_body(chunks);
+        let server = sse_server(body).await;
+        let provider = openai_provider(&server);
+
+        let events = collect(&provider).await;
+
+        assert_eq!(
+            error_count(&events),
+            0,
+            "cap is inclusive: {}",
+            summary(&events)
+        );
+        let deltas = delta_texts(&events);
+        assert_eq!(deltas.len(), 1024);
+        assert_eq!(deltas.concat().len(), MAX_CHAT_RESPONSE_BYTES);
+        assert_eq!(
+            finished_count(&events),
+            1,
+            "expected one Finished: {}",
+            summary(&events)
+        );
+        assert!(
+            matches!(events.last(), Some(Ok(ChatEvent::Finished { .. }))),
+            "Finished must be last, got: {}",
+            summary(&events)
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_multibyte_counted_by_bytes() {
+        // 3 x 1,000,000 chars = 3,000,000 chars (< cap) but 9,000,000 bytes.
+        let chunk = "日".repeat(1_000_000);
+        let chars: usize = 3 * 1_000_000;
+        let bytes: usize = chars * 3;
+        assert!(
+            chars < MAX_CHAT_RESPONSE_BYTES,
+            "char count must be under cap"
+        );
+        assert!(
+            bytes > MAX_CHAT_RESPONSE_BYTES,
+            "byte count must breach cap"
+        );
+        let body = sse_body(std::iter::repeat_n(chunk, 3));
+        let server = sse_server(body).await;
+        let provider = openai_provider(&server);
+
+        let events = collect(&provider).await;
+
+        let (cap_bytes, read_bytes) = response_too_large(&events);
+        assert_eq!(
+            read_bytes,
+            bytes,
+            "read_bytes must count UTF-8 bytes, not chars: {}",
+            summary(&events)
+        );
+        assert_ne!(read_bytes, chars);
+        assert!(read_bytes > cap_bytes);
+        assert_eq!(
+            finished_count(&events),
+            0,
+            "no Finished after breach: {}",
+            summary(&events)
+        );
     }
 }

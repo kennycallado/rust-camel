@@ -115,7 +115,7 @@ _Avoid_: TypeSafe client, Ollama client (those are provider names, not codecs)
 
 ## Error mapping
 
-**LlmError → CamelError** is intentionally lossy — 14 variants map to only 3 `CamelError` variants (`Unauthenticated`, `Io`, `ProcessorError`). Downstream handlers that need typed LLM errors should use `CamelError::ProcessorErrorWithSource` (available today) or parse the error string. Extending `CamelError` with LLM-specific variants is deferred until a concrete consumer requires it.
+**LlmError → CamelError** is intentionally lossy — 17 variants map to only 3 `CamelError` variants (`Unauthenticated`, `Io`, `ProcessorError`). Downstream handlers that need typed LLM errors should use `CamelError::ProcessorErrorWithSource` (available today) or parse the error string. Extending `CamelError` with LLM-specific variants is deferred until a concrete consumer requires it.
 
 ## Log-level policy
 
