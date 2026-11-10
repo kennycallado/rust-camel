@@ -13,13 +13,16 @@
 //! `Mcp-Name` standard headers on each POST. No session is ever established, so
 //! `Mcp-Session-Id` is never sent.
 
+use std::time::Duration;
+
 use rmcp::ClientLifecycleMode;
 use rmcp::model::{
     CallToolRequestParams, ErrorCode, ProtocolVersion, ReadResourceRequestParams, ResourceContents,
 };
 use rmcp::service::{ClientInitializeError, ClientServiceExt, RoleClient, RunningService};
+use rmcp::transport::DynamicTransportError;
 use rmcp::transport::streamable_http_client::{
-    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig, StreamableHttpError,
 };
 
 use crate::client::McpClient;
@@ -33,6 +36,9 @@ const PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2026_07_28;
 /// A connected rmcp client for one remote MCP server.
 pub struct RmcpClient {
     service: RunningService<RoleClient, ()>,
+    /// Post-connect request deadline, set from
+    /// [`McpRemoteConfig::request_timeout_secs`] at connect.
+    request_deadline: Duration,
 }
 
 impl std::fmt::Debug for RmcpClient {
@@ -82,12 +88,32 @@ impl RmcpClient {
             )
             .await
             .map_err(|error| map_connect_error(name, error))?;
-        Ok(Self { service })
+        let request_deadline = Duration::from_secs(config.request_timeout_secs);
+        Ok(Self {
+            service,
+            request_deadline,
+        })
+    }
+
+    /// The effective post-connect deadline for tool calls and resource reads.
+    pub fn request_deadline(&self) -> Duration {
+        self.request_deadline
     }
 }
 
 /// Map discover-lifecycle failures onto the fail-fast taxonomy.
 fn map_connect_error(server: &str, error: ClientInitializeError) -> McpError {
+    // Connect-phase timeouts first: name the 5 s budget. Everything else
+    // falls through to the taxonomy below with its full Display intact
+    // (context included).
+    if let ClientInitializeError::TransportError {
+        error: transport_error,
+        ..
+    } = &error
+        && let Some(timeout_error) = connect_timeout_error(server, transport_error)
+    {
+        return timeout_error;
+    }
     match error {
         ClientInitializeError::NoCompatibleProtocolVersion {
             server_supported, ..
@@ -120,6 +146,32 @@ fn map_connect_error(server: &str, error: ClientInitializeError) -> McpError {
     }
 }
 
+/// Message for a TCP connect-phase timeout — names the 5 s budget
+/// (`RESOLVE_TIMEOUT`, dns_pin.rs) the connection was given.
+fn tcp_connect_timeout_message(server: &str, cause: &reqwest::Error) -> McpError {
+    McpError::Endpoint(format!(
+        "connect to remote '{server}' exceeded the 5s TCP connect limit ({cause})"
+    ))
+}
+
+/// Detect a TCP connect-phase timeout inside rmcp's transport error.
+///
+/// The boxed error is `StreamableHttpError<reqwest::Error>` (rmcp:
+/// StreamableHttpClientTransport = WorkerTransport<StreamableHttpClientWorker>,
+/// worker Error = StreamableHttpError<C::Error>, reqwest errors enter as
+/// StreamableHttpError::Client) — downcast to that wrapper, not to a bare
+/// reqwest::Error. Returns None for anything else (passthrough; not every
+/// startup error is a timeout).
+fn connect_timeout_error(server: &str, error: &DynamicTransportError) -> Option<McpError> {
+    let wrapper = error
+        .error
+        .downcast_ref::<StreamableHttpError<reqwest::Error>>()?;
+    let StreamableHttpError::Client(cause) = wrapper else {
+        return None;
+    };
+    (cause.is_connect() && cause.is_timeout()).then(|| tcp_connect_timeout_message(server, cause))
+}
+
 /// Render the versions a remote advertised (empty → "none").
 fn versions_to_string(versions: &[ProtocolVersion]) -> String {
     if versions.is_empty() {
@@ -146,10 +198,14 @@ impl McpClient for RmcpClient {
             .ok_or_else(|| McpError::Endpoint("tool arguments must be a JSON object".to_owned()))?;
         let mut params = CallToolRequestParams::new(tool.to_owned());
         params.arguments = Some(arguments);
-        let result = self
-            .service
-            .call_tool(params)
+        let result = tokio::time::timeout(self.request_deadline, self.service.call_tool(params))
             .await
+            .map_err(|_| {
+                McpError::Endpoint(format!(
+                    "tool call '{tool}' exceeded the {}s request deadline",
+                    self.request_deadline.as_secs()
+                ))
+            })?
             .map_err(|error| McpError::Endpoint(error.to_string()))?;
         let content = serde_json::to_value(&result.content)
             .map_err(|error| McpError::Endpoint(error.to_string()))?;
@@ -165,11 +221,18 @@ impl McpClient for RmcpClient {
 
     async fn read_resource(&self, uri: &str) -> Result<McpResource, McpError> {
         let params = ReadResourceRequestParams::new(uri.to_owned());
-        let response = self
-            .service
-            .read_resource_once(params)
-            .await
-            .map_err(|error| McpError::Endpoint(error.to_string()))?;
+        let response = tokio::time::timeout(
+            self.request_deadline,
+            self.service.read_resource_once(params),
+        )
+        .await
+        .map_err(|_| {
+            McpError::Endpoint(format!(
+                "resource read '{uri}' exceeded the {}s request deadline",
+                self.request_deadline.as_secs()
+            ))
+        })?
+        .map_err(|error| McpError::Endpoint(error.to_string()))?;
         let result = match response {
             rmcp::model::ReadResourceResponse::Complete(result) => result,
             rmcp::model::ReadResourceResponse::InputRequired(_) => {
@@ -214,5 +277,127 @@ impl McpClient for RmcpClient {
             }
         }
         Ok(resource)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::transport::DynamicTransportError;
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+
+    /// Instant, deterministic connect-phase failure (nothing listens on port 1).
+    async fn connection_refused_error() -> reqwest::Error {
+        reqwest::Client::builder()
+            .build()
+            .unwrap()
+            .get("http://127.0.0.1:1/")
+            .send()
+            .await
+            .unwrap_err()
+    }
+
+    /// Box a transport error the way rmcp does for the streamable HTTP client.
+    fn transport_error_from(error: StreamableHttpError<reqwest::Error>) -> DynamicTransportError {
+        DynamicTransportError::new::<StreamableHttpClientTransport<reqwest::Client>, RoleClient>(
+            error,
+        )
+    }
+
+    #[tokio::test]
+    async fn tcp_connect_timeout_message_names_limit_and_cause() {
+        let error = connection_refused_error().await;
+        let message = tcp_connect_timeout_message("srv", &error).to_string();
+        assert!(message.contains("srv"), "server name missing: {message}");
+        assert!(
+            message.contains("5s TCP connect limit"),
+            "budget missing: {message}"
+        );
+        assert!(
+            message.contains(&error.to_string()),
+            "cause text missing: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_timeout_error_passes_through_non_timeout_errors() {
+        let dte = transport_error_from(StreamableHttpError::Client(
+            connection_refused_error().await,
+        ));
+        assert!(
+            connect_timeout_error("srv", &dte).is_none(),
+            "a connect-phase non-timeout must not be mislabeled as a timeout"
+        );
+
+        // Rebuild the error: `DynamicTransportError` is not `Clone`.
+        let original = ClientInitializeError::TransportError {
+            error: transport_error_from(StreamableHttpError::Client(
+                connection_refused_error().await,
+            )),
+            context: "startup".into(),
+        };
+        let expected = McpError::Endpoint(original.to_string()).to_string();
+        let mapped = map_connect_error("srv", original);
+        assert_eq!(
+            mapped.to_string(),
+            expected,
+            "the fall-through must keep the full original Display (context included)"
+        );
+    }
+
+    /// Never resolves, so the connect phase can only end through the timeout.
+    struct PendingResolver;
+
+    impl reqwest::dns::Resolve for PendingResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// A connect-phase timeout: the pending resolver forces the connect
+    /// budget to fire; `start_paused` auto-advances tokio's clock, so no
+    /// real time passes and no network route is needed.
+    async fn connect_phase_timeout_error() -> reqwest::Error {
+        let client = reqwest::Client::builder()
+            .dns_resolver(PendingResolver)
+            .connect_timeout(Duration::from_millis(300))
+            .build()
+            .unwrap();
+        client
+            .get("http://deadline-fixture.invalid/")
+            .send()
+            .await
+            .unwrap_err()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_timeout_error_names_tcp_limit_on_timeout() {
+        let timeout_error = connect_phase_timeout_error().await;
+        assert!(
+            timeout_error.is_connect() && timeout_error.is_timeout(),
+            "expected a connect-phase timeout, got: {timeout_error:?}"
+        );
+
+        let dte = transport_error_from(StreamableHttpError::Client(timeout_error));
+        let message = connect_timeout_error("srv", &dte)
+            .expect("connect-phase timeout must map to an endpoint error")
+            .to_string();
+        assert!(message.contains("srv"), "server name missing: {message}");
+        assert!(
+            message.contains("5s TCP connect limit"),
+            "budget missing: {message}"
+        );
+
+        let second = connect_phase_timeout_error().await;
+        let expected = tcp_connect_timeout_message("srv", &second).to_string();
+        let original = ClientInitializeError::TransportError {
+            error: transport_error_from(StreamableHttpError::Client(second)),
+            context: "startup".into(),
+        };
+        assert_eq!(
+            map_connect_error("srv", original).to_string(),
+            expected,
+            "the timeout arm must win over the generic taxonomy"
+        );
     }
 }

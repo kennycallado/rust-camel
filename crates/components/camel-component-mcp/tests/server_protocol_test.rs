@@ -376,6 +376,7 @@ async fn session_header_not_required() {
             transport: McpTransport::StreamableHttp,
             allow_internal: true, // tests bind loopback
             allow_cleartext: false,
+            request_timeout_secs: 120,
         },
     )
     .await

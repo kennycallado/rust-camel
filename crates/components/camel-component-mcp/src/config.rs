@@ -7,6 +7,34 @@ use serde::Deserialize;
 
 use crate::error::McpError;
 
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+fn default_request_timeout_secs() -> u64 {
+    DEFAULT_REQUEST_TIMEOUT_SECS
+}
+
+/// Deserialize `request_timeout_secs` as whole seconds of at least 1.
+///
+/// A plain `u64` field cannot name itself in the rejection message, so a
+/// custom deserializer carries the option name for zero and non-numeric
+/// values alike (precedent: `non_empty_path`).
+fn deserialize_request_timeout_secs<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer).map_err(|_| {
+        serde::de::Error::custom(
+            "request_timeout_secs must be an integer number of seconds of at least 1",
+        )
+    })?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "request_timeout_secs must be at least 1 (got 0)",
+        ));
+    }
+    Ok(value)
+}
+
 fn non_empty_path<'de, D>(deserializer: D, field: &'static str) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -338,6 +366,16 @@ pub struct McpRemoteConfig {
     /// [`McpRemoteConfig::allow_internal`].
     #[serde(default)]
     pub allow_cleartext: bool,
+
+    /// Post-connect request deadline for this remote, in whole seconds.
+    /// Bounds every request the producer issues after connect
+    /// (`tools/call`, `resources/read`). Default 120; zero and
+    /// non-numeric values are rejected at parse time naming the option.
+    #[serde(
+        default = "default_request_timeout_secs",
+        deserialize_with = "deserialize_request_timeout_secs"
+    )]
+    pub request_timeout_secs: u64,
 }
 
 impl McpRemoteConfig {
@@ -429,6 +467,7 @@ mod tests {
             transport: McpTransport::StreamableHttp,
             allow_internal,
             allow_cleartext,
+            request_timeout_secs: 120,
         }
     }
 
@@ -596,6 +635,50 @@ mod tests {
         let result =
             serde_json::from_str::<McpServerConfig>(r#"{"bind": "127.0.0.1:0", "session": true}"#);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // request_timeout_secs: post-connect request deadline (default 120 s)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn request_timeout_defaults_to_120_when_absent() {
+        let cfg: McpRemoteConfig = serde_json::from_str(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http"}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.request_timeout_secs, 120);
+    }
+
+    #[test]
+    fn request_timeout_explicit_value_used() {
+        let cfg: McpRemoteConfig = serde_json::from_str(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http", "request_timeout_secs": 300}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.request_timeout_secs, 300);
+    }
+
+    #[test]
+    fn request_timeout_zero_rejected_naming_option() {
+        let err = serde_json::from_str::<McpRemoteConfig>(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http", "request_timeout_secs": 0}"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_secs"), "{msg}");
+        assert!(msg.contains("at least 1"), "{msg}");
+    }
+
+    #[test]
+    fn request_timeout_empty_rejected_naming_option() {
+        let err = serde_json::from_str::<McpRemoteConfig>(
+            r#"{"url": "https://mcp.example.com/mcp", "transport": "streamable-http", "request_timeout_secs": ""}"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("request_timeout_secs"), "{msg}");
+        assert!(msg.contains("integer number of seconds"), "{msg}");
     }
 
     #[test]

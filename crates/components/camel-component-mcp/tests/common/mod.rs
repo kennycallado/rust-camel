@@ -80,6 +80,11 @@ pub struct MockOptions {
     /// Answer `tools/call` with a tool-level error result (`isError: true`)
     /// instead of the canned success.
     pub tool_error: bool,
+    /// Never answer `tools/call` or `resources/read` — the handler parks, so
+    /// the request hangs until the client's request deadline fires.
+    /// `server/discover` still answers, so `connect` succeeds on a stalled
+    /// remote.
+    pub stall_requests: bool,
     /// Loopback bind address of the mock listener. Tests pick a distinct
     /// `127.0.0.x` per test file to keep parallel binaries from colliding.
     pub bind: String,
@@ -93,6 +98,7 @@ impl MockOptions {
             supported_versions,
             discover_not_found: false,
             tool_error: false,
+            stall_requests: false,
             bind: "127.0.0.1".to_owned(),
         }
     }
@@ -103,6 +109,7 @@ impl MockOptions {
             supported_versions: vec![ProtocolVersion::V_2026_07_28],
             discover_not_found: true,
             tool_error: false,
+            stall_requests: false,
             bind: "127.0.0.1".to_owned(),
         }
     }
@@ -144,6 +151,12 @@ impl rmcp::ServerHandler for MockHandler {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        // Stall knob: park forever, so the request never answers. The client's
+        // request deadline drops the in-flight future and rmcp's
+        // `AbandonedRequestGuard` cancels the pending request.
+        if self.options.stall_requests {
+            std::future::pending::<()>().await;
+        }
         let content = vec![rmcp::model::ContentBlock::text(format!(
             "{}:{CANNED_TOOL_SUFFIX}",
             request.name
@@ -161,6 +174,10 @@ impl rmcp::ServerHandler for MockHandler {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
+        // Stall knob: see `call_tool`.
+        if self.options.stall_requests {
+            std::future::pending::<()>().await;
+        }
         Ok(ReadResourceResponse::Complete(
             rmcp::model::ReadResourceResult::new(vec![rmcp::model::ResourceContents::text(
                 CANNED_RESOURCE_TEXT,

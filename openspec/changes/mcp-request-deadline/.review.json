@@ -1,0 +1,21 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "change": "mcp-request-deadline",
+  "date": "2026-11-10",
+  "impl_hash": "sha256:b46930e41c8155befa15690b1f3ace6f9078149c9625287a953d1a883633d7cb",
+  "scope": "full diff vs main b13a7c6ba (13 tracked files + tests/request_deadline_test.rs new) against blessed proposal/design/tasks/delta-specs",
+  "findings": "none (no critical, no important, no real-defect minor)",
+  "notes": "All 8 delta scenarios backed by tests; message wording one voice across code/spec/tests/docs; mission hard limits held (only dev-dep addition tokio test-util; 5s connect/DNS bound and pinning untouched; no other crates). Design doc-accuracy nit (parse rejections reach CamelError::Config via toml::de::Error directly, not via McpError::Config) — end state identical, absurd-minor.",
+  "gates": {
+    "gates-local.sh": "exit 0; passed 28, failed 0, skipped 4 (lint-commits, lint-bridge-releases, doc-guide-test, cargo-audit — CI-owned default skips)",
+    "cargo build --workspace": "exit 0",
+    "cargo test --workspace --lib": "exit 0; 13194 passed, 0 failed",
+    "cargo test -p camel-core --test hexagonal_architecture_boundaries_test": "exit 0; 33 passed",
+    "cargo test -p camel-component-mcp": "exit 0; 160 passed, 0 failed (13 targets)",
+    "cargo fmt --check --all": "exit 0",
+    "CI-only": ["lint-commits", "lint-bridge-releases", "doc-guide-test (docs changed)", "cargo-audit"]
+  },
+  "residual": "rc-9kpye: rmcp discover-mode connect POST unbounded (connect-time, out of mission scope by hard limit)"
+}

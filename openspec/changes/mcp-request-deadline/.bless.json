@@ -1,0 +1,11 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:13dbbb316e95079f43d91b910774df12c8d0992f59229235298abc4029b3b675",
+  "expert": "experts/e_gpt",
+  "change": "mcp-request-deadline",
+  "date": "2026-11-10",
+  "rounds": 3,
+  "supersedes_spec_hash": "sha256:23bb3d5641bb5a3c45f4579fefc573c88602b897d483566c2ea31608a060dffa",
+  "notes": "Plan went through r_glm reviewer loop first (1 critical: tokio test-util dev-dep; 1 important: crate-private const + literal 120; 2 minor), re-review APPROVE. Plan-bless round 1 BLESS-WITH-FIXES (deterministic pending-DNS-resolver fixture replacing self-skipping blackhole probe; passthrough preserves full ClientInitializeError Display incl. context, exact-equality assert; real watchdog outer timeouts in stalled tests). Round 2 BLESS-WITH-FIXES (Resolving error slot is Box<dyn Error+Send+Sync> not io::Error; expected string must carry the McpError::Endpoint prefix). Round 3 BLESS."
+}

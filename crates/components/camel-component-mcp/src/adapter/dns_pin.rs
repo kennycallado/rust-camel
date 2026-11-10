@@ -175,7 +175,7 @@ pub(super) async fn build_pinned_http_client(
     let lookup = tokio::net::lookup_host((host.as_str(), port));
     let addrs: Vec<SocketAddr> = tokio::time::timeout(RESOLVE_TIMEOUT, lookup)
         .await
-        .map_err(|_| McpError::Endpoint(format!("timed out resolving remote host '{host}'")))?
+        .map_err(|_| resolution_timeout_error(&host))?
         .map_err(|e| McpError::Endpoint(format!("failed to resolve remote host '{host}': {e}")))?
         .collect();
     validate_resolution(&addrs, &scheme, allow_internal, allow_cleartext)?;
@@ -195,6 +195,12 @@ pub(super) async fn build_pinned_http_client(
 
 /// DNS resolution timeout — mirrors the camel-http resolver's 5s budget.
 const RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// DNS resolution budget error — names the 5 s budget (audit row 17,
+/// honesty fix; the old text named the operation but not the bound).
+fn resolution_timeout_error(host: &str) -> McpError {
+    McpError::Endpoint(format!("timed out resolving remote host '{host}' after 5s"))
+}
 
 fn hardened_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
@@ -363,5 +369,14 @@ mod tests {
             .await
             .expect("IP-literal URL must not need DNS");
         drop(client);
+    }
+
+    // ── resolution_timeout_error ───────────────────────────────────────
+
+    #[test]
+    fn resolution_timeout_error_names_host_and_5s_bound() {
+        let msg = resolution_timeout_error("mcp.example.com").to_string();
+        assert!(msg.contains("mcp.example.com"), "host missing: {msg}");
+        assert!(msg.contains("after 5s"), "bound missing: {msg}");
     }
 }

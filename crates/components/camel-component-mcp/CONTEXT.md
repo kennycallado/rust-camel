@@ -46,7 +46,14 @@ Global TOML key: `mcp` (`McpBundle`).
 - `mcp.servers.<name>` (`McpServerConfig`): `bind`, `tls`, `security_policy`,
   `max_tools`, `max_resources`, `allowed_hosts`.
 - `mcp.remotes.<name>` (`McpRemoteConfig`): `url`, `transport`,
-  `allow_internal`, `allow_cleartext`.
+  `request_timeout_secs`, `allow_internal`, `allow_cleartext`.
+
+`request_timeout_secs` (whole seconds, minimum 1, default 120) bounds every
+post-connect request to that remote — one `tools/call` or one
+`resources/read`. Expiry cancels the in-flight request best-effort
+(`notifications/cancelled`) and fails the dispatch with an error naming the
+operation and the bound (`tool call '<name>' exceeded the 120s request
+deadline`).
 
 Cleartext `http://` remotes to public targets are rejected (IP literals
 at config load, hostnames at connect) unless
