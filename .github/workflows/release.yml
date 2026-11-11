@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   ci-preflight:
-    name: Preflight — CI green for tagged commit
+    name: Preflight — CI evidence for tagged commit
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -20,61 +20,75 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Require a green CI Full Tests run for this commit
-        # rc-1x9fl: a tag used to publish with zero test evidence —
-        # release.yml ran no tests and checked no CI result, so a tag
-        # could ship a SHA whose Full Tests were skipped (JMS failures,
-        # runs 42490710101 / 42470660723) or cancelled (frequent in the
-        # run list). Fail closed: require a completed SUCCESSFUL PUSH
-        # RUN ON MAIN of ci.yml for the exact tagged commit (PR runs
-        # test a synthetic merge commit and never qualify), whose
-        # "Full Tests (ubuntu-latest)" job and its "Test (full
-        # workspace)" + "Test camel-cli (exec flavor)" steps all
-        # concluded success. No run, a cancelled or failed run, a
-        # skipped step, or any API error fails the release before the
-        # matrix or publish start (call-release-matrix needs this job).
-        # Token: built-in GITHUB_TOKEN with `actions: read` (job-level
-        # permissions replace the workflow-level set — same pattern as
-        # the publish job below); no secret setup.
+      - name: Require build and unit-test evidence for this commit
+        # rc-1x9fl: a tag once published with zero test evidence, so this
+        # job fails closed before the matrix or publish start.
+        # Owner ruling 2026-11-11 (rc-86u4n, rc-99d5): the gate no longer
+        # requires a single fully green run. A wall-clock ratio test on a
+        # loaded runner must not block a release, so the binding evidence
+        # is the Unit Tests job (Build + unit tests) and Full Tests is
+        # advisory. Evidence is unioned across attempts of every completed
+        # push-on-main run, so a flaky attempt that passes on re-run
+        # counts. PR runs never qualify (synthetic merge commit).
+        # No run, no green unit evidence, or an API error fails the release
+        # before the matrix or publish start (call-release-matrix needs
+        # this job). Token: built-in GITHUB_TOKEN with `actions: read`
+        # (job-level permissions replace the workflow-level set — same
+        # pattern as the publish job below); no secret setup.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           sha="$(git rev-parse 'HEAD^{commit}')"
           runs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100")"
-          run_ids="$(printf '%s' "$runs_json" | jq -r '
+          run_rows="$(printf '%s' "$runs_json" | jq -r '
             .workflow_runs[]
-            | select(.conclusion == "success" and .event == "push" and .head_branch == "main")
-            | .id')"
-          if [ -z "$run_ids" ]; then
-            echo "::error::No successful push-on-main CI run for commit ${sha} — Full Tests evidence missing (a cancelled or missing run is untested). Refusing to release."
+            | select(.event == "push" and .head_branch == "main" and .status == "completed")
+            | "\(.id) \(.run_attempt // 1)"')"
+          if [ -z "$run_rows" ]; then
+            echo "::error::No completed push-on-main CI run for commit ${sha} — no build/unit-test evidence. Refusing to release."
             exit 1
           fi
-          ok=""
-          for run_id in $run_ids; do
-            jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")"
-            # Tested iff the Full Tests job is green AND each test step
-            # exists exactly once (a rename fails closed, and a
-            # duplicate workspace step cannot stand in for the missing
-            # exec step) AND both concluded success (a "skipped" step
-            # fails this).
-            full_ok="$(printf '%s' "$jobs_json" | jq -r '
-              [.jobs[]
-                | select(.name == "Full Tests (ubuntu-latest)")
-                | select(.conclusion == "success")
-                | select((([.steps[] | select(.name == "Test (full workspace)")] | length) == 1)
-                    and (([.steps[] | select(.name == "Test camel-cli (exec flavor)")] | length) == 1))
-                | select(([.steps[]
-                  | select(.name == "Test (full workspace)" or .name == "Test camel-cli (exec flavor)")
-                  | .conclusion == "success"] | all))]
-              | length > 0')"
-            if [ "$full_ok" = "true" ]; then ok="$run_id"; break; fi
-          done
-          if [ -z "$ok" ]; then
-            echo "::error::CI ran for ${sha} but no successful push-on-main run has Full Tests (ubuntu-latest) green with both test steps success — treating as untested. Refusing to release."
+          tested=""
+          while read -r run_id attempts; do
+            [ -n "$run_id" ] || continue
+            n=1
+            while [ "$n" -le "$attempts" ]; do
+              jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/attempts/${n}/jobs?per_page=100")"
+              # Tested iff the Unit Tests job is green AND each required
+              # step exists exactly once (a rename fails closed, and a
+              # duplicate step cannot stand in for the missing one) AND
+              # both concluded success (a "skipped" step fails this).
+              unit_ok="$(printf '%s' "$jobs_json" | jq -r '
+                [.jobs[]
+                  | select(.name == "Unit Tests (ubuntu-latest)")
+                  | select(.conclusion == "success")
+                  | select((([.steps[] | select(.name == "Build")] | length) == 1)
+                      and (([.steps[] | select(.name == "Test (unit only — no Docker required)")] | length) == 1))
+                  | select(([.steps[]
+                    | select(.name == "Build" or .name == "Test (unit only — no Docker required)")
+                    | .conclusion == "success"] | all))]
+                | length > 0')"
+              if [ "$unit_ok" = "true" ]; then
+                full="$(printf '%s' "$jobs_json" | jq -r '
+                  ([.jobs[] | select(.name == "Full Tests (ubuntu-latest)") | .conclusion] | first) // "absent"')"
+                echo "Tested: commit ${sha} verified by CI run ${run_id} attempt ${n} (Unit Tests green: Build + unit tests)."
+                if [ "$full" != "success" ]; then
+                  echo "::warning::Full Tests (ubuntu-latest) is ${full} on run ${run_id} attempt ${n} — advisory only (rc-86u4n, rc-99d5); not release-blocking."
+                fi
+                tested=1
+                break
+              fi
+              n=$((n + 1))
+            done
+            if [ -n "$tested" ]; then
+              break
+            fi
+          done <<< "$run_rows"
+          if [ -z "$tested" ]; then
+            echo "::error::CI ran for ${sha} but no push-on-main attempt has Unit Tests (ubuntu-latest) green with Build and 'Test (unit only — no Docker required)' both success. Refusing to release."
             exit 1
           fi
-          echo "Tested: commit ${sha} verified by CI run ${ok} (Full Tests green, both test steps success)."
 
   call-release-matrix:
     needs: [ci-preflight]
