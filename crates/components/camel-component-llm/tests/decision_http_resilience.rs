@@ -14,6 +14,7 @@ use camel_component_api::{
 };
 use camel_component_llm::{LlmComponent, LlmGlobalConfig};
 use tower::Service;
+use tracing_test::traced_test;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -24,8 +25,12 @@ use common::decision::SYSTEM_ONE_TRIAGE_RESPONSE;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Retry policy shared by the retry and fail-fast tests.
+/// Retry policy shared by the retry and fail-fast tests. Its 50 ms cap is
+/// the "above cap" side of the Retry-After tests.
 const RETRY_TOML: &str = "network_retry = { enabled = true, max_attempts = 3, initial_delay_ms = 10, max_delay_ms = 50 }\n";
+
+/// Retry policy whose cap admits a 1 s Retry-After header unchanged.
+const RETRY_WIDE_CAP_TOML: &str = "network_retry = { enabled = true, max_attempts = 3, initial_delay_ms = 10, max_delay_ms = 2000 }\n";
 
 /// Builds a component from provider tables plus the triage question set.
 /// `allow_internal` must precede every table, so it is emitted first.
@@ -97,8 +102,51 @@ async fn mount_json(server: &MockServer, route: &str, body: &str) {
     .await;
 }
 
+/// Retry-After within the policy cap sleeps unchanged (rule 3).
 #[tokio::test]
 async fn retry_after_then_success() {
+    let server = MockServer::start().await;
+    mount_once(
+        &server,
+        "/v1/systemone",
+        ResponseTemplate::new(429).insert_header("Retry-After", "1"),
+    )
+    .await;
+    mount_json(&server, "/v1/systemone", SYSTEM_ONE_TRIAGE_RESPONSE).await;
+
+    let providers = format!(
+        "{}{RETRY_WIDE_CAP_TOML}",
+        typesafe_toml("ts", &server.uri())
+    );
+    let component = component(&providers);
+
+    let t0 = Instant::now();
+    run(
+        &component,
+        "llm:decide?provider=ts&questions=triage",
+        Body::Text("hello".into()),
+    )
+    .await
+    .expect("throttled call succeeds after retry");
+
+    assert!(
+        t0.elapsed() >= Duration::from_secs(1),
+        "Retry-After: 1 must delay the retry, elapsed {:?}",
+        t0.elapsed()
+    );
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording enabled");
+    assert_eq!(received.len(), 2, "one throttled attempt, one success");
+}
+
+/// Retry-After above the 50 ms policy cap sleeps the cap (rule 4): the call
+/// still succeeds after the throttled attempt, in far less than the 1 s the
+/// header asks for, and the cap warning fires.
+#[tokio::test]
+#[traced_test]
+async fn retry_after_above_cap_sleeps_cap() {
     let server = MockServer::start().await;
     mount_once(
         &server,
@@ -118,12 +166,20 @@ async fn retry_after_then_success() {
         Body::Text("hello".into()),
     )
     .await
-    .expect("throttled call succeeds after retry");
+    .expect("throttled call succeeds after the capped sleep");
 
+    let elapsed = t0.elapsed();
     assert!(
-        t0.elapsed() >= Duration::from_secs(1),
-        "Retry-After: 1 must delay the retry, elapsed {:?}",
-        t0.elapsed()
+        elapsed >= Duration::from_millis(40),
+        "the 50 ms cap must still delay the retry, elapsed {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "the 1 s header must sleep capped at 50 ms, elapsed {elapsed:?}"
+    );
+    assert!(
+        logs_contain("Retry-After exceeds the sleep cap"),
+        "rule-4 warning must name the capped Retry-After"
     );
     let received = server
         .received_requests()
