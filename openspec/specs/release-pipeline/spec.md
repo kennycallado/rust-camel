@@ -15,7 +15,7 @@ declares the tag trigger, the publish permissions
 (`contents: write`, `packages: write`, `id-token: write`), the
 secrets handoff (`secrets: inherit`), a single call with
 `publish: true`, and the fail-closed `ci-preflight` job of
-Requirement: CI preflight gates the tag pipeline on a tested commit.
+Requirement: CI preflight gates the tag pipeline on build and unit-test evidence.
 The tag wrapper SHALL also home the crates.io
 publish job (see Requirement: Publish side effects are gated on the
 publish input) — this homing is a hard constraint: crates.io
@@ -178,36 +178,49 @@ SHALL ship after the first tarball release.
   and the gnu docker variant verifies and extracts its tarball in the
   dev run
 
-### Requirement: CI preflight gates the tag pipeline on a tested commit
+### Requirement: CI preflight gates the tag pipeline on build and unit-test evidence
 
 The tag wrapper (`release.yml`) SHALL contain a `ci-preflight` job, the
 first job in the workflow, that fails closed before any build or publish
-side effect unless the pushed tag points at a tested commit:
+side effect unless the pushed tag points at a commit with build and
+unit-test evidence:
 
 - It SHALL resolve the tagged commit (`git rev-parse 'HEAD^{commit}'`,
   correct for annotated and lightweight tags).
 - It SHALL query the GitHub Actions API for `ci.yml` workflow runs with
-  `head_sha` equal to that commit (`repos/{owner}/{repo}/actions/workflows/ci.yml/runs?head_sha=<sha>&per_page=100`,
-  reading `workflow_runs[].id`, `.conclusion`, `.event`, and
-  `.head_branch`), and keep only completed successful runs that are
-  **push-triggered on main** (`event == "push"`,
-  `head_branch == "main"`, `conclusion == "success"`). PR-triggered
-  runs SHALL NOT qualify as evidence even when their conclusion reads
-  `success`, because they test a synthetic merge commit rather than the
-  tagged tree. For each qualifying run query its jobs
-  (`repos/{owner}/{repo}/actions/runs/<id>/jobs?per_page=100`, reading
-  `jobs[].name`, `jobs[].conclusion`, `jobs[].steps[].name`,
+  `head_sha` equal to that commit
+  (`repos/{owner}/{repo}/actions/workflows/ci.yml/runs?head_sha=<sha>&per_page=100`,
+  reading `workflow_runs[].id`, `.run_attempt`, `.status`, `.event`, and
+  `.head_branch`), and keep only **push-triggered on main** runs
+  (`event == "push"`, `head_branch == "main"`, `status == "completed"`)
+  **of any conclusion**: a failed run still carries per-job evidence.
+  PR-triggered runs SHALL NOT qualify as evidence even when their
+  conclusion reads `success`, because they test a synthetic merge commit
+  rather than the tagged tree.
+- For each qualifying run it SHALL read the attempt count
+  (`run_attempt`) and query every attempt's jobs
+  (`repos/{owner}/{repo}/actions/runs/<id>/attempts/<n>/jobs?per_page=100`,
+  reading `jobs[].name`, `jobs[].conclusion`, `jobs[].steps[].name`,
   `jobs[].steps[].conclusion`).
 - It SHALL consider the commit tested if and only if at least one
-  qualifying (push-on-main, successful) CI run has a job named
-  `Full Tests (ubuntu-latest)` whose conclusion is `success` and whose
-  `Test (full workspace)` and `Test camel-cli (exec flavor)` steps both
-  concluded `success`.
+  attempt of a qualifying run has a job named `Unit Tests
+  (ubuntu-latest)` whose conclusion is `success`, containing exactly one
+  `Build` step and exactly one `Test (unit only — no Docker required)`
+  step, both concluded `success`. Evidence SHALL be unioned across
+  attempts: a later attempt that passes the job qualifies even when an
+  earlier attempt of the same run failed it, so a flaky first attempt
+  does not invalidate an otherwise green commit.
+- It SHALL treat the `Full Tests (ubuntu-latest)` job as **advisory**:
+  its conclusion SHALL be reported (green, red, or absent) in the
+  preflight log, and it SHALL NOT fail the preflight. A red Full Tests
+  job on a commit whose build and unit tests are green therefore does
+  not block the release.
 - It SHALL treat as NOT tested — and fail the job with an error naming
-  the commit — every other case: no CI run for the sha, no qualifying
-  run, only PR-triggered runs, a cancelled or failed run, the Full
-  Tests job absent, failed, or skipped, or either test step not
-  concluded `success`.
+  the commit — every other case: no completed push-on-main run for the
+  sha, only PR-triggered runs, no attempt with the `Unit Tests
+  (ubuntu-latest)` job, that job failed or skipped, or either required
+  step absent, duplicated, skipped, cancelled, or not concluded
+  `success`.
 - It SHALL fail on any API error (nonzero `gh` exit under
   `set -euo pipefail`; no `|| true`, no `continue-on-error`).
 - It SHALL authenticate with the built-in `GITHUB_TOKEN` and declare the
@@ -221,20 +234,40 @@ side effect unless the pushed tag points at a tested commit:
 
 #### Scenario: tag on an untested SHA fails closed before any side effect
 
-- **GIVEN** a tag `v*` whose commit has no successful CI run (never ran,
-  or its latest runs are failed or cancelled)
+- **GIVEN** a tag `v*` whose commit has no completed push-on-main CI run,
+  or no attempt whose Unit Tests job and both required steps are green
 - **WHEN** the tag push triggers `release.yml`
 - **THEN** the `ci-preflight` job fails with an error naming the commit,
   and neither `call-release-matrix` nor `publish` starts (no matrix
   build, no GitHub Release, no docker push, no crates.io publish)
 
-#### Scenario: a skipped Full Tests step blocks the release
+#### Scenario: a skipped unit-test step blocks the release
 
-- **GIVEN** a tag whose commit's only successful-looking CI run has the
-  Full Tests job's workspace test step skipped (an earlier step failed)
-- **WHEN** the preflight inspects that run's job steps
-- **THEN** the step conclusion `skipped` fails the "tests ran and
-  passed" check, the preflight fails, and the release does not start
+- **GIVEN** a tag whose commit's only push-on-main run has the Unit Tests
+  job's `Build` or `Test (unit only — no Docker required)` step skipped
+  (an earlier step failed)
+- **WHEN** the preflight inspects that attempt's job steps
+- **THEN** the step conclusion `skipped` fails the "build and unit tests
+  ran and passed" check, the preflight fails, and the release does not
+  start
+
+#### Scenario: a red Full Tests does not block a build-and-unit-tested commit
+
+- **GIVEN** a completed push-on-main run whose `Unit Tests
+  (ubuntu-latest)` job and both required steps are green, and whose
+  `Full Tests (ubuntu-latest)` job failed (for example a wall-clock
+  ratio test on a loaded runner)
+- **WHEN** the tag push triggers `release.yml`
+- **THEN** the preflight passes, logs a warning naming the Full Tests
+  conclusion, and the release pipeline starts
+
+#### Scenario: green unit evidence from a later attempt counts
+
+- **GIVEN** a qualifying run whose attempt 1 failed `Unit Tests
+  (ubuntu-latest)` and whose attempt 2 (a re-run) has that job and both
+  steps green
+- **WHEN** the preflight unions job evidence across attempts
+- **THEN** the commit counts as tested and the release proceeds
 
 #### Scenario: PR-triggered evidence alone does not qualify
 
@@ -248,9 +281,9 @@ side effect unless the pushed tag points at a tested commit:
 
 #### Scenario: tag on a tested SHA proceeds unchanged
 
-- **GIVEN** a tag `v*` whose commit has a completed successful
-  push-on-main CI run in which the Full Tests job and both test steps
-  concluded `success`
+- **GIVEN** a tag `v*` whose commit has a completed push-on-main run in
+  which `Unit Tests (ubuntu-latest)` and both required steps concluded
+  `success`
 - **WHEN** the tag push triggers `release.yml`
 - **THEN** the preflight passes and the pipeline behaves exactly as
   before this change (same matrix, same assets, same docker and publish
