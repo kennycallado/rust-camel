@@ -41,6 +41,8 @@ wait plus connect) rather than the TCP handshake alone, and a `connect_timeout=â
 
 The `allowDynamicQuery` parameter defaults to `false`. In this mode, the Producer ignores the `CamelSql.Query` header and the Exchange body. It uses only the query from its Endpoint configuration. This default enforces the exchange-data trust boundary (ADR-0032). Set `allowDynamicQuery=true` to let the route supply the query. The opt-in makes the route responsible for validating the source.
 
+Manual multi-statement transactions inside one `sql:` call (for example `BEGIN; ...; COMMIT`) are safe against mid-statement failures. When a statement fails, the component rolls the connection back on its own pooled connection before it returns that connection to the pool. The component discards the connection if the rollback itself fails, so no open transaction leaks into the pool. `transactionMode=Managed` is still pending (bd rc-qv2iz) and is not available.
+
 ### Placeholder syntax
 
 The SQL placeholder parser accepts these forms:

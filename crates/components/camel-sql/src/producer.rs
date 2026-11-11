@@ -8,6 +8,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use camel_api::datasource::DatasourceCatalog;
 use serde_json::json;
+use sqlx::Any;
 use sqlx::AnyConnection;
 use sqlx::AnyPool;
 use sqlx::Either;
@@ -15,6 +16,7 @@ use sqlx::Executor;
 use sqlx::SqlSafeStr;
 use sqlx::any::AnyRow;
 use sqlx::any::AnyTypeInfoKind;
+use sqlx::pool::PoolConnection;
 use sqlx::pool::PoolOptions;
 use tokio::sync::OnceCell;
 use tower::Service;
@@ -331,6 +333,99 @@ struct SingleBindPlan {
     persistent: bool,
 }
 
+/// What to do with a pooled connection after a failed statement.
+enum RollbackDisposition {
+    /// Roll back and return the connection to the pool.
+    Keep,
+    /// Roll back, detach, and close the connection; never re-pool it.
+    Discard,
+}
+
+/// SQLite's message when `ROLLBACK` runs with no transaction open: the
+/// connection is known-clean, so it is safe to re-pool.
+const SQLITE_NO_ACTIVE_TRANSACTION: &str = "cannot rollback - no transaction is active";
+
+/// Classifies a driver error message into a rollback disposition.
+///
+/// Fail-closed: only the exact SQLite "no open transaction" message keeps
+/// the connection. Anything else — including the same text wrapped in
+/// driver context — discards it, because the connection state is unknown.
+fn classify_db_message(msg: &str) -> RollbackDisposition {
+    if msg == SQLITE_NO_ACTIVE_TRANSACTION {
+        RollbackDisposition::Keep
+    } else {
+        RollbackDisposition::Discard
+    }
+}
+
+/// Classifies a `ROLLBACK` failure into a rollback disposition.
+fn classify_rollback_error(err: &sqlx::Error) -> RollbackDisposition {
+    match err {
+        sqlx::Error::Database(db) => classify_db_message(db.message()),
+        sqlx::Error::AnyDriverError(inner) => match inner.downcast_ref::<sqlx::Error>() {
+            Some(inner) => classify_rollback_error(inner),
+            None => RollbackDisposition::Discard,
+        },
+        _ => RollbackDisposition::Discard,
+    }
+}
+
+/// Owns a pooled connection whose state is unknown after a failed
+/// statement. Dropping it while armed detaches the connection and closes
+/// it instead of returning it to the pool; `disarm` gives it back so the
+/// caller can re-pool it.
+struct DiscardOnDrop(Option<PoolConnection<Any>>);
+
+impl DiscardOnDrop {
+    /// Releases the connection to the caller, which drops it back into the
+    /// pool.
+    fn disarm(mut self) -> PoolConnection<Any> {
+        self.0.take().expect("guard disarmed twice") // allow-unwrap
+    }
+
+    /// Mutable access to the guarded connection.
+    fn conn_mut(&mut self) -> &mut PoolConnection<Any> {
+        self.0.as_mut().expect("guard used after disarm") // allow-unwrap
+    }
+}
+
+impl Drop for DiscardOnDrop {
+    fn drop(&mut self) {
+        if let Some(conn) = self.0.take() {
+            // Detach first so the pool never sees this connection again;
+            // dropping the detached handle closes it.
+            drop(conn.detach());
+        }
+    }
+}
+
+/// Rolls back a failed statement on `conn`, then either returns the
+/// connection to the pool (benign rollback: nothing was open) or closes it
+/// (unknown state). Always returns `original` unchanged.
+async fn release_after_error(conn: PoolConnection<Any>, original: CamelError) -> CamelError {
+    let mut guard = DiscardOnDrop(Some(conn));
+    let rollback = sqlx::query(sqlx::AssertSqlSafe("ROLLBACK"))
+        .execute(&mut **guard.conn_mut())
+        .await;
+
+    match rollback {
+        Ok(_) => drop(guard.disarm()),
+        Err(e) if matches!(classify_rollback_error(&e), RollbackDisposition::Keep) => {
+            // log-policy: handler-owned
+            // (category a: single-mode rollback failure inside producer pipeline)
+            debug!(error = %e, "Rollback found no active transaction; keeping connection");
+            drop(guard.disarm());
+        }
+        Err(e) => {
+            // log-policy: handler-owned
+            // (category a: single-mode rollback failure inside producer pipeline)
+            warn!(error = %e, "Rollback failed; discarding connection with unknown state");
+        }
+    }
+
+    original
+}
+
 /// Plans the binds for one single-mode statement on `conn` (the SAME
 /// pooled connection that will execute it — normalization must target
 /// the OIDs of the statement that actually runs, bd rc-mn139).
@@ -459,13 +554,21 @@ async fn fetch_single_rows(
         .await
         .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
 
-    let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
-    let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
-    let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
-    query
-        .fetch_all(&mut *conn)
-        .await
-        .map_err(|e| fetch_error("SQL query failed", e))
+    let fetched = async {
+        let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
+        let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+        let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+        query
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| fetch_error("SQL query failed", e))
+    }
+    .await;
+
+    match fetched {
+        Ok(rows) => Ok(rows),
+        Err(original) => Err(release_after_error(conn, original).await),
+    }
 }
 
 /// Executes a SELECT query and populates the exchange body with results.
@@ -532,21 +635,64 @@ async fn execute_select(
                 // Plan and execute against the SAME pooled connection so
                 // normalization targets the OIDs of the statement that
                 // actually runs (bd rc-mn139).
-                let plan = plan_single_binds(&mut conn, &sql_str, &bindings).await?;
+                let plan = match plan_single_binds(&mut conn, &sql_str, &bindings).await {
+                    Ok(plan) => plan,
+                    Err(original) => {
+                        // `try_stream!` turns `?` into "yield the error and
+                        // return", but the compiler still sees the `Ok` arm
+                        // as reachable; that arm must diverge for the
+                        // connection move to be accepted.
+                        Err::<SingleBindPlan, CamelError>(
+                            release_after_error(conn, original).await,
+                        )?;
+                        unreachable!("`release_after_error` always propagates the error")
+                    }
+                };
                 let q = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str()))
                     .persistent(plan.persistent);
-                let q = bind_single_item(q, &bindings, &plan.targets)?;
+                let q = match bind_single_item(q, &bindings, &plan.targets) {
+                    Ok(q) => q,
+                    Err(original) => {
+                        Err::<_, CamelError>(release_after_error(conn, original).await)?;
+                        unreachable!("`release_after_error` always propagates the error")
+                    }
+                };
                 let mut rows = q.fetch(&mut *conn);
-                while let Some(row) = rows
-                    .try_next()
-                    .await
-                    .map_err(|e| fetch_error("Query execution failed", e))?
-                {
-                    let json_val = row_to_json(&row)?;
-                    let mut bytes = serde_json::to_vec(&json_val)
-                        .map_err(|e| CamelError::ProcessorError(format!("JSON serialization failed: {}", e)))?;
+                let mut failure: Option<CamelError> = None;
+                loop {
+                    let row = match rows.try_next().await {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(e) => {
+                            failure = Some(fetch_error("Query execution failed", e));
+                            break;
+                        }
+                    };
+                    let json_val = match row_to_json(&row) {
+                        Ok(json_val) => json_val,
+                        Err(original) => {
+                            failure = Some(original);
+                            break;
+                        }
+                    };
+                    let mut bytes = match serde_json::to_vec(&json_val) {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            failure = Some(CamelError::ProcessorError(format!(
+                                "JSON serialization failed: {}",
+                                e
+                            )));
+                            break;
+                        }
+                    };
                     bytes.push(b'\n');
                     yield Bytes::from(bytes);
+                }
+                // `rows` borrows the connection: end the borrow before
+                // handing the connection to the rollback.
+                drop(rows);
+                if let Some(original) = failure {
+                    Err::<(), CamelError>(release_after_error(conn, original).await)?;
                 }
             };
 
@@ -578,13 +724,21 @@ async fn execute_modify(
         .await
         .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
 
-    let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
-    let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
-    let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
-    let result = query.execute(&mut *conn).await.map_err(|e| {
-        warn!(error = %e, "SQL query failed");
-        CamelError::ProcessorError(format!("Query execution failed: {}", e))
-    })?;
+    let executed = async {
+        let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
+        let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+        let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+        query.execute(&mut *conn).await.map_err(|e| {
+            warn!(error = %e, "SQL query failed");
+            CamelError::ProcessorError(format!("Query execution failed: {}", e))
+        })
+    }
+    .await;
+
+    let result = match executed {
+        Ok(result) => result,
+        Err(original) => return Err(release_after_error(conn, original).await),
+    };
 
     let rows_affected = result.rows_affected();
 
@@ -593,10 +747,11 @@ async fn execute_modify(
         && rows_affected as i64 != expected
     {
         warn!(expected, actual = rows_affected, "Row count mismatch");
-        return Err(CamelError::ProcessorError(format!(
+        let err = CamelError::ProcessorError(format!(
             "Expected {} rows affected, got {}",
             expected, rows_affected
-        )));
+        ));
+        return Err(release_after_error(conn, err).await);
     }
 
     exchange
@@ -1193,6 +1348,69 @@ mod tests {
         assert_eq!(exchange.input.header(headers::ROW_COUNT), None);
     }
 
+    // A mid-stream failure inside an explicit transaction must release the
+    // connection (rolling the transaction back) so the pool stays usable.
+    #[tokio::test]
+    async fn stream_list_error_releases_connection_and_pool_stays_usable() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri(
+            "sql:select id from items order by id?db_url=sqlite::memory:&outputType=StreamList",
+        )
+        .unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "BEGIN IMMEDIATE; INSERT INTO items (id,name) VALUES (9,'x'); select id, name from items order by id; INSERT INTO items (id,name) VALUES (1,'dup')".to_string(),
+            bindings: vec![],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        // The stream is lazy: the SELECT itself succeeds.
+        execute_select(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect("stream list");
+
+        let err = exchange
+            .input
+            .body
+            .clone()
+            .into_bytes(1024)
+            .await
+            .expect_err("drain must fail on the duplicate INSERT");
+        assert!(
+            err.to_string().contains("UNIQUE"),
+            "error must be preserved, got: {}",
+            err
+        );
+
+        // The connection goes back to the pool.
+        assert_eq!(pool.size(), 1, "connection must be kept in the pool");
+
+        let mut select_config = SqlEndpointConfig::from_uri(
+            "sql:select id from items order by id?db_url=sqlite::memory:&outputType=SelectList",
+        )
+        .unwrap();
+        select_config.resolve_defaults();
+        let select_prepared = PreparedQuery {
+            sql: "select id from items order by id".to_string(),
+            bindings: vec![],
+        };
+        let mut ex2 = Exchange::new(Message::default());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_select(&pool, &select_prepared, &select_config, &mut ex2),
+        )
+        .await
+        .expect("follow-up select timed out on a poisoned connection")
+        .expect("follow-up select failed on a poisoned connection");
+
+        // The rolled-back row 9 is absent: only rows 1 and 2 remain.
+        assert_eq!(ex2.input.header(headers::ROW_COUNT), Some(&json!(2)));
+    }
+
     #[tokio::test]
     async fn execute_modify_expected_update_count_mismatch_returns_error() {
         let pool = sqlite_pool().await;
@@ -1243,6 +1461,199 @@ mod tests {
             .expect("query row");
         let done: i64 = sqlx::Row::try_get(&row, 0).expect("done column");
         assert_eq!(done, 0, "transaction must rollback first update");
+    }
+
+    // A multi-statement script that opens a transaction and then fails must
+    // not leave that transaction open on the pooled connection.
+    #[tokio::test]
+    async fn failing_manual_begin_does_not_poison_the_pool() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri("sql:x?db_url=sqlite::memory:").unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "BEGIN IMMEDIATE; INSERT INTO items (id,name) VALUES (9,'x'); INSERT INTO items (id,name) VALUES (9,'y'); COMMIT;".to_string(),
+            bindings: vec![],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        let err = execute_modify(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect_err("duplicate id inside the open transaction must fail");
+        assert!(!err.to_string().is_empty(), "error message must be present");
+
+        let mut select_config = SqlEndpointConfig::from_uri(
+            "sql:select id from items order by id?db_url=sqlite::memory:&outputType=SelectList",
+        )
+        .unwrap();
+        select_config.resolve_defaults();
+        let select_prepared = PreparedQuery {
+            sql: "select id from items order by id".to_string(),
+            bindings: vec![],
+        };
+        let mut ex2 = Exchange::new(Message::default());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_select(&pool, &select_prepared, &select_config, &mut ex2),
+        )
+        .await
+        .expect("follow-up select timed out on a poisoned connection")
+        .expect("follow-up select failed on a poisoned connection");
+
+        // The rolled-back row 9 is absent: only rows 1 and 2 remain.
+        assert_eq!(ex2.input.header(headers::ROW_COUNT), Some(&json!(2)));
+    }
+
+    // A failing statement outside any explicit transaction must keep its
+    // error and leave the pool usable (connection returned, not discarded).
+    #[tokio::test]
+    async fn failed_statement_without_transaction_keeps_error_and_pool_usable() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config = SqlEndpointConfig::from_uri("sql:x?db_url=sqlite::memory:").unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "INSERT INTO items (id,name) VALUES (1,'dup')".to_string(),
+            bindings: vec![],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        let err = execute_modify(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect_err("duplicate primary key must fail");
+        assert!(
+            err.to_string().contains("Query execution failed"),
+            "error must be preserved, got: {}",
+            err
+        );
+        // Benign rollback: the connection goes back to the pool.
+        assert_eq!(pool.size(), 1, "connection must be kept in the pool");
+
+        let mut select_config = SqlEndpointConfig::from_uri(
+            "sql:select id from items order by id?db_url=sqlite::memory:&outputType=SelectList",
+        )
+        .unwrap();
+        select_config.resolve_defaults();
+        let select_prepared = PreparedQuery {
+            sql: "select id from items order by id".to_string(),
+            bindings: vec![],
+        };
+        let mut ex2 = Exchange::new(Message::default());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_select(&pool, &select_prepared, &select_config, &mut ex2),
+        )
+        .await
+        .expect("follow-up select timed out")
+        .expect("follow-up select failed");
+
+        assert_eq!(ex2.input.header(headers::ROW_COUNT), Some(&json!(2)));
+    }
+
+    // A failing SELECT must keep its error and leave the pool usable.
+    #[tokio::test]
+    async fn failing_select_keeps_error_and_pool_usable() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut config =
+            SqlEndpointConfig::from_uri("sql:x?db_url=sqlite::memory:&outputType=SelectList")
+                .unwrap();
+        config.resolve_defaults();
+
+        let prepared = PreparedQuery {
+            sql: "SELECT * FROM items_missing_table".to_string(),
+            bindings: vec![],
+        };
+        let mut exchange = Exchange::new(Message::default());
+
+        let err = execute_select(&pool, &prepared, &config, &mut exchange)
+            .await
+            .expect_err("missing table must fail");
+        assert!(
+            err.to_string().contains("Query execution failed"),
+            "error must be preserved, got: {}",
+            err
+        );
+        assert_eq!(pool.size(), 1, "connection must be kept in the pool");
+
+        let select_prepared = PreparedQuery {
+            sql: "select id from items order by id".to_string(),
+            bindings: vec![],
+        };
+        let mut ex2 = Exchange::new(Message::default());
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            execute_select(&pool, &select_prepared, &config, &mut ex2),
+        )
+        .await
+        .expect("follow-up select timed out")
+        .expect("follow-up select failed");
+
+        assert_eq!(ex2.input.header(headers::ROW_COUNT), Some(&json!(2)));
+    }
+
+    #[test]
+    fn classify_db_message_is_fail_closed() {
+        assert!(matches!(
+            classify_db_message(SQLITE_NO_ACTIVE_TRANSACTION),
+            RollbackDisposition::Keep
+        ));
+        assert!(matches!(
+            classify_db_message("SQLITE_ERROR: cannot rollback - no transaction is active"),
+            RollbackDisposition::Discard
+        ));
+        assert!(matches!(
+            classify_db_message("cannot rollback - no transaction is active!!"),
+            RollbackDisposition::Discard
+        ));
+        assert!(matches!(
+            classify_db_message(""),
+            RollbackDisposition::Discard
+        ));
+    }
+
+    #[test]
+    fn rollback_error_classifier_rejects_non_database_errors() {
+        let err = sqlx::Error::Protocol(
+            "cannot rollback - no transaction is active (context)".to_string(),
+        );
+        assert!(matches!(
+            classify_rollback_error(&err),
+            RollbackDisposition::Discard
+        ));
+    }
+
+    #[tokio::test]
+    async fn cleanup_guard_discards_when_armed_keeps_when_disarmed() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        // Bounded acquire (lint-unbounded-wait): a wedged pool must fail the test
+        // instead of parking it.
+        let conn = tokio::time::timeout(std::time::Duration::from_secs(10), pool.acquire())
+            .await
+            .expect("acquire timed out after 10s")
+            .expect("acquire connection");
+        let guard = DiscardOnDrop(Some(conn));
+        drop(guard);
+        assert_eq!(pool.size(), 0, "armed guard must discard the connection");
+
+        let conn = tokio::time::timeout(std::time::Duration::from_secs(10), pool.acquire())
+            .await
+            .expect("acquire timed out after 10s")
+            .expect("acquire connection");
+        let guard = DiscardOnDrop(Some(conn));
+        let conn = guard.disarm();
+        drop(conn);
+        assert_eq!(pool.size(), 1, "disarmed guard must keep the connection");
     }
 
     // --- Phase B hardening tests ---

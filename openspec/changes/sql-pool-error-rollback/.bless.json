@@ -1,0 +1,65 @@
+{
+  "kind": "plan",
+  "change": "sql-pool-error-rollback",
+  "verdict": "BLESSED",
+  "hash": "sha256:ff453f7eddeb059097314587305013ffdc51cb305a8978d833cac685fbecea34",
+  "expert": "e_gpt",
+  "supersedes_spec_hash": "sha256:413129d8a5a59d14dacf8d67dc253e9c85a06dda3b44df79974814fe1dbe756d",
+  "reviewer_loop": [
+    {
+      "reviewer": "r_glm",
+      "round": 1,
+      "verdict": "REJECT",
+      "findings": [
+        "CRITICAL: try_stream! cannot compile `return Err(...)` — use the `?` idiom",
+        "CRITICAL: failing_select test asserted a string fetch_error never emits",
+        "IMPORTANT: StreamList test non-discriminating + impossible RED expectation",
+        "IMPORTANT: parked-report limitation had no owning task",
+        "MINOR: design test-count drift; coverage-map name mismatch; cancellation traceability; gates-sweep ownership"
+      ]
+    },
+    {
+      "reviewer": "r_glm",
+      "round": 2,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": [
+        "MINOR: stale two-tests count in design.md Affected-crates",
+        "MINOR: commit amended artifacts before bless"
+      ]
+    }
+  ],
+  "bless_rounds": [
+    {
+      "round": 1,
+      "hash": "sha256:5eae9f6391182b521201fd2e205f31726097cb22bb5119c224a05027444e085e",
+      "verdict": "REJECTED",
+      "findings": [
+        "CRITICAL: execute(guard.conn_mut()) is not an Executor — need &mut ** deref",
+        "IMPORTANT: task 1.1 machinery without caller fails lib dead_code under -D warnings",
+        "IMPORTANT: poison test asserted the wrong exchange (ex2 vs exchange)",
+        "MINOR: StreamList RED-first step order contradicted itself"
+      ]
+    },
+    {
+      "round": 2,
+      "hash": "sha256:69b4dc77ba33ac280f3b140eda9a68ec6bb6cec8de9fa3ce877c1061caae6b20",
+      "verdict": "REJECTED",
+      "findings": [
+        "IMPORTANT: merged-task boundary still left machinery dead-code in task 1.1; merge machinery with its first production caller"
+      ]
+    },
+    {
+      "round": 3,
+      "hash": "sha256:ff453f7eddeb059097314587305013ffdc51cb305a8978d833cac685fbecea34",
+      "verdict": "BLESSED",
+      "findings": []
+    }
+  ],
+  "blessed_at": "2026-11-11",
+  "errata": [
+    {
+      "when": "2026-11-11 (pre-park)",
+      "what": "tasks.md acceptance command package name corrected post-bless: -p camel-sql -> -p camel-component-sql; text-only, no behavioral change to the blessed plan; original blessed hash ff453f7eddeb059097314587305013ffdc51cb305a8978d833cac685fbecea34 covers the pre-erratum text"
+    }
+  ]
+}

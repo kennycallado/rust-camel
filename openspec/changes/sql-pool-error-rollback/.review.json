@@ -1,0 +1,30 @@
+{
+  "kind": "holistic-review",
+  "change": "sql-pool-error-rollback",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "r_glm",
+  "impl_hash_base": "3a28ec959be121272ea64527782e58fe1a9d4f22",
+  "head_at_review": "049769cab (docs commit; parked-report bd reference updated to rc-2ljv5 immediately after, commit follows)",
+  "findings": [
+    {
+      "severity": "minor",
+      "disposition": "noted-not-blocking",
+      "text": "Wiring-style drift: StreamList plan/bind error arms repeat the try_stream divergence idiom three times where 1.1's async-block pattern would collapse two; behavior identical (294 tests green); blessed tasks step prescribed per-step handling; refactor only if touched again"
+    },
+    {
+      "severity": "minor",
+      "disposition": "resolved",
+      "text": "parked-report promised a bd follow-up that did not exist — filed as rc-2ljv5 (bug P2, discovered-from rc-en1ud) and the report now references it"
+    },
+    {
+      "severity": "minor-absurd",
+      "disposition": "discarded",
+      "text": "docs paragraph omits the benign no-transaction-active rollback carve-out; safety claim true in every branch; reviewer: do not spend a commit"
+    }
+  ],
+  "residual_risks": [
+    "Spec scenarios 2 (discard) and 3-cancellation covered by composition (classifier + guard unit tests), not live end-to-end; live non-benign rollback failure not forceable with harness — recorded in parked-report.md",
+    "Out-of-scope cancellation windows tracked in bd rc-2ljv5"
+  ],
+  "reviewed_at": "2026-11-11"
+}
