@@ -889,6 +889,8 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
         config = builder.build();
     }
 
+    // Copy the declarative flag once after all policy branches.
+    config.use_original_message = def.use_original_message;
     Ok(config)
 }
 
@@ -2468,6 +2470,96 @@ mod tests {
         assert_eq!(
             config.policies[1].retry.as_ref().map(|p| p.max_attempts),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_use_original_message_dlc_only() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: None,
+            use_original_message: true,
+        })
+        .expect("compile should succeed");
+
+        assert!(
+            config.use_original_message,
+            "use_original_message must reach the compiled ErrorHandlerConfig \
+             for a DLC-only error handler"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_use_original_message_retry_only() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: Some(DeclarativeRedeliveryPolicy {
+                max_attempts: 2,
+                initial_delay_ms: 10,
+                multiplier: 2.0,
+                max_delay_ms: 100,
+                jitter_factor: 0.0,
+            }),
+            on_exceptions: None,
+            use_original_message: true,
+        })
+        .expect("compile should succeed");
+
+        assert!(
+            config.use_original_message,
+            "use_original_message must reach the compiled ErrorHandlerConfig \
+             for a retry-only error handler"
+        );
+        assert!(
+            !config.policies.is_empty(),
+            "retry-only error handler must compile a policy"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_use_original_message_on_exceptions() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: None,
+            retry: None,
+            on_exceptions: Some(vec![DeclarativeOnException {
+                kind: Some("Io".into()),
+                message_contains: None,
+                retry: None,
+                steps: vec![],
+                handled: Some(true),
+                continued: None,
+                handled_by: Some("log:io".into()),
+            }]),
+            use_original_message: true,
+        })
+        .expect("compile should succeed");
+
+        assert!(
+            config.use_original_message,
+            "use_original_message must reach the compiled ErrorHandlerConfig \
+             for an on_exceptions error handler"
+        );
+        assert!(
+            !config.policies.is_empty(),
+            "on_exceptions error handler must compile a policy"
+        );
+    }
+
+    #[test]
+    fn test_compile_error_handler_use_original_message_default_false() {
+        let config = compile_error_handler(DeclarativeErrorHandler {
+            dead_letter_channel: Some("log:dlc".into()),
+            retry: None,
+            on_exceptions: None,
+            use_original_message: false,
+        })
+        .expect("compile should succeed");
+
+        assert!(
+            !config.use_original_message,
+            "use_original_message must stay false when the declarative handler \
+             does not opt in"
         );
     }
 

@@ -1,0 +1,40 @@
+{
+  "kind": "plan",
+  "change": "error-handler-use-original-message",
+  "verdict": "BLESS",
+  "hash": "sha256:e76b2aaf669b24affbfb72f1f1256f9a6f2d6492bdcb1c07697b5568487acd78",
+  "expert": "experts/e_gpt",
+  "blessed_at": "2026-11-11",
+  "mission": "571-origmessage",
+  "bd": "rc-bx0qx",
+  "note": "hash = bless-hash.sh over the change dir AFTER the holistic-review spec amendment (finding 1). The amendment re-bless reviewed the exact file bytes (file-level sha256 4abe83b4c1740c43a16462226e890053198422b3b70d7b6e5287de9411bce4c9) and passed wording/structure; hash binding recorded post-review per r_glm finding.",
+  "supersedes": [
+    "plan blessing sha256:ee989b2562259bdb5b2a15b70d3b934e13a36bc43364f7a8f3553a26e601f1c7 (pre-amendment dir)",
+    "spec blessing sha256:c87b3cbdb83771c0147e0a248168e73b00312a281bbb192fd65914e3b01c18ef"
+  ],
+  "history": [
+    {
+      "kind": "spec",
+      "verdict_after_fixes": "BLESS",
+      "expert": "experts/e_gpt",
+      "findings_resolved": 2
+    },
+    {
+      "kind": "plan",
+      "reviewer": "reviewers/r_glm",
+      "verdict": "FINDINGS (2 legitimate minors, fixed)",
+      "findings_resolved": [
+        "minor: proposal ACs added to Task 1.2 conductor sweep acceptance",
+        "minor: Task 1.1 acceptance diff-check wording made verifiable"
+      ]
+    },
+    {
+      "kind": "spec",
+      "event": "amendment re-bless after holistic finding 1 (SHALL exception sentence)",
+      "expert": "experts/e_gpt",
+      "verdict": "artifact passes (expert message: 'Wording passes; all six scenarios remain unchanged, ADDED-only structure holds, and tasks.md is unaffected')",
+      "expert_file_hash": "sha256:4abe83b4c1740c43a16462226e890053198422b3b70d7b6e5287de9411bce4c9",
+      "finding_resolved": "minor: hash binding — expert hashed the spec file, mission currency is the change-dir hash; both verified to denote the same bytes; binding recorded here"
+    }
+  ]
+}

@@ -781,3 +781,79 @@ expects:
     assert!(text.contains(" at 1:"), "position missing: {text}");
     assert!(!text.contains("SECRET-SENTINEL"), "body leaked: {text}");
 }
+
+/// `use_original_message: true` restores the pre-route Message before the
+/// failed exchange is forwarded to the dead letter channel, so the DLC sees
+/// the original body instead of the mutated one.
+#[tokio::test(flavor = "multi_thread")]
+async fn use_original_message_routes_original_body_to_dlc() {
+    let dir = temp_dir("uom-original");
+    let yaml = r#"
+routes:
+  - id: start
+    from: "direct:start"
+    steps:
+      - to: "seda:q"
+  - id: consume
+    from: "seda:q"
+    error_handler:
+      dead_letter_channel: "mock:dlc"
+      use_original_message: true
+    steps:
+      - set_body: "MUTATED"
+      - validate: "${body} != 'MUTATED'"
+inputs:
+  - to: "direct:start"
+    body: "ORIGINAL-EVENT"
+expects:
+  mock:dlc:
+    count: 1
+    bodies: ["ORIGINAL-EVENT"]
+"#;
+    let result = run(yaml, &dir).await;
+    assert!(
+        result.doc_error.is_none(),
+        "doc_error: {:?}",
+        result.doc_error
+    );
+    assert_eq!(result.endpoint_results.len(), 1);
+    let er = &result.endpoint_results[0];
+    assert!(er.outcome.is_ok(), "expected Ok, got {:?}", er.outcome);
+}
+
+/// Control: without `use_original_message` the DLC receives the body as
+/// mutated by the failing route.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_use_original_message_routes_mutated_body_to_dlc() {
+    let dir = temp_dir("uom-mutated");
+    let yaml = r#"
+routes:
+  - id: start
+    from: "direct:start"
+    steps:
+      - to: "seda:q"
+  - id: consume
+    from: "seda:q"
+    error_handler:
+      dead_letter_channel: "mock:dlc"
+    steps:
+      - set_body: "MUTATED"
+      - validate: "${body} != 'MUTATED'"
+inputs:
+  - to: "direct:start"
+    body: "ORIGINAL-EVENT"
+expects:
+  mock:dlc:
+    count: 1
+    bodies: ["MUTATED"]
+"#;
+    let result = run(yaml, &dir).await;
+    assert!(
+        result.doc_error.is_none(),
+        "doc_error: {:?}",
+        result.doc_error
+    );
+    assert_eq!(result.endpoint_results.len(), 1);
+    let er = &result.endpoint_results[0];
+    assert!(er.outcome.is_ok(), "expected Ok, got {:?}", er.outcome);
+}

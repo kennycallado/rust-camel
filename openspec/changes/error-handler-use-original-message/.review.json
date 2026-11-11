@@ -1,0 +1,36 @@
+{
+  "kind": "holistic-review",
+  "change": "error-handler-use-original-message",
+  "mission": "571-origmessage",
+  "bd": "rc-bx0qx",
+  "verdict": "APPROVE",
+  "final_verdict_note": "Holistic loop: r_glm APPROVE-WITH-FINDINGS (1 legitimate minor + 1 absurd-minor) -> legitimate minor resolved in place (exception sentence appended to the delta requirement, no code/scenario changes), re-blessed by experts/e_gpt (artifact passes; dual-hash binding recorded in .bless.json), bless-record drift finding (important) fixed and verified -> final r_glm APPROVE with zero findings.",
+  "reviewer": "reviewers/r_glm",
+  "review_sessions": [
+    "ses_e362cf0d1ffeke9cjUTstbUjl9 (holistic: APPROVE-WITH-FINDINGS)",
+    "ses_e36250e78ffetyXu3x9Mn6ciQo (finding-1 resolution + bless-record check: fix .bless.json)",
+    "ses_e361eeae8ffegV64eznD6QZD0o (bless-record verification: APPROVE)"
+  ],
+  "impl_hash": "sha256:e76b2aaf669b24affbfb72f1f1256f9a6f2d6492bdcb1c07697b5568487acd78",
+  "impl_hash_note": "bless-hash.sh over the change dir at review time; expert file-level hash of the amended delta: sha256:4abe83b4c1740c43a16462226e890053198422b3b70d7b6e5287de9411bce4c9",
+  "findings_resolution": [
+    {
+      "finding": "minor: delta SHALL broader than runtime guarantee (wholesale Exchange replacement edge, pre-existing, test-enforced)",
+      "resolution": "exception sentence appended to delta requirement; bd follow-up rc-hs26p filed for the runtime edge"
+    },
+    {
+      "finding": "absurd-minor: docs understatement (restore scope beyond DLC)",
+      "resolution": "discarded per flow; bd follow-up rc-v7xfb filed (docs pass, out of mission bounds)"
+    },
+    {
+      "finding": "important: .bless.json stale (claimed dual-hash binding absent on disk)",
+      "resolution": ".bless.json rewritten with current change-dir hash + full supersession chain; r_glm verified APPROVE (hash reproduces, drift gate passes)"
+    }
+  ],
+  "coverage": "all 6 delta scenarios + YAML carry-through mapped to green tests; canonical error-handler spec (4 requirements) untouched by ADDED-only delta",
+  "blessed_at_review": {
+    "spec": "sha256:c87b3cbdb83771c0147e0a248168e73b00312a281bbb192fd65914e3b01c18ef",
+    "plan": "sha256:ee989b2562259bdb5b2a15b70d3b934e13a36bc43364f7a8f3553a26e601f1c7",
+    "final": "sha256:e76b2aaf669b24affbfb72f1f1256f9a6f2d6492bdcb1c07697b5568487acd78"
+  }
+}

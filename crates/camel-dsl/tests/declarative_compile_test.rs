@@ -3,7 +3,7 @@ use camel_core::route::BuilderStep;
 use camel_dsl::{
     ChoiceStepDef, DeclarativeConcurrency, DeclarativeRoute, DeclarativeStep, FilterStepDef,
     LanguageExpressionDef, LogStepDef, ScriptStepDef, SetBodyStepDef, SetHeaderStepDef, ToStepDef,
-    ValueSourceDef, WhenStepDef, compile_declarative_route, parse_yaml,
+    ValueSourceDef, WhenStepDef, compile_declarative_route, parse_yaml, parse_yaml_to_declarative,
 };
 
 #[test]
@@ -201,4 +201,29 @@ routes:
             panic!("expected BuilderStep::DeclarativeLog, got {:?}", other);
         }
     }
+}
+
+#[test]
+fn yaml_use_original_message_reaches_compiled_error_handler() {
+    let yaml = r#"
+routes:
+  - id: yaml-uom
+    from: "direct:start"
+    steps:
+      - to: "mock:out"
+    error_handler:
+      dead_letter_channel: "mock:dlc"
+      use_original_message: true
+"#;
+    let routes = parse_yaml_to_declarative(yaml).expect("YAML parse should succeed");
+    let route = routes.into_iter().next().expect("expected one route");
+    let def = compile_declarative_route(route).expect("route should compile");
+
+    let config = def
+        .error_handler_config()
+        .expect("error handler config must compile");
+    assert!(
+        config.use_original_message,
+        "YAML use_original_message must reach the compiled ErrorHandlerConfig"
+    );
 }
