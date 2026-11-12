@@ -1,0 +1,37 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:82230f0144ceac93145bf69951460f485cd334abdf7ea714a4a86f2437bbdc88",
+  "amended_hash": "sha256:3cb4f46bb12193b290cc4d4a73ece94714f68e4824af3df7462f339c7a59846c",
+  "amendment": {
+    "date": "2026-11-12",
+    "what": "task-1.2 fixture text amended to write_sequential_held_one_shot_fixture (route-level sequential: true)",
+    "why": "seda declares ConcurrencyModel::Concurrent; the seam lives in the sequential arm, so the original fixture text could never emit the marker — worker deviation approved by e_opus task review (ses_e2fe566d7ffe1LjSoID5cw6Vy1): 'the spec text is wrong, not the work'; wording-only, no re-bless required per that ruling"
+  },
+  "amendment_2": {
+    "date": "2026-11-12",
+    "what": "design.md §Approach 1 seam snippet updated to the final read-once hoist form (let pipeline_marker = var_os(...).is_some() before the loop; if pipeline_marker at the same emission site)",
+    "why": "e_opus supplementary holistic minor: per-exchange var_os = getenv + env lock on the hot path; fixed in commit 73957e86a, delta APPROVE by r_glm (ses_e2fcb436dffe5NW5hr5VYR0fBw); wording-only, behavior identical"
+  },
+  "expert": "e_gpt",
+  "date": "2026-11-12",
+  "plan_review": [
+    {
+      "round": 1,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "expert": "e_opus",
+      "findings": 6,
+      "note": "all minors: negative control missing, conditional import removal, --exact, elapsed_s definition, trap+timeout, exhaustive gate table",
+      "session": "ses_e2ffe4b3bffeNZ8hn2lPLjBWnL"
+    },
+    {
+      "round": 2,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "expert": "e_opus",
+      "findings": 2,
+      "note": "both minors from fixes: byte-identical restore proof (git diff --exit-code), exit-124 classified FAIL not outlier; applied verbatim",
+      "session": "ses_e2ffcd19dffeIWxOwGUbO75Mkc"
+    }
+  ],
+  "note": "supersedes spec bless sha256:b523b22f195ec78883e0fc01ec2c968a9c26e29e0b5dfba0787dbfc0fc0ecc55; spec round 1 REJECT (observation boundary) corrected to camel-core post-DrainGuard placement"
+}

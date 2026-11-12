@@ -1,0 +1,34 @@
+{
+  "kind": "holistic",
+  "verdict": "APPROVE",
+  "reviewer": "r_glm",
+  "authority_note": "AUTHORITATIVE per user directive 2026-11-12 ('the reviews are made by r_glm'); e_opus holistic also ran (in flight at re-assignment) as supplementary: APPROVE-WITH-FINDINGS, its single minor (per-exchange env lookup on the hot path) resolved in commit 73957e86a and delta APPROVE by r_glm",
+  "reviewed_head": "cf205e9d2 (holistic) + delta 73957e86a (re-review APPROVE)",
+  "impl_hash": "head=73957e86a",
+  "date": "2026-11-12",
+  "sessions": {
+    "r_glm_holistic": "ses_e2fce1be1ffel6yLvIW3rkUT9k",
+    "r_glm_delta": "ses_e2fcb436dffe5NW5hr5VYR0fBw",
+    "e_opus_supplementary": "ses_e2fcee1c7ffeoSzmakxydDli98"
+  },
+  "findings_resolved": [
+    {
+      "source": "e_opus supplementary holistic",
+      "severity": "minor",
+      "finding": "std::env::var_os per exchange in the sequential consumer loop = getenv + env lock on the production hot path",
+      "resolution": "read-once hoist before the loop, same emission site; commit 73957e86a; fmt/clippy/lib-tests/signal-tests green; r_glm delta re-review APPROVE"
+    }
+  ],
+  "e_opus_cross_checks_confirmed": [
+    "seam scope matches amended spec (sequential arm only, fixture targets it)",
+    "blind pair removed, no competing tests",
+    "assertions byte-identical from real child output (strace-verified)",
+    "negative control load-bearing (exit 101 without seam)",
+    "skip_specs fits; gates correctly exempt the pre-existing camel-cli doc failure (rc-7ej4d)"
+  ],
+  "residual_risks_recorded": [
+    "camel-cli doc-gate half fails pre-existing (rc-7ej4d); keep the park exemption note at merge",
+    "env-gated seam is default-off; a future test exporting the var globally would reintroduce marker noise (contained by one-shot fixture design)",
+    "loaded evidence is 10 runs vs 50 unloaded; margin wide (0.147s vs 15s budget)"
+  ]
+}

@@ -615,6 +615,8 @@ impl camel_api::RouteController for DefaultRouteController {
                 // rc-e2r9: metrics for b′ emission at reply-drop sites.
                 let metrics_for_reply_drop = metrics_for_reply_drop.clone();
                 tokio::spawn(async move {
+                    // Read once per consumer task: no per-exchange env lookup (seam is test-only).
+                    let pipeline_marker = std::env::var_os("CAMEL_JOB_PIPELINE_MARKER").is_some();
                     loop {
                         // Use select! to exit promptly on cancellation even when idle
                         let envelope = tokio::select! {
@@ -704,6 +706,13 @@ impl camel_api::RouteController for DefaultRouteController {
                         let mut exchange = exchange;
                         exchange.in_flight_claim =
                             _in_flight_claim.as_ref().map(InFlightClaim::split);
+                        // Test seam (default off, mirrors `CAMEL_JOB_SIGNAL_MARKER` /
+                        // `CAMEL_JOB_SHUTDOWN_MARKER`): proves route pipeline entry with the
+                        // drain claim held, so job-signal tests can synchronize INT on an
+                        // observed teardown-holding exchange instead of a timing guess.
+                        if pipeline_marker {
+                            eprintln!("camel job: pipeline entered");
+                        }
                         let mut result = CANCEL_TOKEN
                             .scope(cancel, async move { pipeline.call(exchange).await })
                             .await;

@@ -26,12 +26,11 @@
 mod common;
 
 use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{
-    send_signal, spawn_camel_job, spawn_camel_job_with_args, spawn_drained, wait_exit_code_bounded,
-    wait_for_marker,
+    send_signal, spawn_camel_job_with_args, spawn_camel_job_with_env, spawn_drained,
+    wait_exit_code_bounded, wait_for_marker,
 };
 
 /// Flushed stderr marker from the first lines of `run_job`, BEFORE
@@ -43,6 +42,20 @@ const ARMED_MARKER: &str = "camel job: signal streams armed";
 /// and before discovery, route start, and the send race — sending here
 /// lands the signal against a booted, in-flight job.
 const TRUST_MARKER: &str = "trusts the current working directory";
+
+/// Route-pipeline-entry seam marker (`CAMEL_JOB_PIPELINE_MARKER`):
+/// proves the teardown-holding exchange was claimed and dispatched
+/// with the drain counter held — the observation the blind pair
+/// lacked (bd rc-af1y3).
+const PIPELINE_ENTRY_MARKER: &str = "camel job: pipeline entered";
+
+/// Boot-complete INFO line (camel-core context lifecycle).
+const CONTEXT_STARTED_MARKER: &str = "CamelContext started";
+
+/// Shutdown-start INFO line (camel-core context lifecycle): the
+/// force-exit guard is spawned before shutdown begins, so observing
+/// this line proves the guard owns the signal streams.
+const STOPPING_CONTEXT_MARKER: &str = "Stopping CamelContext";
 
 /// Observation and exit ceiling, 30 s per the `common/mod.rs`
 /// convention: the ~466 MB binary boots slowly under a saturated
@@ -72,24 +85,51 @@ watch = false
     .expect("write Camel.toml");
 }
 
-/// Fixture whose one-shot send is HELD: the runner forces
-/// `waitForTaskToComplete=Always` on seda targets, so the send to
-/// `seda:work` blocks until the worker's 30 s `delay` pipeline
-/// completes — far past the signal and the 60 s overall timeout.
-fn write_held_one_shot_fixture(dir: &Path) {
-    std::fs::create_dir(dir.join("routes")).expect("mkdir routes");
-    std::fs::write(
-        dir.join("routes/held-route.yaml"),
-        r#"routes:
+/// Shared route body for the held one-shot fixtures. `{sequential}` is
+/// the ONLY difference between the two route files: the sibling tests
+/// leave it empty (consumer default), the second-signal test substitutes
+/// the route-level `sequential: true` line.
+const HELD_ROUTE_BODY: &str = r#"routes:
   - id: "job-held"
-    from: "seda:work"
+{sequential}    from: "seda:work"
     steps:
       - delay: 30000
       - set_body:
           value: "never-reached"
-"#,
+"#;
+
+/// Pipeline arm the held route is forced onto (ADR-0091: a named enum,
+/// not a bool, because the flag's meaning is not obvious at call sites).
+enum RouteArm {
+    /// Consumer default (seda declares `ConcurrencyModel::Concurrent`).
+    Concurrent,
+    /// Route-level `sequential: true` — the arm that carries the
+    /// pipeline-entry seam.
+    Sequential,
+}
+
+impl RouteArm {
+    /// The one YAML line that distinguishes the two route files.
+    fn dsl_line(self) -> &'static str {
+        match self {
+            RouteArm::Concurrent => "",
+            RouteArm::Sequential => "    sequential: true\n",
+        }
+    }
+}
+
+/// Write the shared held route with only the pipeline arm varying.
+fn write_held_route(dir: &Path, arm: RouteArm) {
+    std::fs::create_dir(dir.join("routes")).expect("mkdir routes");
+    std::fs::write(
+        dir.join("routes/held-route.yaml"),
+        HELD_ROUTE_BODY.replacen("{sequential}", arm.dsl_line(), 1),
     )
     .expect("write route");
+}
+
+/// Write the held fixture's job document (same for both pipeline arms).
+fn write_held_job_doc(dir: &Path) {
     std::fs::write(
         dir.join("job.job.yaml"),
         r#"execute:
@@ -102,6 +142,25 @@ routeFiles:
 "#,
     )
     .expect("write job doc");
+}
+
+/// Fixture whose one-shot send is HELD: the runner forces
+/// `waitForTaskToComplete=Always` on seda targets, so the send to
+/// `seda:work` blocks until the worker's 30 s `delay` pipeline
+/// completes — far past the signal and the 60 s overall timeout.
+fn write_held_one_shot_fixture(dir: &Path) {
+    write_held_route(dir, RouteArm::Concurrent);
+    write_held_job_doc(dir);
+}
+
+/// The held one-shot fixture with the route forced onto the SEQUENTIAL
+/// pipeline arm. The seda consumer declares `ConcurrencyModel::
+/// Concurrent`, and the pipeline-entry seam lives in the sequential
+/// channel loop, so the route-level `sequential: true` is what makes
+/// the teardown-holding claim observable (bd rc-af1y3).
+fn write_sequential_held_one_shot_fixture(dir: &Path) {
+    write_held_route(dir, RouteArm::Sequential);
+    write_held_job_doc(dir);
 }
 
 /// Fixture whose batch drain stays ACTIVE: the trigger send to
@@ -247,45 +306,63 @@ fn job_signal_interrupts_batch_drain() {
 }
 
 /// The INT-then-TERM pair (both signal streams, un-coalesceable across
-/// types): the send race consumes the first, the force-exit guard —
-/// spawned at interruption, before teardown — sees the still-buffered
-/// second on its first poll and force-exits 1 within a bounded window.
-/// No completed report is required on this path: the guard exits before
-/// the report write.
+/// types): INT lands after the observed pipeline-entry seam marker —
+/// the worker has claimed the teardown-holding exchange — and TERM
+/// lands after the observed `Stopping CamelContext` line, proving the
+/// force-exit guard already owns the streams. The send race consumes
+/// the first signal, the guard sees the second on its first poll and
+/// force-exits 1 within a bounded window. The claimed 30 s delay keeps
+/// the teardown window seconds wide, so both signals land where they
+/// are meant to; the assertions are unchanged from the blind-pair
+/// version. No completed report is required on this path: the guard
+/// exits before the report write.
 #[test]
 fn job_signal_second_signal_forces_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_config(dir.path());
-    write_held_one_shot_fixture(dir.path());
+    write_sequential_held_one_shot_fixture(dir.path());
 
-    let mut child = spawn_camel_job(dir.path(), Path::new("job.job.yaml"));
+    let mut child = spawn_camel_job_with_env(
+        dir.path(),
+        Path::new("job.job.yaml"),
+        &[],
+        &[("CAMEL_JOB_PIPELINE_MARKER", "1")],
+    );
     let drained = spawn_drained(&mut child);
 
-    let reached = wait_for_marker(&mut child, &drained.markers(), TRUST_MARKER, WAIT);
+    let started_ok = wait_for_marker(&mut child, &drained.markers(), CONTEXT_STARTED_MARKER, WAIT);
     assert!(
-        reached,
-        "camel job never booted to the trust warning;\n{}",
+        started_ok,
+        "camel job never booted to the context-started INFO line;\n{}",
         drained.captured()
     );
 
-    // One `sh -c` sends both signals so the pair lands well before the
-    // teardown starts (`kill` is a shell builtin; two separate spawn(2)
-    // calls would leave a multi-ms exec gap that can push the second
-    // signal past the force-exit arm under load). Same rationale as
-    // `run_signal_test.rs`.
-    let pair_started = Instant::now();
-    let pair = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "kill -INT {pid}; kill -TERM {pid}",
-            pid = child.id()
-        ))
-        .status()
-        .expect("failed to spawn signal pair");
-    assert!(pair.success(), "signal pair returned non-zero: {pair:?}");
+    let entered = wait_for_marker(&mut child, &drained.markers(), PIPELINE_ENTRY_MARKER, WAIT);
+    assert!(
+        entered,
+        "camel job never reached the pipeline-entry seam marker;\n{}",
+        drained.captured()
+    );
+
+    let int_sent = Instant::now();
+    send_signal(&child, "-INT");
+
+    let stopping = wait_for_marker(
+        &mut child,
+        &drained.markers(),
+        STOPPING_CONTEXT_MARKER,
+        WAIT,
+    );
+    assert!(
+        stopping,
+        "camel job never reached the stopping-context INFO line;\n{}",
+        drained.captured()
+    );
+
+    send_signal(&child, "-TERM");
 
     let code = wait_exit_code_bounded(&mut child, WAIT);
-    let elapsed = pair_started.elapsed();
+    let elapsed = int_sent.elapsed();
     let output = drained.finish();
     assert_eq!(
         code, 1,
