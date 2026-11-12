@@ -196,6 +196,7 @@ fn collect_from_steps(steps: &[BuilderStep], calls: &mut Vec<(String, String)>) 
             | BuilderStep::DeclarativeRemoveHeader { .. }
             | BuilderStep::DeclarativeSetProperty { .. }
             | BuilderStep::DeclarativeSetBody { .. }
+            | BuilderStep::DeclarativeThrow { .. }
             | BuilderStep::DeclarativeScript { .. }
             | BuilderStep::DeclarativeFunction { .. }
             | BuilderStep::DeclarativeDynamicRouter { .. }

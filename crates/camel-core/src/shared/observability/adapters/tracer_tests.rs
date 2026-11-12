@@ -1504,3 +1504,92 @@ async fn readiness_failure_does_not_record_step_duration() {
         "camel_exchange_duration_seconds stays call-time only, got {calls:?}"
     );
 }
+
+/// A `Business` failure is observability-neutral for the error family: it
+/// skips `increment_errors` exactly like `CircuitOpen` (the breaker treats
+/// it as a success), while non-business failures keep counting.
+#[tokio::test]
+async fn tracer_skips_error_increment_for_business() {
+    let _spans = test_spans().await;
+
+    let business_collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let business = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async {
+            Err(CamelError::Business {
+                code: "ORDER_NOT_FOUND".into(),
+                kind: "not-found".into(),
+                message: "ORDER_NOT_FOUND".into(),
+                data: None,
+            })
+        })
+    });
+    let mut traced = TracingProcessor::new(
+        business,
+        "r".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&business_collector) as Arc<dyn MetricsCollector>),
+        None,
+        None,
+        SpanKindHint::Internal,
+    );
+    let outcome = traced
+        .ready()
+        .await
+        .expect("traced business rejecter readies")
+        .call(Exchange::new(Message::new("x")))
+        .await;
+    assert!(
+        matches!(outcome, Err(CamelError::Business { .. })),
+        "call must surface Business unchanged, got {outcome:?}"
+    );
+    let business_calls = business_collector.snapshot();
+    assert_eq!(
+        business_calls
+            .iter()
+            .filter(|c| c.starts_with("increment_exchanges"))
+            .count(),
+        1,
+        "the exchange itself must still be counted, got {business_calls:?}"
+    );
+    assert_eq!(
+        business_calls
+            .iter()
+            .filter(|c| c.starts_with("increment_errors"))
+            .count(),
+        0,
+        "business failures must skip increment_errors, got {business_calls:?}"
+    );
+
+    // Non-business failures keep the existing error increment.
+    let io_collector = Arc::new(RecordingMetrics {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let io = BoxProcessor::from_fn(|_ex: Exchange| {
+        Box::pin(async { Err(CamelError::Io("boom".into())) })
+    });
+    let mut traced = TracingProcessor::new(
+        io,
+        "r".to_string(),
+        0,
+        DetailLevel::Minimal,
+        Some(Arc::clone(&io_collector) as Arc<dyn MetricsCollector>),
+        None,
+        None,
+        SpanKindHint::Internal,
+    );
+    let outcome = traced
+        .ready()
+        .await
+        .expect("traced io rejecter readies")
+        .call(Exchange::new(Message::new("x")))
+        .await;
+    assert!(matches!(outcome, Err(CamelError::Io(_))));
+    let io_calls = io_collector.snapshot();
+    assert!(
+        io_calls.iter().any(|c| c == "increment_errors:r:io"),
+        "non-business failures must still increment errors, got {io_calls:?}"
+    );
+}

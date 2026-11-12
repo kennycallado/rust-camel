@@ -236,24 +236,20 @@ impl StepCompiler for ControlFlowCompiler {
 
                 let mut catch_clauses = Vec::with_capacity(catch.len());
                 for c in catch {
-                    let matcher = match (c.exception, c.when) {
-                        (Some(names), None) => CatchMatcher::ByVariant(names),
-                        (None, Some(expr)) => {
+                    let matcher = match (c.exception, c.when, c.code, c.business_kind) {
+                        (Some(names), None, None, None) => CatchMatcher::ByVariant(names),
+                        (None, Some(expr), None, None) => {
                             let meta =
                                 eval_meta(ctx, &expr.language, "catch when", step_index, None);
                             let predicate = compile_filter_predicate(ctx.languages, &expr, meta)?;
                             CatchMatcher::Predicate(predicate)
                         }
-                        (Some(_), Some(_)) => {
+                        (None, None, Some(code), None) => CatchMatcher::ByCode(code),
+                        (None, None, None, Some(kind)) => CatchMatcher::ByBusinessKind(kind),
+                        _ => {
                             return Err(CamelError::Config(
-                                "doTry catch clause must specify either `exception` or \
-                                 `when`, not both"
-                                    .into(),
-                            ));
-                        }
-                        (None, None) => {
-                            return Err(CamelError::Config(
-                                "doTry catch clause must specify either `exception` or `when`"
+                                "doTry catch clause must specify exactly one main matcher: \
+                                 `exception`, `when`, `code`, or `business_kind`"
                                     .into(),
                             ));
                         }

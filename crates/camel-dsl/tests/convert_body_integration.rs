@@ -164,6 +164,7 @@ routes:
 #[test]
 fn declarative_step_convert_body_to_json_compiles_correctly() {
     let route = DeclarativeRoute {
+        http_error_mapping: None,
         from: "direct:start".into(),
         route_id: "test-convert".into(),
         auto_startup: true,
@@ -197,6 +198,7 @@ fn declarative_step_convert_body_to_all_types_compile() {
         (BodyTypeDef::Empty, "empty"),
     ] {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: format!("test-convert-{}", name),
             auto_startup: true,

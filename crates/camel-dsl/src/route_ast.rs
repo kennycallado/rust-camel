@@ -236,6 +236,18 @@ pub struct RouteDslRoute {
     pub on_complete: Option<String>,
     #[serde(default)]
     pub on_failure: Option<String>,
+    /// Programmatic-only carriage for the REST lowering seam
+    /// (business-error-model Task 2.2): the route-level business error to
+    /// HTTP status mapping that rest lowering sets on EVERY lowered route
+    /// (`Some(_)` with empty tables when the block declares none, review C1).
+    /// Not authorable in YAML — plain-route authoring is deferred to the
+    /// phase-3 errors catalog (owner decision Q5) and `deny_unknown_fields`
+    /// rejects the key on route documents. Schema-skipped like the
+    /// `UnmarshalStep::request_borne` internal-field pattern.
+    #[serde(skip_deserializing)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    #[cfg_attr(feature = "schema", ts(skip))]
+    pub http_error_mapping: Option<camel_api::HttpErrorMapping>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -401,6 +413,9 @@ pub struct RouteDslErrorHandler {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RouteDslOnException {
+    /// Restricts the clause to a business error whose `code` equals this value.
+    #[serde(default)]
+    pub code: Option<String>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
@@ -561,6 +576,8 @@ pub struct LoopWhileExpr {
 pub enum RouteDslStep {
     To(ToStep),
     SetHeader(SetHeaderStep),
+    /// Authored `throw` step.
+    Throw(ThrowStep),
     #[serde(skip_deserializing)]
     #[cfg_attr(feature = "schema", schemars(skip))]
     #[cfg_attr(feature = "schema", ts(skip))]
@@ -651,6 +668,36 @@ pub struct ToStep {
 #[serde(deny_unknown_fields)]
 pub struct SetHeaderStep {
     pub set_header: SetHeaderData,
+}
+
+/// Authored `throw` step. `code` and `kind` are literal config; `message` is
+/// a Simple template; `data` is an object whose string leaves are Simple
+/// templates interpolated at runtime.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ThrowStep {
+    /// The committed `throw` payload.
+    pub throw: ThrowData,
+}
+
+/// Authored `throw` payload: business `code`, `kind`, message, and diagnostics.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ThrowData {
+    /// Stable machine-readable business code. Required and non-blank.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Optional business kind; defaults to `failed`. Non-blank when present.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Optional Simple message template; defaults to the `code` value.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Optional object of diagnostics; string leaves are Simple templates.
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 /// REST strict content-negotiation gate descriptor. Constructed by REST
@@ -923,6 +970,10 @@ pub struct DoTryData {
 pub struct CatchClauseData {
     pub exception: Option<Vec<String>>,
     pub when: Option<String>,
+    /// Match a `CamelError::Business` by its `code` payload.
+    pub code: Option<String>,
+    /// Match a `CamelError::Business` by its `kind` payload.
+    pub business_kind: Option<String>,
     pub on_when: Option<String>,
     #[serde(default = "default_handled_disposition")]
     pub disposition: camel_api::error_handler::ExceptionDisposition,
@@ -1609,9 +1660,37 @@ pub struct RouteDslRest {
     /// policy (Public under the kernel gate).
     #[serde(default)]
     pub security_policy: Option<RouteDslSecurityPolicy>,
+    /// Route-level business error to HTTP status mapping for EVERY operation
+    /// in this block (business-error-model Task 2.2). The table mirrors
+    /// [`camel_api::HttpErrorMapping`] with serde maps; lowering validates it
+    /// with the same load-time rules as the camel-api type (non-blank keys,
+    /// 400-599 values) and copies it onto each lowered route's
+    /// `http_error_mapping` seam field. This rest block is the ONLY
+    /// document-level authoring path — plain-route YAML authoring is deferred
+    /// to the phase-3 errors catalog (owner decision Q5), and
+    /// `deny_unknown_fields` keeps the key rejected on route documents.
+    #[serde(default)]
+    pub error_mapping: Option<HttpErrorMappingTable>,
     /// Operations for this block, each carrying its own HTTP method.
     #[serde(default)]
     pub operations: Vec<RouteDslRestOperation>,
+}
+
+/// The DSL-side serde surface of a business error to HTTP status table
+/// (review m2): mirrors [`camel_api::HttpErrorMapping`]'s `{codes, kinds}`
+/// with plain serde maps so the rest block stays schema/ts-derived. Both
+/// tables are exact, case-sensitive string keys to client/server statuses;
+/// load-time validation rejects blank keys and values outside `400..=599`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HttpErrorMappingTable {
+    /// Exact business error code to HTTP status.
+    #[serde(default)]
+    pub codes: std::collections::BTreeMap<String, u16>,
+    /// Exact business error kind to HTTP status.
+    #[serde(default)]
+    pub kinds: std::collections::BTreeMap<String, u16>,
 }
 
 /// Binding mode for a REST operation: automatic structured binding (`json`,

@@ -2,4 +2,8 @@
 import type { RouteDslRedeliveryPolicy } from "./RouteDslRedeliveryPolicy";
 import type { RouteDslStep } from "./RouteDslStep";
 
-export type RouteDslOnException = { kind: string | null, message_contains: string | null, retry: RouteDslRedeliveryPolicy | null, steps: Array<RouteDslStep>, handled: boolean | null, continued: boolean | null, handled_by: string | null, };
+export type RouteDslOnException = { 
+/**
+ * Restricts the clause to a business error whose `code` equals this value.
+ */
+code: string | null, kind: string | null, message_contains: string | null, retry: RouteDslRedeliveryPolicy | null, steps: Array<RouteDslStep>, handled: boolean | null, continued: boolean | null, handled_by: string | null, };

@@ -6,8 +6,9 @@ use crate::media::{
     is_form_media_type, is_json_media_type, is_valid_media_declaration, is_xml_media_type,
 };
 use crate::route_ast::{
-    ContentNegotiationStep, MarshalStep, RouteDslRest, RouteDslRestBinding, RouteDslRestOperation,
-    RouteDslRoute, RouteDslStep, SetHeaderData, SetHeaderStep, ToStep, UnmarshalStep,
+    ContentNegotiationStep, HttpErrorMappingTable, MarshalStep, RouteDslRest, RouteDslRestBinding,
+    RouteDslRestOperation, RouteDslRoute, RouteDslStep, SetHeaderData, SetHeaderStep, ToStep,
+    UnmarshalStep,
 };
 
 /// Lower ALL REST blocks in a document into route entries, enforcing the
@@ -133,7 +134,35 @@ fn validate_rest_block(rest: &RouteDslRest) -> Result<(), CamelError> {
             rest.host, rest.port, rest.path
         )));
     }
+    if let Some(table) = &rest.error_mapping {
+        let mapping = camel_api::HttpErrorMapping {
+            codes: table.codes.clone(),
+            kinds: table.kinds.clone(),
+        };
+        mapping.validate().map_err(|e| {
+            CamelError::RouteError(format!(
+                "rest block {}:{}{}: {e}",
+                rest.host, rest.port, rest.path
+            ))
+        })?;
+    }
     Ok(())
+}
+
+/// Convert a rest block's `error_mapping` table into the camel-api mapping the
+/// lowered routes carry on their `http_error_mapping` seam field. An absent
+/// block table lowers to an EMPTY mapping — rest routes are ALWAYS seam routes
+/// (`Some(_)`, review C1) so the business dead-letter bypass and the HTTP
+/// finalizer's built-in default kind map apply uniformly. Validation already
+/// ran in [`validate_rest_block`]; this conversion keeps the same typed rules.
+fn seam_error_mapping(table: Option<&HttpErrorMappingTable>) -> camel_api::HttpErrorMapping {
+    match table {
+        Some(table) => camel_api::HttpErrorMapping {
+            codes: table.codes.clone(),
+            kinds: table.kinds.clone(),
+        },
+        None => camel_api::HttpErrorMapping::new(),
+    }
 }
 
 /// Validate a path template: reject empty `{}` param segments and duplicate
@@ -491,6 +520,10 @@ fn lower_operation(
         security_policy: rest.security_policy.clone(),
         on_complete: None,
         on_failure: None,
+        // Business-error-model Task 2.2 (review C1): EVERY lowered rest route
+        // is a seam route — `Some(_)` even when the block declares no table —
+        // while `error_handler` stays `None` exactly as before.
+        http_error_mapping: Some(seam_error_mapping(rest.error_mapping.as_ref())),
     })
 }
 
@@ -586,6 +619,7 @@ mod tests {
             binding: None,
         }];
         RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
@@ -711,6 +745,7 @@ mod tests {
         // user SetHeader in the middle of the step sequence. The default
         // status if-absent step must still come last.
         let rest = RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
@@ -852,6 +887,7 @@ mod tests {
             binding: None,
         }];
         RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: base.to_string(),
@@ -976,6 +1012,7 @@ mod tests {
     #[test]
     fn lower_rejects_empty_operations() {
         let rest = RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/users".to_string(),
@@ -1162,6 +1199,7 @@ mod tests {
     #[test]
     fn within_block_identical_verb_path_is_duplicate() {
         let rest = RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
@@ -1193,6 +1231,7 @@ mod tests {
     #[test]
     fn within_block_same_shape_distinct_param_is_ambiguous() {
         let rest = RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
@@ -1224,6 +1263,7 @@ mod tests {
     #[test]
     fn empty_operations_list_is_rejected() {
         let rest = RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),
@@ -1239,6 +1279,7 @@ mod tests {
     #[test]
     fn multiple_ops_same_verb_preserve_declaration_order() {
         let rest = RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: "/api".to_string(),

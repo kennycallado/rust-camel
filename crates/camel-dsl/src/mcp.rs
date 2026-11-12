@@ -416,6 +416,7 @@ fn consumer_route(
         security_policy,
         on_complete: None,
         on_failure: None,
+        http_error_mapping: None,
     }
 }
 
@@ -612,6 +613,7 @@ mcp:
             security_policy: None,
             on_complete: None,
             on_failure: None,
+            http_error_mapping: None,
         }
     }
 

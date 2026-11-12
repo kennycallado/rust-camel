@@ -18,6 +18,13 @@ pub(crate) struct CompiledRoute {
     /// (`http:`, `ws:`, `grpc:`, `mcp:`) always hold one — compilation
     /// failure aborts staging instead of leaving `None`.
     pub(crate) security_plan: Option<RouteSecurityPlan>,
+    /// Route-level business error to HTTP status mapping
+    /// ([`camel_api::HttpErrorMapping`], business-error-model Task 2.2).
+    /// Immutable snapshot captured at staging; the controller reads it on
+    /// BOTH the start and the resume registration paths so
+    /// `suspend_route → resume_route` preserves the mapping. `Some(_)` marks
+    /// a seam route (rest lowering always sets it — review C1).
+    pub(crate) http_error_mapping: Option<camel_api::HttpErrorMapping>,
 }
 
 #[cfg(test)]
@@ -31,9 +38,11 @@ mod tests {
             security_authenticator: None,
             provider_registry: None,
             security_plan: None,
+            http_error_mapping: None,
         };
         assert!(compiled.security_policy.is_none());
         assert!(compiled.security_authenticator.is_none());
         assert!(compiled.security_plan.is_none());
+        assert!(compiled.http_error_mapping.is_none());
     }
 }

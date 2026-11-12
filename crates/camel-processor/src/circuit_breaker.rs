@@ -280,7 +280,11 @@ where
             let result = inner.call(exchange).await;
 
             match &result {
-                Ok(_) => {
+                // A business error is a success for the breaker (owner
+                // decision Q4): it neither counts toward the failure
+                // threshold nor reopens a half-open probe. The result is
+                // still returned unchanged to the caller.
+                Ok(_) | Err(CamelError::Business { .. }) => {
                     let s = state.state.load(Ordering::Acquire);
                     if s == STATE_CLOSED {
                         // Step 1 (bd rc-bnsxr) fast path: no RMW when already clean.
@@ -548,7 +552,9 @@ impl CircuitBreakerGate {
 
     pub fn after_result(&self, result: &Result<Exchange, CamelError>) {
         match result {
-            Ok(_) => {
+            // Breaker-neutral business failure (owner decision Q4): record
+            // it as a success in every state.
+            Ok(_) | Err(CamelError::Business { .. }) => {
                 let s = self.state.state.load(Ordering::Acquire);
                 if s == STATE_CLOSED {
                     // Step 1 (bd rc-bnsxr) fast path: no RMW when already clean.
@@ -715,6 +721,21 @@ mod tests {
         BoxProcessor::from_fn(|_ex| {
             Box::pin(async { Err(CamelError::ProcessorError("boom".into())) })
         })
+    }
+
+    fn business_error() -> CamelError {
+        CamelError::Business {
+            code: "BIZ".into(),
+            kind: "failed".into(),
+            message: "BIZ".into(),
+            data: None,
+        }
+    }
+
+    /// Always fails with a `Business` error (owner decision Q4: a business
+    /// failure is breaker-neutral — it counts as a success).
+    fn business_processor() -> BoxProcessor {
+        BoxProcessor::from_fn(|_ex| Box::pin(async { Err(business_error()) }))
     }
 
     fn fail_n_times(n: u32) -> BoxProcessor {
@@ -1527,6 +1548,133 @@ mod tests {
                 consecutive_failures: 0
             },
             "a successful probe must close the circuit and reset the counter"
+        );
+    }
+
+    // ── Business errors are breaker success (business-error-model 1.6) ─────
+
+    #[tokio::test]
+    async fn breaker_service_records_success() {
+        let config = CircuitBreakerConfig::new().failure_threshold(1);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
+        let mut svc = layer.layer(business_processor());
+
+        let result = svc.ready().await.unwrap().call(make_exchange()).await;
+        assert!(
+            matches!(result, Err(CamelError::Business { .. })),
+            "the business error must still surface unchanged, got {result:?}"
+        );
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a business failure must be recorded as a success"
+        );
+
+        // Threshold 1: a second business failure must still not open it.
+        let second = svc.ready().await.unwrap().call(make_exchange()).await;
+        assert!(matches!(second, Err(CamelError::Business { .. })));
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            }
+        );
+    }
+
+    #[test]
+    fn breaker_gate_records_success() {
+        let gate = gate_with(CircuitBreakerConfig::new().failure_threshold(1));
+        let result: Result<Exchange, CamelError> = Err(business_error());
+        gate.after_result(&result);
+
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a business failure must be recorded as a success"
+        );
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "threshold-1 breaker must stay closed after a business failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn half_open_service_closes_on_business() {
+        let config = CircuitBreakerConfig::new()
+            .failure_threshold(1)
+            .open_duration(Duration::ZERO);
+        let layer = CircuitBreakerLayer::new(config, Arc::from("test"), None);
+        let calls = Arc::new(AtomicU32::new(0));
+        let cc = Arc::clone(&calls);
+        let inner = BoxProcessor::from_fn(move |ex| {
+            let cc = Arc::clone(&cc);
+            Box::pin(async move {
+                if cc.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(CamelError::ProcessorError("system".into()))
+                } else {
+                    let _ = ex;
+                    Err(business_error())
+                }
+            })
+        });
+        let mut svc = layer.layer(inner);
+
+        // System failure opens the breaker (threshold 1).
+        let first = svc.ready().await.unwrap().call(make_exchange()).await;
+        assert!(first.is_err());
+        assert_eq!(observe(&svc.state), ObservedState::Open);
+
+        // Zero open_duration: the next ready transitions to half-open and
+        // admits this call as the probe; the probe's business error is a
+        // success and closes the breaker.
+        let probe = svc.ready().await.unwrap().call(make_exchange()).await;
+        assert!(
+            matches!(probe, Err(CamelError::Business { .. })),
+            "the probe must surface its business error unchanged, got {probe:?}"
+        );
+        assert_eq!(
+            observe(&svc.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a half-open probe ending in a business error must close the breaker"
+        );
+    }
+
+    #[test]
+    fn half_open_gate_closes_on_business() {
+        let gate = gate_with(
+            CircuitBreakerConfig::new()
+                .failure_threshold(1)
+                .open_duration(Duration::ZERO),
+        );
+        let system: Result<Exchange, CamelError> = Err(CamelError::ProcessorError("system".into()));
+        gate.after_result(&system);
+        assert_eq!(observe(&gate.state), ObservedState::Open);
+
+        assert!(
+            matches!(gate.before_call(), CircuitBreakerDecision::Allow),
+            "zero open_duration must admit the half-open probe"
+        );
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::HalfOpen {
+                probe_admitted: true
+            }
+        );
+
+        let probe: Result<Exchange, CamelError> = Err(business_error());
+        gate.after_result(&probe);
+        assert_eq!(
+            observe(&gate.state),
+            ObservedState::Closed {
+                consecutive_failures: 0
+            },
+            "a half-open probe ending in a business error must close the breaker"
         );
     }
 }

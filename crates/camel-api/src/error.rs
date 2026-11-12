@@ -255,6 +255,45 @@ impl std::error::Error for OpaqueErrorSource {
     }
 }
 
+/// Structured diagnostics payload whose `Debug` never prints its contents.
+///
+/// Wraps a [`serde_json::Value`] while redacting it from every `Debug`
+/// rendering, so accidental structured logging of a [`CamelError::Business`]
+/// cannot leak exchange data. Structural comparison (`PartialEq`/`Eq`) and
+/// cloning still go through the wrapped value; the payload is reachable only
+/// through the explicit [`RedactedJson::as_value`] accessor.
+///
+/// # Examples
+///
+/// ```
+/// use camel_api::RedactedJson;
+///
+/// let data = RedactedJson::new(serde_json::json!({"secret": "hunter2"}));
+/// assert_eq!(format!("{data:?}"), "[redacted]");
+/// assert_eq!(data.as_value()["secret"], "hunter2");
+/// ```
+#[derive(Clone, PartialEq, Eq)]
+pub struct RedactedJson(serde_json::Value);
+
+impl RedactedJson {
+    /// Wrap a JSON value as redacted diagnostics.
+    pub fn new(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the wrapped value for internal consumers (Simple evaluator,
+    /// HTTP error mapping), which must not render it through `Debug`.
+    pub fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RedactedJson {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
 /// Core error type for the Camel framework.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -392,6 +431,33 @@ pub enum CamelError {
         #[source]
         cause: Option<Box<CamelError>>,
     },
+
+    /// Business (domain) failure raised by the `throw` step or a component that
+    /// classifies a failure as a client/domain fault.
+    ///
+    /// # Constructor contract
+    ///
+    /// - `code` and `kind` must be non-blank. Validation happens at the
+    ///   builders' boundaries (route load for the `throw` step); the variant
+    ///   itself makes no runtime guarantee.
+    /// - `message` is log-and-diagnostics only: it never reaches a client
+    ///   through any mapping, disposition, or configuration, and it is
+    ///   deliberately absent from the `Display` rendering.
+    /// - `data` holds optional structured diagnostics as a [`RedactedJson`]:
+    ///   its `Debug` prints `[redacted]`, so accidental structured logging
+    ///   cannot leak the payload.
+    #[error("business error {code} ({kind})")]
+    Business {
+        /// Stable machine-readable error code (e.g. `ORDER_NOT_FOUND`).
+        code: String,
+        /// Business kind used by `on_exceptions` / catch matchers (default
+        /// `failed` at the `throw` boundary).
+        kind: String,
+        /// Human-readable log-only summary; never sent to a client.
+        message: String,
+        /// Redacted structured diagnostics; never rendered by `Debug`.
+        data: Option<RedactedJson>,
+    },
 }
 
 /// Manual `Clone` impl: every arm clones its fields normally, except
@@ -469,6 +535,17 @@ impl Clone for CamelError {
                 conversion: conversion.clone(),
                 cause: cause.clone(),
             },
+            Self::Business {
+                code,
+                kind,
+                message,
+                data,
+            } => Self::Business {
+                code: code.clone(),
+                kind: kind.clone(),
+                message: message.clone(),
+                data: data.clone(),
+            },
         }
     }
 }
@@ -508,6 +585,7 @@ impl CamelError {
             Self::TemplateReload(_) => "template",
             Self::UnsupportedMediaType { .. } => "unsupported_media_type",
             Self::NotAcceptable { .. } => "not_acceptable",
+            Self::Business { .. } => "business",
             _ => "unknown",
         }
     }
@@ -552,6 +630,7 @@ impl CamelError {
             Self::UnsupportedMediaType { .. } => "UnsupportedMediaType",
             Self::NotAcceptable { .. } => "NotAcceptable",
             Self::ExpressionFailed { .. } => "ExpressionFailed",
+            Self::Business { .. } => "Business",
         }
     }
 }
@@ -1242,7 +1321,7 @@ mod tests {
 mod variant_name_tests {
     use super::{
         CamelError, ConfigValidationError, EndpointUriError, ExpressionErrorClass,
-        OpaqueErrorSource,
+        OpaqueErrorSource, RedactedJson,
     };
     use std::sync::Arc;
 
@@ -1352,11 +1431,20 @@ mod variant_name_tests {
                 CamelError::AuthProviderUnavailable("x".into()),
                 "ProcessorError",
             ),
+            (
+                CamelError::Business {
+                    code: "ORDER_NOT_FOUND".into(),
+                    kind: "not-found".into(),
+                    message: "m".into(),
+                    data: None,
+                },
+                "Business",
+            ),
         ];
 
         assert_eq!(
             cases.len(),
-            27,
+            28,
             "variant_name_covers_all_variants must cover every CamelError variant; \
              extend this table and the camel-dsl classification guard"
         );
@@ -1369,6 +1457,71 @@ mod variant_name_tests {
                 err
             );
         }
+    }
+
+    #[test]
+    fn classify_and_variant_name_business() {
+        let err = CamelError::Business {
+            code: "ORDER_NOT_FOUND".to_string(),
+            kind: "not-found".to_string(),
+            message: "m".to_string(),
+            data: None,
+        };
+
+        assert_eq!(err.classify(), "business");
+        assert_eq!(err.variant_name(), "Business");
+    }
+
+    #[test]
+    fn debug_on_data_newtype_redacts() {
+        let data = RedactedJson::new(serde_json::json!({"secret": "hunter2"}));
+        let err = CamelError::Business {
+            code: "ORDER_NOT_FOUND".to_string(),
+            kind: "not-found".to_string(),
+            message: "m".to_string(),
+            data: Some(data.clone()),
+        };
+
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("[redacted]"),
+            "missing redaction marker: {rendered}"
+        );
+        assert!(!rendered.contains("hunter2"), "data leaked: {rendered}");
+        assert_eq!(format!("{data:?}"), "[redacted]");
+        // Redaction must not weaken structural equality of the payload.
+        assert_eq!(
+            data,
+            RedactedJson::new(serde_json::json!({"secret": "hunter2"}))
+        );
+    }
+
+    #[test]
+    fn display_includes_code_and_kind_but_redacts_message_and_data() {
+        let err = CamelError::Business {
+            code: "ORDER_NOT_FOUND".to_string(),
+            kind: "not-found".to_string(),
+            message: "secret-message".to_string(),
+            data: Some(RedactedJson::new(serde_json::json!({"secret": "hunter2"}))),
+        };
+
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("ORDER_NOT_FOUND"),
+            "Display must include the code: {rendered}"
+        );
+        assert!(
+            rendered.contains("not-found"),
+            "Display must include the kind: {rendered}"
+        );
+        assert!(
+            !rendered.contains("secret-message"),
+            "Display leaked the log-only message: {rendered}"
+        );
+        assert!(
+            !rendered.contains("hunter2"),
+            "Display leaked the data payload: {rendered}"
+        );
     }
 
     #[test]

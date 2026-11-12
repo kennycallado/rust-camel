@@ -45,7 +45,7 @@ use crate::model::{
     RecipientListStepDef, RemoveHeaderStepDef, RoutingSlipStepDef, SamplingStepDef, ScriptStepDef,
     SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef, SortStepDef,
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, ThrottleStepDef, ThrottleStrategyDef,
-    ToStepDef, ValueSourceDef, WireTapStepDef,
+    ThrowStepDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
 fn require_authenticator(
@@ -271,6 +271,13 @@ pub fn compile_declarative_route_with_stream_cache_threshold(
         definition = definition.with_error_handler(compile_error_handler(error_handler)?);
     }
 
+    // Business-error-model Task 2.2: the rest-lowering seam carriage rides
+    // the compiled definition; camel-core installs it on the consumer
+    // registration (ConsumerContext) at start AND resume.
+    if let Some(mapping) = route.http_error_mapping {
+        definition = definition.with_http_error_mapping(mapping);
+    }
+
     if let Some(mut circuit_breaker) = route.circuit_breaker {
         // Fallback steps stay UNRESOLVED (Vec<BuilderStep>) on the sidecar —
         // camel-core compiles them at route-compile time (registry monopoly).
@@ -332,6 +339,15 @@ pub fn compile_declarative_route_to_canonical(
             "routes with security_policy cannot use the canonical/hot-reload path (not yet supported)".into(),
         ));
     }
+    if route.http_error_mapping.is_some() {
+        // Business-error-model Task 2.2 (review I2): the mapping is never
+        // dropped silently on the canonical/hot-reload path.
+        if !allow_loss {
+            return Err(CamelError::RouteError(
+                "routes with http_error_mapping cannot use the canonical/hot-reload path (not yet supported)".into(),
+            ));
+        }
+    }
     if !allow_loss {
         if route.error_handler.is_some() {
             return Err(CamelError::RouteError(
@@ -357,6 +373,13 @@ pub fn compile_declarative_route_to_canonical(
         if route.unit_of_work.is_some() {
             report.dropped_fields.push(CanonicalFieldLoss {
                 field: "unit_of_work",
+                reason: "not supported by CanonicalRouteSpec v2".to_string(),
+                target_version: camel_api::CANONICAL_CONTRACT_VERSION,
+            });
+        }
+        if route.http_error_mapping.is_some() {
+            report.dropped_fields.push(CanonicalFieldLoss {
+                field: "http_error_mapping",
                 reason: "not supported by CanonicalRouteSpec v2".to_string(),
                 target_version: camel_api::CANONICAL_CONTRACT_VERSION,
             });
@@ -770,9 +793,10 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
 
     if let Some(on_exceptions) = def.on_exceptions {
         for clause in on_exceptions {
-            if clause.kind.is_none() && clause.message_contains.is_none() {
+            if clause.kind.is_none() && clause.message_contains.is_none() && clause.code.is_none() {
                 return Err(CamelError::Config(
-                    "error_handler.on_exceptions clause must set `kind` or `message_contains`"
+                    "error_handler.on_exceptions clause must set `code`, `kind` or \
+                     `message_contains`"
                         .into(),
                 ));
             }
@@ -781,6 +805,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
                 ensure_known_exception_kind(kind)?;
             }
 
+            let code = clause.code;
             let kind = clause.kind;
             let message_contains = clause.message_contains;
             let handled = clause.handled.unwrap_or(false);
@@ -793,13 +818,16 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
             }
 
             let mut builder = config.on_exception(move |e| {
+                let code_ok = code.as_deref().is_none_or(
+                    |expected| matches!(e, CamelError::Business { code, .. } if code == expected),
+                );
                 let kind_ok = kind
                     .as_deref()
                     .is_none_or(|expected| exception_kind_matches(expected, e));
                 let message_ok = message_contains
                     .as_ref()
                     .is_none_or(|needle| e.to_string().contains(needle));
-                kind_ok && message_ok
+                code_ok && kind_ok && message_ok
             });
 
             if let Some(retry) = clause.retry {
@@ -944,6 +972,7 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "ProcessorErrorWithSource",
         "ValidationError",
         "ExpressionFailed",
+        "Business",
     ]
 }
 
@@ -1006,6 +1035,10 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         // Language-expression evaluation failure (language-value-boundary):
         // raised in-pipeline by carriers, so catch/on_exceptions can match it.
         "ExpressionFailed" => matches!(err, CamelError::ExpressionFailed { .. }),
+        // Business (domain) failures are raised in-pipeline by the `throw` step
+        // and classified components, so they are matchable under their own
+        // kind value.
+        "Business" => matches!(err, CamelError::Business { .. }),
         _ => false,
     }
 }
@@ -1082,6 +1115,12 @@ fn compile_declarative_step_with_threshold(
         DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef { key, value }) => {
             compile_set_header_if_absent_step(key, value)
         }
+        DeclarativeStep::Throw(ThrowStepDef {
+            code,
+            kind,
+            message,
+            data,
+        }) => compile_throw_step(code, kind, message, data),
         DeclarativeStep::ContentNegotiation(def) => {
             let contract = crate::media::parse_contract(&def.consumes, &def.produces);
             let ct_enabled = def.check_content_type;
@@ -1497,6 +1536,8 @@ fn compile_declarative_step_with_threshold(
                     Ok(DoTryCatchClauseBuilder {
                         exception: c.exception,
                         when: c.when,
+                        code: c.code,
+                        business_kind: c.business_kind,
                         on_when: c.on_when,
                         disposition: c.disposition,
                         steps: clause_steps,
@@ -1832,6 +1873,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::Log(_) => "log",
         DeclarativeStep::SetHeader(_) => "set_header",
         DeclarativeStep::SetHeaderIfAbsent(_) => "set_header_if_absent",
+        DeclarativeStep::Throw(_) => "throw",
         DeclarativeStep::ContentNegotiation(_) => "content_negotiation",
         DeclarativeStep::RemoveHeader(_) => "remove_header",
         DeclarativeStep::SetProperty(_) => "set_property",
@@ -2034,6 +2076,20 @@ fn compile_set_header_step(key: String, value: ValueSourceDef) -> Result<Builder
     Ok(BuilderStep::DeclarativeSetHeader { key, value })
 }
 
+fn compile_throw_step(
+    code: String,
+    kind: Option<String>,
+    message: Option<ValueSourceDef>,
+    data: Option<serde_json::Value>,
+) -> Result<BuilderStep, CamelError> {
+    Ok(BuilderStep::DeclarativeThrow {
+        code,
+        kind,
+        message,
+        data,
+    })
+}
+
 fn compile_set_header_if_absent_step(
     key: String,
     value: ValueSourceDef,
@@ -2119,6 +2175,25 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
             if key.trim().is_empty() {
                 return Err(CamelError::Config(
                     "set_header_if_absent key must not be empty".to_string(),
+                ));
+            }
+        }
+        DeclarativeStep::Throw(ThrowStepDef {
+            code, kind, data, ..
+        }) => {
+            if code.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "throw code must not be empty".to_string(),
+                ));
+            }
+            if kind.as_deref().is_some_and(|k| k.trim().is_empty()) {
+                return Err(CamelError::Config(
+                    "throw kind must not be empty".to_string(),
+                ));
+            }
+            if data.as_ref().is_some_and(|d| !d.is_object()) {
+                return Err(CamelError::Config(
+                    "throw data must be a JSON object".to_string(),
                 ));
             }
         }
@@ -2430,6 +2505,7 @@ mod tests {
                 DeclarativeOnException {
                     kind: Some("Io".into()),
                     message_contains: None,
+                    code: None,
                     retry: Some(DeclarativeRedeliveryPolicy {
                         max_attempts: 3,
                         initial_delay_ms: 10,
@@ -2445,6 +2521,7 @@ mod tests {
                 DeclarativeOnException {
                     kind: Some("ProcessorError".into()),
                     message_contains: Some("validation".into()),
+                    code: None,
                     retry: Some(DeclarativeRedeliveryPolicy {
                         max_attempts: 1,
                         initial_delay_ms: 5,
@@ -2525,6 +2602,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("Io".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: Some(true),
@@ -2571,6 +2649,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("NotRealKind".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -2593,6 +2672,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: None,
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -2656,9 +2736,19 @@ mod tests {
             "ProcessorErrorWithSource",
             "ValidationError",
             "ExpressionFailed",
+            "Business",
         ];
 
         assert_eq!(supported_exception_kinds(), expected);
+    }
+
+    #[test]
+    fn vocabulary_accepts_business_kind() {
+        let vocab = supported_exception_kinds();
+        assert!(
+            vocab.contains(&"Business"),
+            "Business must be an accepted on_exceptions kind, got: {vocab:?}"
+        );
     }
 
     /// Every `CamelError` variant id. Source of truth: the enum arms in
@@ -2695,6 +2785,7 @@ mod tests {
         "Unauthorized",
         "UnsupportedMediaType",
         "ValidationError",
+        "Business",
     ];
 
     /// Variants raised only at startup fail-fast: they abort route
@@ -2718,7 +2809,7 @@ mod tests {
     fn test_exception_kind_vocabulary_classification_guard() {
         assert_eq!(
             ALL_CAMEL_ERROR_VARIANTS.len(),
-            27,
+            28,
             "ALL_CAMEL_ERROR_VARIANTS must enumerate every CamelError variant"
         );
         assert_eq!(
@@ -2726,8 +2817,8 @@ mod tests {
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            27
-        ); // dupe+omission swap would keep len==27
+            28
+        ); // dupe+omission swap would keep len==28
 
         let vocab = supported_exception_kinds();
 
@@ -2780,6 +2871,32 @@ mod tests {
                 "classification entry '{entry}' is not a CamelError variant"
             );
         }
+    }
+
+    #[test]
+    fn classification_table_pins_business_variant() {
+        // `Business` must be classified in exactly one bucket — the accepted
+        // kind vocabulary — and its representative error must be matchable
+        // under the `Business` kind value so an `on_exceptions` clause can
+        // dispatch it.
+        assert!(
+            ALL_CAMEL_ERROR_VARIANTS.contains(&"Business"),
+            "ALL_CAMEL_ERROR_VARIANTS must enumerate the Business variant"
+        );
+        assert!(supported_exception_kinds().contains(&"Business"));
+        assert!(!STARTUP_UNMATCHABLE_VARIANTS.contains(&"Business"));
+        assert!(!DEFERRED_VARIANTS.contains(&"Business"));
+        assert!(
+            !GROUPED_UNDER_KIND
+                .iter()
+                .any(|(variant, _)| *variant == "Business")
+        );
+
+        let err = sample_error_for_kind("Business");
+        assert!(
+            exception_kind_matches("Business", &err),
+            "Business kind must match its representative error"
+        );
     }
 
     /// Representative [`CamelError`] for one supported exception kind, built
@@ -2836,6 +2953,12 @@ mod tests {
                 position: None,
                 conversion: None,
                 cause: None,
+            },
+            "Business" => CamelError::Business {
+                code: "ORDER_NOT_FOUND".into(),
+                kind: "not-found".into(),
+                message: "m".into(),
+                data: None,
             },
             _ => panic!("no sample error for supported kind '{kind}'"),
         }
@@ -2906,6 +3029,7 @@ mod tests {
                 on_exceptions: Some(vec![DeclarativeOnException {
                     kind: Some(kind.into()),
                     message_contains: None,
+                    code: None,
                     retry: None,
                     steps: vec![],
                     handled: None,
@@ -2946,6 +3070,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("AuthProviderUnavailable".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -2978,6 +3103,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorError".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3007,6 +3133,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("UnsupportedMediaType".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3046,6 +3173,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("NotAcceptable".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3086,6 +3214,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorErrorWithSource".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3126,6 +3255,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorError".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3168,6 +3298,7 @@ mod tests {
                 on_exceptions: Some(vec![DeclarativeOnException {
                     kind: Some(kind.into()),
                     message_contains: None,
+                    code: None,
                     retry: None,
                     steps: vec![],
                     handled: None,
@@ -3206,6 +3337,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("EndpointCreationFailedWithSource".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3240,6 +3372,7 @@ mod tests {
                 DeclarativeOnException {
                     kind: Some("Io".into()),
                     message_contains: Some("validation".into()),
+                    code: None,
                     retry: Some(DeclarativeRedeliveryPolicy {
                         max_attempts: 1,
                         initial_delay_ms: 10,
@@ -3255,6 +3388,7 @@ mod tests {
                 DeclarativeOnException {
                     kind: Some("Io".into()),
                     message_contains: None,
+                    code: None,
                     retry: Some(DeclarativeRedeliveryPolicy {
                         max_attempts: 2,
                         initial_delay_ms: 10,
@@ -3294,6 +3428,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("Io".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: Some(true),
@@ -3317,6 +3452,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("Io".into()),
                 message_contains: None,
+                code: None,
                 retry: Some(DeclarativeRedeliveryPolicy {
                     max_attempts: 2,
                     initial_delay_ms: 10,
@@ -3354,6 +3490,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("Io".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![DeclarativeStep::To(ToStepDef::new("log:out"))],
                 handled: None,
@@ -3385,6 +3522,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: None,
                 message_contains: Some("validation".into()),
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3412,6 +3550,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ConsumerStopping".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3435,6 +3574,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("RouteError".to_string()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![DeclarativeStep::Log(LogStepDef {
                     message: ValueSourceDef::Literal(Value::String("error".to_string())),
@@ -3463,6 +3603,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("RouteError".to_string()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: Some(true),
@@ -3486,6 +3627,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorError".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3509,6 +3651,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorError".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: Some(true),
@@ -3528,6 +3671,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorError".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: Some(true),
@@ -3551,6 +3695,7 @@ mod tests {
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some("ProcessorError".into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -3784,6 +3929,7 @@ rest:
             on_exceptions: Some(vec![DeclarativeOnException {
                 kind: Some(kind.into()),
                 message_contains: None,
+                code: None,
                 retry: None,
                 steps: vec![],
                 handled: None,
@@ -4082,6 +4228,7 @@ rest:
                 on_exceptions: Some(vec![DeclarativeOnException {
                     kind: Some(kind.into()),
                     message_contains: None,
+                    code: None,
                     retry: None,
                     steps: vec![],
                     handled: None,
@@ -4520,6 +4667,7 @@ rest:
                 DeclarativeOnException {
                     kind: Some("*".into()),
                     message_contains: Some("timeout".into()),
+                    code: None,
                     retry: None,
                     steps: vec![],
                     handled: None,
@@ -4529,6 +4677,7 @@ rest:
                 DeclarativeOnException {
                     kind: Some("*".into()),
                     message_contains: None,
+                    code: None,
                     retry: None,
                     steps: vec![],
                     handled: None,
@@ -4558,6 +4707,7 @@ rest:
             dead_letter_channel: None,
             retry: None,
             on_exceptions: Some(vec![DeclarativeOnException {
+                code: None,
                 kind: Some("*".into()),
                 message_contains,
                 retry: None,
@@ -5304,6 +5454,7 @@ rest:
     #[test]
     fn compile_declarative_route_minimal() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test-route".into(),
             auto_startup: true,
@@ -5322,6 +5473,7 @@ rest:
     #[test]
     fn compile_declarative_route_with_error_handler() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test-route".into(),
             auto_startup: true,
@@ -5345,6 +5497,7 @@ rest:
     #[test]
     fn compile_declarative_route_with_circuit_breaker() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test-route".into(),
             auto_startup: false,
@@ -5702,6 +5855,7 @@ rest:
 
     fn make_basic_route(from: &str, steps: Vec<DeclarativeStep>) -> DeclarativeRoute {
         DeclarativeRoute {
+            http_error_mapping: None,
             from: from.into(),
             route_id: "test-route".into(),
             auto_startup: true,
@@ -6192,6 +6346,7 @@ rest:
     #[test]
     fn require_authenticator_error_names_providers() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: true,
@@ -6386,6 +6541,7 @@ rest:
         let auth = test_authenticator("test-user");
         let ctx = SecurityCompileContext::new(Some(auth), None);
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: true,
@@ -6413,6 +6569,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_rejects_security_policy() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: true,
@@ -6443,6 +6600,7 @@ rest:
             (camel_api::StreamSplitFormat::TarGz, "tar.gz"),
         ] {
             let route = DeclarativeRoute {
+                http_error_mapping: None,
                 from: "direct:start".into(),
                 route_id: "tar-canonical".into(),
                 auto_startup: true,
@@ -6490,6 +6648,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_rejects_error_handler() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: true,
@@ -6515,6 +6674,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_rejects_unit_of_work() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: true,
@@ -6538,6 +6698,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_propagates_v2_fields() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: false,
@@ -6565,6 +6726,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_lossy_drops_error_handler() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "direct:start".into(),
             route_id: "test".into(),
             auto_startup: true,
@@ -6665,6 +6827,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_lossy_drops_unit_of_work() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "timer:tick".into(),
             route_id: "r1".into(),
             auto_startup: true,
@@ -6693,6 +6856,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_rejects_unbounded_concurrency() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "timer:tick".into(),
             route_id: "r1".into(),
             auto_startup: true,
@@ -6716,6 +6880,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_lossy_drops_multiple_fields() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "timer:tick".into(),
             route_id: "r1".into(),
             auto_startup: true,
@@ -6747,6 +6912,7 @@ rest:
     #[test]
     fn compile_declarative_route_to_canonical_lossy_drops_unbounded_concurrency() {
         let route = DeclarativeRoute {
+            http_error_mapping: None,
             from: "timer:tick".into(),
             route_id: "r1".into(),
             auto_startup: true,

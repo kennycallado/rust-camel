@@ -163,6 +163,7 @@ fn steps_contain_stream_out(steps: &[BuilderStep]) -> bool {
         | BuilderStep::DeclarativeRemoveHeader { .. }
         | BuilderStep::DeclarativeSetProperty { .. }
         | BuilderStep::DeclarativeSetBody { .. }
+        | BuilderStep::DeclarativeThrow { .. }
         | BuilderStep::DeclarativeScript { .. }
         | BuilderStep::DeclarativeFunction { .. }
         | BuilderStep::DeclarativeDynamicRouter { .. }

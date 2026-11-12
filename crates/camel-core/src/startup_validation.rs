@@ -858,6 +858,8 @@ mod tests {
                 catch: vec![DoTryCatchClauseBuilder {
                     exception: None,
                     when: None,
+                    code: None,
+                    business_kind: None,
                     on_when: None,
                     disposition: camel_api::error_handler::ExceptionDisposition::Propagate,
                     steps: vec![BuilderStep::To("exec:echo".to_string())],

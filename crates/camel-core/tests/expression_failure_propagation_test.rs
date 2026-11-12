@@ -310,6 +310,8 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
             catch: vec![DoTryCatchClauseBuilder {
                 exception: None,
                 when: Some(rhai(PARSE_FLOAT)),
+                code: None,
+                business_kind: None,
                 on_when: None,
                 disposition: camel_api::ExceptionDisposition::Handled,
                 steps: vec![],
@@ -321,6 +323,8 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
             catch: vec![DoTryCatchClauseBuilder {
                 exception: Some(vec!["ProcessorError".to_string()]),
                 when: None,
+                code: None,
+                business_kind: None,
                 on_when: Some(rhai(PARSE_FLOAT)),
                 disposition: camel_api::ExceptionDisposition::Handled,
                 steps: vec![],
@@ -553,6 +557,8 @@ async fn assert_do_try_visible(key: &str) {
             catch: vec![DoTryCatchClauseBuilder {
                 exception: Some(vec!["ExpressionFailed".to_string()]),
                 when: None,
+                code: None,
+                business_kind: None,
                 on_when: None,
                 disposition: camel_api::ExceptionDisposition::Handled,
                 steps: vec![BuilderStep::To("mock:caught".to_string())],
@@ -869,6 +875,8 @@ async fn catch_when_error_chains_original() {
         catch: vec![DoTryCatchClauseBuilder {
             exception: None,
             when: Some(rhai(PARSE_FLOAT)),
+            code: None,
+            business_kind: None,
             on_when: None,
             disposition: camel_api::ExceptionDisposition::Handled,
             steps: vec![],
@@ -901,6 +909,8 @@ async fn catch_on_when_error_chains_original() {
         catch: vec![DoTryCatchClauseBuilder {
             exception: Some(vec!["ProcessorError".to_string()]),
             when: None,
+            code: None,
+            business_kind: None,
             on_when: Some(rhai(PARSE_FLOAT)),
             disposition: camel_api::ExceptionDisposition::Handled,
             steps: vec![],
@@ -943,6 +953,8 @@ async fn do_try_xpath_onwhen_predicate_failure_chains_original() {
         catch: vec![DoTryCatchClauseBuilder {
             exception: Some(vec!["ProcessorError".to_string()]),
             when: None,
+            code: None,
+            business_kind: None,
             on_when: Some(expr("xpath", "/root/flag='yes'")),
             disposition: camel_api::ExceptionDisposition::Handled,
             steps: vec![],

@@ -3,12 +3,18 @@
 //! These are the simplest compilers — none recursively compile child steps.
 
 use camel_api::SpanKindHint;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use camel_api::{BoxProcessor, CamelError, Exchange, IdentityProcessor, Value};
+use camel_api::{
+    BoxProcessor, CamelError, Exchange, IdentityProcessor, RedactedJson, Value, ValueSource,
+};
 use camel_language_api::LanguageError;
 use camel_processor::claim_check::ClaimCheckFilter;
 use camel_processor::{LogProcessor, log::DynamicLog, script_mutator::ScriptMutator, set_property};
+use tower::Service;
 
 use super::{
     CompilationContext, CompileOutcome, CompiledStep, StepCompiler, StepCompilerRegistry,
@@ -19,7 +25,9 @@ use crate::lifecycle::adapters::step_resolution::{
     compile_message_id_expression, compile_sort_expression, compile_value_source, eval_meta,
     resolve_language,
 };
-use crate::lifecycle::application::route_definition::{BuilderStep, ValueSourceDef};
+use crate::lifecycle::application::route_definition::{
+    BuilderStep, LanguageExpressionDef, ValueSourceDef,
+};
 
 pub(crate) struct CoreCompiler;
 
@@ -428,6 +436,36 @@ impl StepCompiler for CoreCompiler {
                 _ => Err(CamelError::Config("unsupported value source".into())),
             },
 
+            // ── Throw (declarative) ──
+            BuilderStep::DeclarativeThrow {
+                code,
+                kind,
+                message,
+                data,
+            } => {
+                validate_throw_carrier(&code, kind.as_deref(), data.as_ref())?;
+                let message = message
+                    .map(|source| compile_throw_message(ctx, source, step_index))
+                    .transpose()?;
+                let data = data
+                    .map(|document| compile_throw_data(ctx, &document, step_index))
+                    .transpose()?;
+                let svc = ThrowService {
+                    code,
+                    kind: kind.unwrap_or_else(|| "failed".to_string()),
+                    message,
+                    data,
+                };
+                Ok(CompileOutcome::Matched(CompiledStep::Process {
+                    kind_hint: SpanKindHint::Internal,
+                    processor: BoxProcessor::new(svc),
+                    body_contract: None,
+                    lifecycle: None,
+                    label: None,
+                    to_uri: None,
+                }))
+            }
+
             // ── SetProperty (declarative) ──
             BuilderStep::DeclarativeSetProperty { key, value_source } => match value_source {
                 ValueSourceDef::Literal(value) => {
@@ -694,6 +732,205 @@ fn compile_script(
         Err(e) => Err(CamelError::RouteError(format!(
             "Failed to create mutating expression for language '{language}': {e}"
         ))),
+    }
+}
+
+/// Compiled `message` plan for a throw step.
+#[derive(Clone)]
+enum ThrowMessage {
+    Constant(String),
+    Template(ValueSource),
+}
+
+/// Compiled `data` document for a throw step: string leaves are runtime
+/// templates; every other JSON node is a constant.
+#[derive(Clone)]
+enum ThrowDataTemplate {
+    Constant(Value),
+    Template(ValueSource),
+    Object(Vec<(String, ThrowDataTemplate)>),
+    Array(Vec<ThrowDataTemplate>),
+}
+
+impl ThrowDataTemplate {
+    fn evaluate<'a>(
+        &'a self,
+        exchange: &'a Exchange,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, CamelError>> + Send + 'a>> {
+        Box::pin(async move {
+            match self {
+                Self::Constant(value) => Ok(value.clone()),
+                Self::Template(source) => source.evaluate(exchange).await,
+                Self::Object(fields) => {
+                    let mut object = serde_json::Map::with_capacity(fields.len());
+                    for (key, field) in fields {
+                        object.insert(key.clone(), field.evaluate(exchange).await?);
+                    }
+                    Ok(Value::Object(object))
+                }
+                Self::Array(items) => {
+                    let mut array = Vec::with_capacity(items.len());
+                    for item in items {
+                        array.push(item.evaluate(exchange).await?);
+                    }
+                    Ok(Value::Array(array))
+                }
+            }
+        })
+    }
+}
+
+/// Re-apply the `throw` field contract at the builders boundary.
+///
+/// The DSL load path (YAML/JSON lowering) is the first boundary and rejects
+/// blank `code`, explicitly blank `kind`, and non-object `data`. A carrier
+/// built programmatically bypasses it, so the same rules run again here, with
+/// the same typed `CamelError::RouteError` naming the offending field.
+fn validate_throw_carrier(
+    code: &str,
+    kind: Option<&str>,
+    data: Option<&Value>,
+) -> Result<(), CamelError> {
+    if code.trim().is_empty() {
+        return Err(CamelError::RouteError(
+            "throw: code must not be empty".into(),
+        ));
+    }
+    if let Some(kind) = kind
+        && kind.trim().is_empty()
+    {
+        return Err(CamelError::RouteError(
+            "throw: kind must not be empty".into(),
+        ));
+    }
+    if let Some(data) = data
+        && !data.is_object()
+    {
+        return Err(CamelError::RouteError(
+            "throw: data must be a JSON object".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn compile_throw_message(
+    ctx: &CompilationContext<'_>,
+    source: ValueSourceDef,
+    step_index: usize,
+) -> Result<ThrowMessage, CamelError> {
+    match source {
+        ValueSourceDef::Literal(value) => Ok(ThrowMessage::Constant(value_to_text(value))),
+        ValueSourceDef::Expression(expression) => {
+            let source = compile_value_source(
+                ctx,
+                &expression,
+                "throw",
+                step_index,
+                Some("message".to_string()),
+            )?;
+            Ok(ThrowMessage::Template(source))
+        }
+        _ => Err(CamelError::Config(
+            "unsupported throw message source".to_string(),
+        )),
+    }
+}
+
+fn compile_throw_data(
+    ctx: &CompilationContext<'_>,
+    document: &Value,
+    step_index: usize,
+) -> Result<ThrowDataTemplate, CamelError> {
+    match document {
+        Value::String(source) => {
+            // Every string leaf is a Simple template: plain text passes
+            // through unchanged, `${...}` interpolates per exchange.
+            let expression = LanguageExpressionDef {
+                language: "simple".to_string(),
+                source: source.clone(),
+            };
+            let compiled = compile_value_source(
+                ctx,
+                &expression,
+                "throw",
+                step_index,
+                Some("data".to_string()),
+            )?;
+            Ok(ThrowDataTemplate::Template(compiled))
+        }
+        Value::Object(fields) => {
+            let mut compiled = Vec::with_capacity(fields.len());
+            for (key, value) in fields {
+                compiled.push((key.clone(), compile_throw_data(ctx, value, step_index)?));
+            }
+            Ok(ThrowDataTemplate::Object(compiled))
+        }
+        Value::Array(items) => {
+            let mut compiled = Vec::with_capacity(items.len());
+            for item in items {
+                compiled.push(compile_throw_data(ctx, item, step_index)?);
+            }
+            Ok(ThrowDataTemplate::Array(compiled))
+        }
+        other => Ok(ThrowDataTemplate::Constant(other.clone())),
+    }
+}
+
+fn value_to_text(value: Value) -> String {
+    match value {
+        Value::String(text) => text,
+        other => other.to_string(),
+    }
+}
+
+/// Runtime processor for a declarative throw step. It never mutates the
+/// exchange: `message` and `data` are evaluated for the raised error only.
+#[derive(Clone)]
+struct ThrowService {
+    code: String,
+    kind: String,
+    message: Option<ThrowMessage>,
+    data: Option<ThrowDataTemplate>,
+}
+
+impl Service<Exchange> for ThrowService {
+    type Response = Exchange;
+    type Error = CamelError;
+    type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, exchange: Exchange) -> Self::Future {
+        let code = self.code.clone();
+        let kind = self.kind.clone();
+        let message = self.message.clone();
+        let data = self.data.clone();
+        Box::pin(async move {
+            let message = match message {
+                Some(ThrowMessage::Constant(text)) => text,
+                Some(ThrowMessage::Template(source)) => {
+                    value_to_text(source.evaluate(&exchange).await?)
+                }
+                None => code.clone(),
+            };
+            let data = match data {
+                Some(template) => Some(RedactedJson::new(template.evaluate(&exchange).await?)),
+                None => None,
+            };
+            // Raise-site log (business-error-model 1.6): `code`/`kind` only —
+            // `message` is log-diagnostics by contract but deliberately not
+            // serialized here, and `data` is never rendered (its Debug is
+            // `[redacted]`, so even accidental structured logging is safe).
+            tracing::debug!(code = %code, kind = %kind, "business error raised");
+            Err(CamelError::Business {
+                code,
+                kind,
+                message,
+                data,
+            })
+        })
     }
 }
 
@@ -1554,6 +1791,100 @@ mod tests {
     }
 
     /// Build a minimal `CompilationContext` for unit tests.
+    /// Compile a `DeclarativeThrow` carrier through `CoreCompiler` alone.
+    /// `dummy_context()` has no languages, which is enough because the
+    /// rejection happens before `message`/`data` compilation.
+    fn compile_throw_carrier(step: BuilderStep) -> Result<Option<CompiledStep>, CamelError> {
+        let mut reg = StepCompilerRegistry::new();
+        reg.register(Box::new(super::CoreCompiler));
+        reg.compile_step(step, 0, &dummy_context())
+    }
+
+    /// The late-bound carrier is the second builders boundary: a blank `code`
+    /// built programmatically must fail resolution like the DSL load path.
+    #[test]
+    fn declarative_throw_carrier_rejects_blank_code() {
+        for code in ["", "   "] {
+            let step = BuilderStep::DeclarativeThrow {
+                code: code.into(),
+                kind: None,
+                message: None,
+                data: None,
+            };
+            let err = compile_throw_carrier(step).expect_err("blank code must be rejected");
+            match err {
+                CamelError::RouteError(msg) => assert!(
+                    msg.contains("code"),
+                    "error must name the code field: {msg}"
+                ),
+                other => panic!("expected CamelError::RouteError, got {other:?}"),
+            }
+        }
+    }
+
+    /// An explicitly blank `kind` is rejected; `None` still defaults to
+    /// `failed`.
+    #[test]
+    fn declarative_throw_carrier_rejects_blank_kind() {
+        let step = BuilderStep::DeclarativeThrow {
+            code: "E1".into(),
+            kind: Some("  ".into()),
+            message: None,
+            data: None,
+        };
+        let err = compile_throw_carrier(step).expect_err("blank kind must be rejected");
+        match err {
+            CamelError::RouteError(msg) => assert!(
+                msg.contains("kind"),
+                "error must name the kind field: {msg}"
+            ),
+            other => panic!("expected CamelError::RouteError, got {other:?}"),
+        }
+    }
+
+    /// `data` must be a JSON object: string and array payloads are rejected.
+    #[test]
+    fn declarative_throw_carrier_rejects_non_object_data() {
+        for data in [
+            serde_json::json!("text"),
+            serde_json::json!(["a", "b"]),
+            serde_json::json!(42),
+        ] {
+            let step = BuilderStep::DeclarativeThrow {
+                code: "E1".into(),
+                kind: None,
+                message: None,
+                data: Some(data),
+            };
+            let err = compile_throw_carrier(step).expect_err("non-object data must be rejected");
+            match err {
+                CamelError::RouteError(msg) => assert!(
+                    msg.contains("data"),
+                    "error must name the data field: {msg}"
+                ),
+                other => panic!("expected CamelError::RouteError, got {other:?}"),
+            }
+        }
+    }
+
+    /// The valid carrier shape still resolves.
+    #[test]
+    fn declarative_throw_carrier_accepts_valid_payload() {
+        let step = BuilderStep::DeclarativeThrow {
+            code: "E1".into(),
+            kind: Some("business".into()),
+            message: None,
+            data: None,
+        };
+        let compiled = compile_throw_carrier(step)
+            .expect("valid carrier must compile")
+            .expect("CoreCompiler must handle throw");
+        assert!(
+            matches!(compiled, CompiledStep::Process { .. }),
+            "expected CompiledStep::Process, got {compiled:?}"
+        );
+    }
+
     fn dummy_context() -> CompilationContext<'static> {
         use std::collections::HashMap;
         use std::sync::Mutex;

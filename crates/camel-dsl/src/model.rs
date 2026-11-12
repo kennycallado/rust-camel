@@ -217,6 +217,8 @@ pub struct DeclarativeRedeliveryPolicy {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclarativeOnException {
+    /// Matches only a `CamelError::Business` whose `code` equals this value.
+    pub code: Option<String>,
     pub kind: Option<String>,
     pub message_contains: Option<String>,
     pub retry: Option<DeclarativeRedeliveryPolicy>,
@@ -248,6 +250,12 @@ pub struct DeclarativeRoute {
     pub security_policy: Option<DeclarativeSecurityPolicy>,
     pub unit_of_work: Option<camel_api::UnitOfWorkConfig>,
     pub steps: Vec<DeclarativeStep>,
+    /// Route-level business error to HTTP status mapping
+    /// ([`camel_api::HttpErrorMapping`], business-error-model Task 2.2).
+    /// Produced ONLY by rest lowering (the seam carriage); plain-route YAML
+    /// authoring is deferred to the phase-3 errors catalog. The canonical
+    /// compile path rejects/records it so it is never dropped silently.
+    pub http_error_mapping: Option<camel_api::HttpErrorMapping>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +308,23 @@ impl SetHeaderStepDef {
             value: ValueSourceDef::Literal(serde_json::Value::String(value.into())),
         }
     }
+}
+
+/// A `throw` step: raises [`camel_api::CamelError::Business`] at runtime.
+///
+/// `code` and `kind` are literal config (validated non-blank at load time);
+/// `message` and the string leaves of `data` are Simple templates evaluated
+/// per exchange. `data` is diagnostics-only and never written to the exchange.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThrowStepDef {
+    /// Stable machine-readable business code (required, non-blank).
+    pub code: String,
+    /// Optional business kind; `None` means `failed`.
+    pub kind: Option<String>,
+    /// Optional message template; defaults to the `code` value.
+    pub message: Option<ValueSourceDef>,
+    /// Optional diagnostics object; its string leaves are templates.
+    pub data: Option<serde_json::Value>,
 }
 
 /// REST strict content-negotiation gate step: declared `consumes`/
@@ -717,6 +742,10 @@ pub struct EnrichStepDef {
 pub struct DoTryCatchClauseDef {
     pub exception: Option<Vec<String>>,
     pub when: Option<LanguageExpressionDef>,
+    /// Match a `CamelError::Business` whose `code` equals this value.
+    pub code: Option<String>,
+    /// Match a `CamelError::Business` whose `kind` equals this value.
+    pub business_kind: Option<String>,
     pub on_when: Option<LanguageExpressionDef>,
     pub disposition: camel_api::error_handler::ExceptionDisposition,
     pub steps: Vec<DeclarativeStep>,
@@ -733,6 +762,8 @@ pub enum DeclarativeStep {
     To(ToStepDef),
     SetHeader(SetHeaderStepDef),
     SetHeaderIfAbsent(SetHeaderStepDef),
+    /// Raises a business error (`throw` step).
+    Throw(ThrowStepDef),
     ContentNegotiation(ContentNegotiationStepDef),
     RemoveHeader(RemoveHeaderStepDef),
     SetProperty(SetPropertyStepDef),
@@ -793,6 +824,7 @@ impl DeclarativeStep {
             DeclarativeStep::SetHeaderIfAbsent(_) => {
                 crate::contract::DeclarativeStepKind::SetHeaderIfAbsent
             }
+            DeclarativeStep::Throw(_) => crate::contract::DeclarativeStepKind::Throw,
             DeclarativeStep::ContentNegotiation(_) => {
                 crate::contract::DeclarativeStepKind::ContentNegotiation
             }

@@ -1535,6 +1535,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::DeclarativeSetHeaderIfAbsent { .. } => "set_header_if_absent",
         BuilderStep::DeclarativeRemoveHeader { .. } => "remove_header",
         BuilderStep::DeclarativeSetBody { .. } => "set_body",
+        BuilderStep::DeclarativeThrow { .. } => "throw",
         BuilderStep::DeclarativeFilter { .. } => "filter",
         BuilderStep::DeclarativeChoice { .. } => "choice",
         BuilderStep::DeclarativeScript { .. } => "script",

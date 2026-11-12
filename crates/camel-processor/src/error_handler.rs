@@ -15,6 +15,78 @@ use camel_api::{
     SyncBoxProcessor, Value,
 };
 
+/// `true` for the domain/client-fault variant owned by the business-error
+/// policy (no declarative redelivery, breaker-neutral, info/warn logging).
+fn is_business(error: &CamelError) -> bool {
+    matches!(error, CamelError::Business { .. })
+}
+
+/// Emit the business-error info record for an error handled in place, i.e.
+/// without a delegate dispatch (clause `on_steps`, or a handled/continued
+/// disposition with no producer configured).
+///
+/// Only `code` and `kind` are structured; `message` and `data` are never
+/// serialized into the record.
+fn log_business_handled(error: &CamelError) {
+    if let CamelError::Business { code, kind, .. } = error {
+        tracing::info!(code = %code, kind = %kind, "business error handled");
+    }
+}
+
+/// Emit the warn record for a business error propagating with no handler or
+/// dead-letter channel configured. `code`/`kind` only.
+fn log_business_propagated(error: &CamelError) {
+    if let CamelError::Business { code, kind, .. } = error {
+        tracing::warn!(
+            code = %code,
+            kind = %kind,
+            "business error propagated with no handler or dead-letter channel"
+        );
+    }
+}
+
+/// Emit the business-error record for a resolved disposition that never
+/// reaches a delegate dispatch.
+///
+/// When a producer is configured the dispatch site (`send_to_handler`) owns
+/// the record instead, so each business-error handling outcome is logged
+/// exactly once at the site that performs it (I2 carve-out).
+///
+/// A PROPAGATING business error is logged at DEBUG only when the transport
+/// owns the reply record: either on a seam route (`seam_business`: the route
+/// carries an `http_error_mapping`, business-error-model Task 2.2) or on a
+/// route whose consumer IS the HTTP transport (`reply_seam`: any HTTP reply
+/// route, plain or rest-lowered — a compile-time route flag threaded from the
+/// route's `from` scheme, bd rc-c3vds). The transport's reply finalizer owns
+/// the single info/warn propagate record, so the handler must never double it
+/// (owner decision Q7).
+fn log_business_disposition(
+    error: &CamelError,
+    disposition: ExceptionDisposition,
+    has_producer: bool,
+    seam_business: bool,
+    reply_seam: bool,
+) {
+    if has_producer {
+        return;
+    }
+    match disposition {
+        ExceptionDisposition::Handled | ExceptionDisposition::Continued => {
+            log_business_handled(error);
+        }
+        ExceptionDisposition::Propagate if seam_business || reply_seam => {
+            if let CamelError::Business { code, kind, .. } = error {
+                tracing::debug!(
+                    code = %code,
+                    kind = %kind,
+                    "business error propagating to the HTTP reply seam (finalizer owns the record)"
+                );
+            }
+        }
+        _ => log_business_propagated(error),
+    }
+}
+
 async fn execute_on_steps(
     original: Exchange,
     original_err: CamelError,
@@ -35,6 +107,11 @@ async fn execute_on_steps(
     match step_result {
         Ok(mut ex) => {
             if disposition == ExceptionDisposition::Handled {
+                // Layer-level handling is its own business-error log site: no
+                // disposition record was emitted for this path, so log the
+                // in-place outcome here (I2 carve-out; same message as the
+                // clause-level handled site).
+                log_business_handled(&original_err);
                 ex.handle_error();
                 Ok(ex)
             } else {
@@ -114,6 +191,27 @@ pub struct DefaultRouteErrorHandler {
     /// before forwarding to the DLC/handler. The original message is stashed by
     /// `RouteChannelService::call` as the `ORIGINAL_MESSAGE_EXTENSION` extension.
     pub use_original_message: bool,
+    /// HTTP reply-seam bypass (business-error-model Task 2.2, review C1):
+    /// when the route carries an `http_error_mapping` (the transport owns the
+    /// business-error reply), BUSINESS errors never dispatch to the synthetic
+    /// Handled catch-all or the default dead-letter producer — the error
+    /// propagates with its error intact so the reply finalizer can map it.
+    /// Author-authored clauses keep their dispositions and explicit
+    /// `handled_by` producers; non-business errors are untouched.
+    business_seam_bypass: bool,
+    /// Reply-ownership flag (business-error-model, owner decision Q7): the
+    /// route's consumer IS the HTTP transport (`http`/`https` scheme), so its
+    /// replies finalize through the transport's reply finalizer and that
+    /// finalizer owns the single unmatched-propagate record — the handler
+    /// logs DEBUG only. Compile-time route flag threaded through
+    /// `resolve_error_handler`; deliberately independent of
+    /// [`Self::business_seam_bypass`], which keys the DLC bypass on the
+    /// route's `http_error_mapping`.
+    reply_seam: bool,
+    /// Index of the synthetic catch-all Handled policy resolved from a bare
+    /// DLC config (no explicit policies). `None` when every policy is
+    /// author-authored. Only consulted when `business_seam_bypass` is on.
+    synthetic_policy: Option<usize>,
 }
 
 impl DefaultRouteErrorHandler {
@@ -128,12 +226,39 @@ impl DefaultRouteErrorHandler {
                 .map(|(p, prod)| (p, prod.map(SyncBoxProcessor::new)))
                 .collect(),
             use_original_message: false,
+            business_seam_bypass: false,
+            reply_seam: false,
+            synthetic_policy: None,
         }
     }
 
     /// Enable restoration of the original message before forwarding to DLC.
     pub fn with_use_original_message(mut self, enabled: bool) -> Self {
         self.use_original_message = enabled;
+        self
+    }
+
+    /// Enable the HTTP reply-seam bypass (business-error-model Task 2.2).
+    ///
+    /// `synthetic_policy` is the index of the synthetic catch-all Handled
+    /// policy (see [`Self::business_seam_bypass`]); `None` when all policies
+    /// are author-authored.
+    pub fn with_business_seam_bypass(
+        mut self,
+        enabled: bool,
+        synthetic_policy: Option<usize>,
+    ) -> Self {
+        self.business_seam_bypass = enabled;
+        self.synthetic_policy = synthetic_policy;
+        self
+    }
+
+    /// Declare the route's consumer as the HTTP transport (bd rc-c3vds): the
+    /// route's replies finalize through the transport's reply finalizer, so
+    /// an unmatched propagate is transport-owned and the handler logs DEBUG
+    /// only. See [`Self::reply_seam`].
+    pub fn with_reply_seam(mut self, enabled: bool) -> Self {
+        self.reply_seam = enabled;
         self
     }
 
@@ -166,27 +291,31 @@ impl DefaultRouteErrorHandler {
 
     /// Resolve (disposition, producer) for a matched policy.
     /// Shared by handle_step and handle_boundary.
+    ///
+    /// `seam_business` is `business_seam_bypass && is_business(error)`: a
+    /// business error on a mapping-carrying route never falls back to the
+    /// default dead-letter producer — neither the unmatched arm nor the
+    /// matched-clause arm (`policy_producer.or(dlc)`), while an explicit
+    /// `handled_by` producer still dispatches.
     fn resolve_producer(
         &self,
         policy: Option<PolicyId>,
+        seam_business: bool,
     ) -> (ExceptionDisposition, Option<BoxProcessor>) {
+        let dlc = if seam_business {
+            None
+        } else {
+            self.dlc_producer.as_ref().map(|p| p.clone_inner())
+        };
         match policy {
             Some(PolicyId(idx)) => match self.policies.get(idx) {
                 Some((p, prod)) => (
                     p.disposition,
-                    prod.as_ref()
-                        .map(|p| p.clone_inner())
-                        .or_else(|| self.dlc_producer.as_ref().map(|p| p.clone_inner())),
+                    prod.as_ref().map(|p| p.clone_inner()).or(dlc),
                 ),
-                None => (
-                    ExceptionDisposition::Propagate,
-                    self.dlc_producer.as_ref().map(|p| p.clone_inner()),
-                ),
+                None => (ExceptionDisposition::Propagate, dlc),
             },
-            None => (
-                ExceptionDisposition::Propagate,
-                self.dlc_producer.as_ref().map(|p| p.clone_inner()),
-            ),
+            None => (ExceptionDisposition::Propagate, dlc),
         }
     }
 }
@@ -194,10 +323,21 @@ impl DefaultRouteErrorHandler {
 #[async_trait::async_trait]
 impl RouteErrorHandler for DefaultRouteErrorHandler {
     fn match_policy(&self, err: &CamelError) -> Option<PolicyId> {
-        self.policies
-            .iter()
-            .position(|(p, _)| (p.matches)(err))
-            .map(PolicyId)
+        for (idx, (p, _)) in self.policies.iter().enumerate() {
+            if !(p.matches)(err) {
+                continue;
+            }
+            // Seam bypass (business-error-model Task 2.2, review C1): the
+            // synthetic Handled catch-all never consumes a BUSINESS error on
+            // a mapping-carrying route — suppressing the producer must not
+            // clear the error, so the exchange reaches the reply arm carrying
+            // it and the transport's finalizer maps it.
+            if self.business_seam_bypass && is_business(err) && self.synthetic_policy == Some(idx) {
+                continue;
+            }
+            return Some(PolicyId(idx));
+        }
+        None
     }
 
     async fn retry_step(
@@ -207,6 +347,17 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         original: Exchange,
         error: CamelError,
     ) -> RetryOutcome {
+        // Business errors are never redelivered by the declarative engine:
+        // clause-level and route-level retry blocks produce zero attempts
+        // (the disposition still runs via `handle_step`). Broker-level
+        // client redelivery is a transport concern and is untouched.
+        if is_business(&error) {
+            return RetryOutcome::Exhausted {
+                exchange: original,
+                error,
+                policy,
+            };
+        }
         let Some(PolicyId(idx)) = policy else {
             return RetryOutcome::Exhausted {
                 exchange: original,
@@ -252,6 +403,18 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                     return RetryOutcome::Stopped(stopped_ex);
                 }
                 PipelineOutcome::Failed(retry_err) => {
+                    // A retry that ends in a business error stops the loop
+                    // immediately: business errors get zero redeliveries even
+                    // when the INITIAL error was retryable (task 1.6). The
+                    // pre-redelivery snapshot is returned so no
+                    // `CamelRedelivered` header leaks into the disposition.
+                    if is_business(&retry_err) {
+                        return RetryOutcome::Exhausted {
+                            exchange: original,
+                            error: retry_err,
+                            policy,
+                        };
+                    }
                     if attempt + 1 == backoff.max_attempts {
                         let mut final_ex = original;
                         final_ex
@@ -288,7 +451,15 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         mut exchange: Exchange,
         error: CamelError,
     ) -> Result<StepDisposition, CamelError> {
-        let (disposition, producer) = self.resolve_producer(policy);
+        let seam_business = self.business_seam_bypass && is_business(&error);
+        let (disposition, producer) = self.resolve_producer(policy, seam_business);
+        log_business_disposition(
+            &error,
+            disposition,
+            producer.is_some(),
+            seam_business,
+            self.reply_seam,
+        );
 
         // rc-fu1of: a non-matching policy with no DLC silently propagates —
         // the operator sees "handler never ran" with no signal why. Emit a
@@ -323,10 +494,19 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                 Ok(mut ex) => match disposition {
                     ExceptionDisposition::Handled => {
                         ex.handle_error();
+                        // A producer suppresses the disposition record (the
+                        // dispatch site owns it), but this path returns
+                        // before any dispatch — log the in-place outcome.
+                        if producer.is_some() {
+                            log_business_handled(&error);
+                        }
                         return Ok(StepDisposition::Handled(ex));
                     }
                     ExceptionDisposition::Continued => {
                         ex.clear_error();
+                        if producer.is_some() {
+                            log_business_handled(&error);
+                        }
                         return Ok(StepDisposition::Continued(ex));
                     }
                     // Propagate and any future variant restore the snapshot
@@ -379,7 +559,15 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
         //   Propagate | Continued → forward to DLC, return Ok(exchange_with_error)
         //   (Continued at boundary = Propagate — no next step to continue to)
         let policy = self.match_policy(&error);
-        let (disposition, producer) = self.resolve_producer(policy);
+        let seam_business = self.business_seam_bypass && is_business(&error);
+        let (disposition, producer) = self.resolve_producer(policy, seam_business);
+        log_business_disposition(
+            &error,
+            disposition,
+            producer.is_some(),
+            seam_business,
+            self.reply_seam,
+        );
 
         // rc-fu1of: a non-matching policy with no DLC silently propagates —
         // the operator sees "handler never ran" with no signal why. Emit a
@@ -419,6 +607,12 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                 Ok(mut ex) => match disposition {
                     ExceptionDisposition::Handled => {
                         ex.handle_error();
+                        // A producer suppresses the disposition record (the
+                        // dispatch site owns it), but this path returns
+                        // before any dispatch — log the in-place outcome.
+                        if producer.is_some() {
+                            log_business_handled(&error);
+                        }
                         return Ok(ex);
                     }
                     // Propagate | Continued and any future variant restore the snapshot.
@@ -583,7 +777,7 @@ where
                 Err(e) => Err(e), // readiness error — enters retry/DLC/onException path below
             };
 
-            let err = match result {
+            let mut err = match result {
                 Ok(ex) => return Ok(ex),
                 Err(e) => e,
             };
@@ -592,8 +786,11 @@ where
             let matched = policies.into_iter().find(|(p, _)| (p.matches)(&err));
 
             if let Some((policy, policy_producer)) = matched {
-                // Retry if configured.
-                if let Some(ref backoff) = policy.retry {
+                // Retry if configured — never for business errors (the
+                // declarative engine does not redeliver them).
+                if let Some(ref backoff) = policy.retry
+                    && !is_business(&err)
+                {
                     for attempt in 0..backoff.max_attempts {
                         let delay = backoff.delay_for(attempt);
                         tokio::time::sleep(delay).await;
@@ -617,6 +814,16 @@ where
                         match result {
                             Ok(ex) => return Ok(ex),
                             Err(retry_err) => {
+                                // A retry that ends in a business error stops
+                                // the loop immediately: business errors get
+                                // zero redeliveries even when the INITIAL
+                                // error was retryable (task 1.6). The policy
+                                // disposition still runs below, on the
+                                // pre-redelivery snapshot.
+                                if is_business(&retry_err) {
+                                    err = retry_err;
+                                    break;
+                                }
                                 if attempt + 1 == backoff.max_attempts {
                                     // Retries exhausted — send to handler.
                                     let mut original = original.branch_clone();
@@ -696,6 +903,12 @@ async fn forward_or_propagate(
     producer: Option<BoxProcessor>,
     original_error: CamelError,
 ) -> Result<Exchange, CamelError> {
+    // Non-seam propagate log site (business-error-model 1.6): the handler is
+    // configured but its policy chain produced no producer. `code`/`kind`
+    // only — `message`/`data` are never serialized.
+    if producer.is_none() {
+        log_business_propagated(&original_error);
+    }
     match send_to_handler(exchange, producer).await {
         Ok(ex) => Ok(ex),
         Err(_delegate) => Err(original_error),
@@ -708,46 +921,60 @@ async fn send_to_handler(
 ) -> Result<Exchange, CamelError> {
     match producer {
         None => {
-            // log-policy: system-broken
-            tracing::error!(
-                error = ?exchange.error,
-                "Exchange failed with no error handler configured"
-            );
-            Ok(exchange)
-        }
-        Some(mut prod) => match prod.ready().await {
-            Err(e) => {
-                // BOTH the original exchange error and the delegate
-                // failure are structured; the span records the DELEGATE
-                // error (rc-ntpof).
+            // The terminal system-broken record is a non-business diagnostic:
+            // business errors surface only via the debug/info/warn policy
+            // sites (raise, handled, propagate), never as ERROR (task 1.6).
+            if !matches!(exchange.error, Some(CamelError::Business { .. })) {
                 // log-policy: system-broken
                 tracing::error!(
-                    original_error = ?exchange.error,
-                    delegate_error = %e,
-                    "DLC/handler not ready"
+                    error = ?exchange.error,
+                    "Exchange failed with no error handler configured"
                 );
-                record_span_error(&e);
-                Err(e)
             }
-            Ok(svc) => match svc.call(exchange.branch_clone()).await {
-                Ok(ex) => Ok(ex),
+            Ok(exchange)
+        }
+        Some(mut prod) => {
+            // Delegate dispatch is its own business-error log site (I2
+            // carve-out): `code`/`kind` only — `message`/`data` are never
+            // serialized. The disposition path stays silent when a producer
+            // is configured so this record is never duplicated.
+            if let Some(CamelError::Business { code, kind, .. }) = &exchange.error {
+                tracing::info!(code = %code, kind = %kind, "business error sent to handler");
+            }
+            match prod.ready().await {
                 Err(e) => {
                     // BOTH the original exchange error and the delegate
-                    // failure are structured; the span records the
-                    // DELEGATE error (rc-ntpof).
+                    // failure are structured; the span records the DELEGATE
+                    // error (rc-ntpof).
                     // log-policy: system-broken
                     tracing::error!(
                         original_error = ?exchange.error,
                         delegate_error = %e,
-                        "DLC/handler call failed"
+                        "DLC/handler not ready"
                     );
                     record_span_error(&e);
-                    // The delegate error is returned to the caller so no
-                    // path can mistake a failed delegate for success.
                     Err(e)
                 }
-            },
-        },
+                Ok(svc) => match svc.call(exchange.branch_clone()).await {
+                    Ok(ex) => Ok(ex),
+                    Err(e) => {
+                        // BOTH the original exchange error and the delegate
+                        // failure are structured; the span records the
+                        // DELEGATE error (rc-ntpof).
+                        // log-policy: system-broken
+                        tracing::error!(
+                            original_error = ?exchange.error,
+                            delegate_error = %e,
+                            "DLC/handler call failed"
+                        );
+                        record_span_error(&e);
+                        // The delegate error is returned to the caller so no
+                        // path can mistake a failed delegate for success.
+                        Err(e)
+                    }
+                },
+            }
+        }
     }
 }
 

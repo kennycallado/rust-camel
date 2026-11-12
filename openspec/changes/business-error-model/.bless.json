@@ -1,0 +1,53 @@
+{
+  "kind": "plan",
+  "change": "business-error-model",
+  "verdict": "BLESSED",
+  "hash": "sha256:7265dcfa0917c2c7773505b4dd761d9da483ec653e6317fb54f1341613254c4a",
+  "expert": "e_gpt",
+  "supersedes_plan_hash": "sha256:3f1c55a92c23c01a6d6b2080f557133aa012c301e2057d27de2feabcee20fc13",
+  "supersedes_spec_hash": "sha256:6e2f9135d15bce0c755940b30f6439e1336ee1915b32f2e2221a8e87c71ade02",
+  "reviewer_loop": [
+    {
+      "reviewer": "r_glm",
+      "round": 1,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "note": "rev-1 loop; 13 findings, 12 applied, 1 rejected with evidence (serde_json Eq)"
+    },
+    {
+      "reviewer": "e_opus",
+      "round": 1,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "note": "owner-directed reviewer (owner directive 2026-11-12); reviewed the owner-accepted revision. Findings ALL applied: C1 (unconditional DLC bypass loses business messages on async routes -> bypass made conditional on the HTTP reply seam; rest always sets Some; synthetic-Handled catch-all excluded; matched-clause-without-handled_by fallback bypassed; never reaches error! site; seda+DLC scenario; ADR consequence fixed), I1 (propagate logging transport-owned: finalizer info/warn on seam routes, error-handler debug seam / warn non-seam; propagate tests moved to 2.1), I2 (canonical path compile_declarative_route_to_canonical handles http_error_mapping: reject when !allow_loss, CanonicalLossReport otherwise + test), I3 (RouteDefinition http_error_mapping field + with_http_error_mapping builder, route_definition.rs:708, added to 2.2), I4 (wildcard-matches-business test added to 1.6), m1-m7 (RedactedJson::new/as_value declared; HttpErrorMappingTable named in design; conflict in builtin-map test; #[ts(skip)]; rc-7lkp2 close reference; custom-kind; camel_api::http_error_mapping module home). I4/M4 raw text from the first e_opus review was not recoverable on disk; this fresh pass re-derived the gaps."
+    }
+  ],
+  "bless_rounds": [
+    {
+      "round": 1,
+      "hash": "sha256:b122941432a3428271568b8a092eaf08bcf4e8ddc61079116d7cf74cc2ec0a61",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": [
+        "Synthetic-Handled hole: route_compiler_ext.rs:77-86 catch-all still clears the error when its DLC producer is suppressed — compiler-to-handler seam plumbing needed; exclude seam business errors from the synthetic policy; test DLC-only + matched-clause-without-handled_by",
+        "No-handler route matrix undefined: route_compiler_ext.rs:260-274 installs no handler, so 1.6's handler warn cannot fire; specify logging ownership; scope never-2xx to errors not successfully handled",
+        "Phase dependency inversion: 1.6 used seam fields from 2.1/2.2 — seam policy moved to 2.2; business_error_skips_default_dlc setup must be explicit seam",
+        "Contradictory prose: rest-dsl scenario said lowered routes carry no mapping (must be Some(empty tables)); proposal missing warn-level propagation",
+        "Carried non-business mappings: Ok-arm must reuse existing variant mappings (ValidationError 400, ConsumerStopping 503), not 500-otherwise; add 400/503 Ok-arm tests"
+      ]
+    },
+    {
+      "round": 2,
+      "hash": "sha256:f36ce92c1e88a42f10ca1f2f44190ad807488b282baf36dc749bc6b947ad33cd",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": [
+        "Stale task 1.6 business_error_skips_default_dlc test (unconditional bypass in Phase 1) — deleted, replaced by 2.2 seam tests",
+        "Stale '500 otherwise' in 2.1 step and ADR — replaced with existing-variant-mapping reuse"
+      ]
+    },
+    {
+      "round": 3,
+      "hash": "sha256:7265dcfa0917c2c7773505b4dd761d9da483ec653e6317fb54f1341613254c4a",
+      "verdict": "BLESSED",
+      "findings": []
+    }
+  ],
+  "blessed_at": "2026-11-12"
+}

@@ -8754,6 +8754,7 @@ fn conversion_failure_maps_to_500() {
     let reply = pipeline_error_to_reply(
         CamelError::TypeConversionFailed("invalid JSON at line 1".to_string()),
         "/api/users",
+        None,
     );
     assert_eq!(reply.status, 500);
     // Exactly one Content-Type header, application/json
@@ -8778,7 +8779,11 @@ fn validation_error_still_maps_to_400() {
     // The request-borne binding seam reclassifies format conversion
     // failures to ValidationError (ADR-0096), so this arm must keep its
     // 400 mapping.
-    let reply = pipeline_error_to_reply(CamelError::ValidationError("invalid".to_string()), "/x");
+    let reply = pipeline_error_to_reply(
+        CamelError::ValidationError("invalid".to_string()),
+        "/x",
+        None,
+    );
     assert_eq!(reply.status, 400);
     let body = match &reply.body {
         HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
@@ -8796,6 +8801,7 @@ fn content_negotiation_codes_unchanged() {
             declared: "b".to_string(),
         },
         "/x",
+        None,
     );
     assert_eq!(unsupported.status, 415);
     let body = match &unsupported.body {
@@ -8811,6 +8817,7 @@ fn content_negotiation_codes_unchanged() {
             produced: "b".to_string(),
         },
         "/x",
+        None,
     );
     assert_eq!(not_acceptable.status, 406);
     let body = match &not_acceptable.body {
@@ -8823,7 +8830,7 @@ fn content_negotiation_codes_unchanged() {
 
 #[test]
 fn consumer_stopping_stays_503() {
-    let reply = pipeline_error_to_reply(CamelError::ConsumerStopping, "/x");
+    let reply = pipeline_error_to_reply(CamelError::ConsumerStopping, "/x", None);
     assert_eq!(reply.status, 503);
 }
 
@@ -8886,7 +8893,11 @@ fn conversion_failure_log_no_longer_says_bad_request() {
     let recorder = MessageRecorder::default();
     let messages = Arc::clone(&recorder.messages);
     let reply = tracing::subscriber::with_default(recorder, || {
-        pipeline_error_to_reply(CamelError::TypeConversionFailed("x".to_string()), "/p")
+        pipeline_error_to_reply(
+            CamelError::TypeConversionFailed("x".to_string()),
+            "/p",
+            None,
+        )
     });
     assert_eq!(reply.status, 500);
 
@@ -8903,7 +8914,11 @@ fn conversion_failure_log_no_longer_says_bad_request() {
 
 #[test]
 fn other_error_still_maps_to_500() {
-    let reply = pipeline_error_to_reply(CamelError::RouteError("boom".to_string()), "/api/users");
+    let reply = pipeline_error_to_reply(
+        CamelError::RouteError("boom".to_string()),
+        "/api/users",
+        None,
+    );
     assert_eq!(reply.status, 500);
 }
 
@@ -8917,6 +8932,7 @@ fn processor_error_with_source_maps_to_500_and_hides_detail() {
             )),
         ),
         "/api/x",
+        None,
     );
     assert_eq!(reply.status, 500);
     let body = match &reply.body {
@@ -8939,6 +8955,7 @@ fn unauthenticated_maps_to_401() {
     let reply = pipeline_error_to_reply(
         CamelError::Unauthenticated("no token".to_string()),
         "/api/users",
+        None,
     );
     assert_eq!(reply.status, 401);
 }
@@ -8948,6 +8965,7 @@ fn unauthorized_maps_to_403() {
     let reply = pipeline_error_to_reply(
         CamelError::Unauthorized("forbidden".to_string()),
         "/api/users",
+        None,
     );
     assert_eq!(reply.status, 403);
 }
@@ -8957,6 +8975,7 @@ fn validation_error_maps_to_400() {
     let reply = pipeline_error_to_reply(
         CamelError::ValidationError("body does not match schema".to_string()),
         "/api/users",
+        None,
     );
     assert_eq!(reply.status, 400);
     let json_ct = reply
@@ -8986,6 +9005,7 @@ fn finalizer_maps_unsupported_media_type() {
             declared: "application/json".to_string(),
         },
         "/x",
+        None,
     );
     assert_eq!(reply.status, 415);
     let json_ct = reply
@@ -9014,6 +9034,7 @@ fn finalizer_maps_not_acceptable() {
             produced: "application/json".to_string(),
         },
         "/x",
+        None,
     );
     assert_eq!(reply.status, 406);
     let json_ct = reply
@@ -9051,6 +9072,382 @@ fn json_error_reply_preserves_empty_message() {
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("body must be valid JSON");
     assert_eq!(parsed["error"], "bad_request");
     assert_eq!(parsed["message"], "");
+}
+
+// -----------------------------------------------------------------------
+// business error mapping: route-level table, safe closure, rc-7lkp2 guard
+// -----------------------------------------------------------------------
+
+use camel_api::http_error_mapping::{MappingTable, validate_key, validate_status};
+
+/// Business error with the given payload identity and no message/data noise.
+fn business_error(code: &str, kind: &str) -> CamelError {
+    CamelError::Business {
+        code: code.to_string(),
+        kind: kind.to_string(),
+        message: format!("business failure {code}"),
+        data: None,
+    }
+}
+
+fn reply_bytes(reply: &HttpReply) -> String {
+    match &reply.body {
+        HttpReplyBody::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+        _ => panic!("expected bytes body"),
+    }
+}
+
+fn reply_json(reply: &HttpReply) -> serde_json::Value {
+    serde_json::from_str(&reply_bytes(reply)).expect("body must be valid JSON")
+}
+
+#[test]
+fn code_map_wins_over_kind_map() {
+    let mapping = HttpErrorMapping::new()
+        .with_code("ORDER_NOT_FOUND", 404)
+        .with_kind("not-found", 410);
+    let reply = pipeline_error_to_reply(
+        business_error("ORDER_NOT_FOUND", "not-found"),
+        "/orders",
+        Some(&mapping),
+    );
+    assert_eq!(reply.status, 404);
+    assert_eq!(
+        reply_bytes(&reply),
+        r#"{"error":"ORDER_NOT_FOUND","kind":"not-found"}"#
+    );
+    assert_eq!(reply_json(&reply)["error"], "ORDER_NOT_FOUND");
+    assert_eq!(reply_json(&reply)["kind"], "not-found");
+}
+
+#[test]
+fn kind_map_applies_without_code_match() {
+    let mapping = HttpErrorMapping::new().with_kind("conflict", 409);
+    let reply = pipeline_error_to_reply(
+        business_error("STALE_WRITE", "conflict"),
+        "/orders",
+        Some(&mapping),
+    );
+    assert_eq!(reply.status, 409);
+    assert_eq!(reply_json(&reply)["error"], "STALE_WRITE");
+}
+
+#[test]
+fn builtin_default_map_without_mapping() {
+    let recorder = LevelRecorder::default();
+    let records = Arc::clone(&recorder.records);
+    tracing::subscriber::with_default(recorder, || {
+        for (kind, expected) in [
+            ("invalid-argument", 400),
+            ("conflict", 409),
+            ("forbidden", 403),
+        ] {
+            let reply = pipeline_error_to_reply(business_error("CODE", kind), "/x", None);
+            assert_eq!(reply.status, expected, "built-in default for kind {kind}");
+        }
+    });
+
+    let records = records
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let propagate: Vec<_> = records
+        .iter()
+        .filter(|(_, message)| message.contains("Business error propagated"))
+        .collect();
+    assert_eq!(
+        propagate.len(),
+        3,
+        "one propagate record per request even with no route mapping; got {records:?}"
+    );
+    assert!(
+        propagate
+            .iter()
+            .all(|(level, _)| *level == tracing::Level::INFO),
+        "sub-500 built-in defaults log info; got {records:?}"
+    );
+}
+
+#[test]
+fn unmapped_kind_falls_back_500() {
+    let recorder = LevelRecorder::default();
+    let records = Arc::clone(&recorder.records);
+    let reply = tracing::subscriber::with_default(recorder, || {
+        pipeline_error_to_reply(business_error("CUSTOM_CODE", "custom-kind"), "/x", None)
+    });
+    assert_eq!(reply.status, 500);
+    assert_eq!(
+        reply_json(&reply),
+        serde_json::json!({"error": "CUSTOM_CODE", "kind": "custom-kind"})
+    );
+
+    let records = records
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let propagate: Vec<_> = records
+        .iter()
+        .filter(|(_, message)| message.contains("Business error propagated"))
+        .collect();
+    assert_eq!(
+        propagate.len(),
+        1,
+        "the 500 closure logs one propagate record with no route mapping; got {records:?}"
+    );
+    assert_eq!(
+        propagate[0].0,
+        tracing::Level::WARN,
+        "the 500 closure logs warn; got {records:?}"
+    );
+}
+
+/// Level-aware recorder: captures `(level, message)` for every event so the
+/// propagate log policy (info below 500, warn at 500 or above) is pinnable.
+#[derive(Clone, Default)]
+struct LevelRecorder {
+    records: Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+}
+
+struct LevelMessageVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for LevelMessageVisitor<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" && self.0.is_empty() {
+            self.0.push_str(&format!("{value:?}"));
+        }
+    }
+}
+
+impl tracing::Subscriber for LevelRecorder {
+    fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut message = String::new();
+        event.record(&mut LevelMessageVisitor(&mut message));
+        self.records
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((*event.metadata().level(), message));
+    }
+}
+
+#[test]
+fn propagate_below_500_logs_info() {
+    let mapping = HttpErrorMapping::new().with_kind("not-found", 404);
+    let recorder = LevelRecorder::default();
+    let records = Arc::clone(&recorder.records);
+    let reply = tracing::subscriber::with_default(recorder, || {
+        pipeline_error_to_reply(
+            business_error("ORDER_NOT_FOUND", "not-found"),
+            "/orders",
+            Some(&mapping),
+        )
+    });
+    assert_eq!(reply.status, 404);
+
+    let records = records
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let propagate: Vec<_> = records
+        .iter()
+        .filter(|(_, message)| message.contains("Business error propagated"))
+        .collect();
+    assert_eq!(
+        propagate.len(),
+        1,
+        "exactly one propagate record (no double record); got {records:?}"
+    );
+    assert_eq!(propagate[0].0, tracing::Level::INFO);
+}
+
+#[test]
+fn propagate_at_or_above_500_logs_warn() {
+    let mapped = HttpErrorMapping::new().with_kind("conflict", 502);
+    let recorder = LevelRecorder::default();
+    let records = Arc::clone(&recorder.records);
+    let (mapped_reply, closed_reply) = tracing::subscriber::with_default(recorder, || {
+        (
+            pipeline_error_to_reply(business_error("UPSTREAM", "conflict"), "/a", Some(&mapped)),
+            // Empty tables: only the built-in 500 closure applies.
+            pipeline_error_to_reply(
+                business_error("CLOSED", "custom-kind"),
+                "/b",
+                Some(&HttpErrorMapping::new()),
+            ),
+        )
+    });
+    assert_eq!(mapped_reply.status, 502);
+    assert_eq!(closed_reply.status, 500);
+
+    let records = records
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let propagate: Vec<_> = records
+        .iter()
+        .filter(|(_, message)| message.contains("Business error propagated"))
+        .collect();
+    assert_eq!(
+        propagate.len(),
+        2,
+        "one propagate record per request; got {records:?}"
+    );
+    assert!(
+        propagate
+            .iter()
+            .all(|(level, _)| *level == tracing::Level::WARN),
+        "500-or-above outcomes log warn; got {records:?}"
+    );
+}
+
+#[test]
+fn load_rejects_out_of_domain_statuses() {
+    for status in [101, 200, 304, 700] {
+        for table in [MappingTable::Codes, MappingTable::Kinds] {
+            assert!(
+                validate_status(table, status).is_err(),
+                "status {status} must be rejected in the {} table",
+                table.name()
+            );
+        }
+    }
+    assert!(validate_status(MappingTable::Codes, 400).is_ok());
+    assert!(validate_status(MappingTable::Kinds, 599).is_ok());
+}
+
+#[test]
+fn load_rejects_blank_keys() {
+    for table in [MappingTable::Codes, MappingTable::Kinds] {
+        assert!(validate_key(table, "").is_err());
+        assert!(validate_key(table, "   ").is_err());
+        assert!(validate_key(table, "ORDER_NOT_FOUND").is_ok());
+    }
+
+    let blank_code = HttpErrorMapping::new().with_code("  ", 400);
+    assert!(blank_code.validate().is_err());
+    let blank_kind = HttpErrorMapping::new().with_kind("", 409);
+    assert!(blank_kind.validate().is_err());
+
+    let valid = HttpErrorMapping::new()
+        .with_code("ORDER_NOT_FOUND", 404)
+        .with_kind("conflict", 409);
+    assert!(valid.validate().is_ok());
+}
+
+#[test]
+fn programmatic_invalid_entry_treated_absent() {
+    // Invalid explicit kind entry: absent, built-in default decides (404).
+    let invalid_default = HttpErrorMapping::new().with_kind("not-found", 204);
+    let reply = pipeline_error_to_reply(
+        business_error("CODE", "not-found"),
+        "/x",
+        Some(&invalid_default),
+    );
+    assert_eq!(reply.status, 404);
+
+    // Invalid code entry: absent, the valid sibling kind entry applies.
+    let mixed = HttpErrorMapping::new()
+        .with_code("ORDER", 200)
+        .with_kind("conflict", 409);
+    let reply = pipeline_error_to_reply(business_error("ORDER", "conflict"), "/x", Some(&mixed));
+    assert_eq!(reply.status, 409);
+
+    // Invalid entry for an unknown kind: absent, 500 closure.
+    let unknown = HttpErrorMapping::new().with_kind("custom-kind", 200);
+    let reply =
+        pipeline_error_to_reply(business_error("CODE", "custom-kind"), "/x", Some(&unknown));
+    assert_eq!(reply.status, 500);
+}
+
+#[test]
+fn message_and_data_never_in_body() {
+    let mapping = HttpErrorMapping::new().with_code("ORDER_NOT_FOUND", 404);
+    let error = CamelError::Business {
+        code: "ORDER_NOT_FOUND".to_string(),
+        kind: "not-found".to_string(),
+        message: "order for alice@example.com not found".to_string(),
+        data: Some(camel_api::RedactedJson::new(serde_json::json!({
+            "customer": "alice@example.com",
+            "token": "hunter2",
+        }))),
+    };
+    let reply = pipeline_error_to_reply(error, "/orders", Some(&mapping));
+    assert_eq!(reply.status, 404);
+    assert_eq!(
+        reply_json(&reply),
+        serde_json::json!({"error": "ORDER_NOT_FOUND", "kind": "not-found"})
+    );
+    let body = reply_bytes(&reply);
+    for leaked in ["alice@example.com", "hunter2", "order for"] {
+        assert!(
+            !body.contains(leaked),
+            "reply body leaked {leaked:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn ok_exchange_with_error_never_2xx() {
+    let mapping = HttpErrorMapping::new().with_code("ORDER_NOT_FOUND", 404);
+
+    // Business error carried by an Ok exchange: the route's mapping applies.
+    let mut business = Exchange::new(Message::default());
+    business.set_error(business_error("ORDER_NOT_FOUND", "not-found"));
+    let reply = carried_error_reply(&mut business, "/orders", Some(&mapping))
+        .expect("a carried business error must produce a reply");
+    assert_eq!(reply.status, 404);
+    assert!(!(200..300).contains(&reply.status));
+
+    // Non-business error: the existing variant mapping applies.
+    let mut conversion = Exchange::new(Message::default());
+    conversion.set_error(CamelError::TypeConversionFailed("bad".to_string()));
+    let reply = carried_error_reply(&mut conversion, "/x", Some(&mapping))
+        .expect("a carried conversion error must produce a reply");
+    assert_eq!(reply.status, 500);
+    assert!(!(200..300).contains(&reply.status));
+
+    // No carried error: the success path is untouched.
+    let mut clean = Exchange::new(Message::default());
+    assert!(
+        carried_error_reply(&mut clean, "/x", Some(&mapping)).is_none(),
+        "a clean exchange must keep the normal success reply"
+    );
+}
+
+#[test]
+fn ok_with_validation_error_maps_400() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange.set_error(CamelError::ValidationError("invalid".to_string()));
+    let reply = carried_error_reply(&mut exchange, "/x", None)
+        .expect("a carried validation error must produce a reply");
+    assert_eq!(reply.status, 400);
+    assert_eq!(reply_json(&reply)["error"], "validation_error");
+}
+
+#[test]
+fn ok_with_consumer_stopping_maps_503() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange.set_error(CamelError::ConsumerStopping);
+    let reply = carried_error_reply(&mut exchange, "/x", None)
+        .expect("a carried shutdown error must produce a reply");
+    assert_eq!(reply.status, 503);
 }
 
 #[test]
@@ -10535,18 +10932,20 @@ async fn spawn_failing_auth_route(
                                     body: HttpReplyBody::Bytes(bytes::Bytes::from("ok")),
                                     failed: false,
                                 },
-                                Ok(Err(e)) => pipeline_error_to_reply(e, &path_owned),
+                                Ok(Err(e)) => pipeline_error_to_reply(e, &path_owned, None),
                                 Err(_) => pipeline_error_to_reply(
                                     CamelError::ProcessorError(
                                         "authenticator stalled beyond 10s".into(),
                                     ),
                                     &path_owned,
+                                    None,
                                 ),
                             }
                         }
                         None => pipeline_error_to_reply(
                             CamelError::Unauthenticated("no credential in any source".into()),
                             &path_owned,
+                            None,
                         ),
                     };
                     let _ = reply_tx.send(reply);

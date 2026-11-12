@@ -48,6 +48,84 @@ pub(crate) fn transport_from_uri(uri: &str) -> TransportId {
     scheme_transport(uri).unwrap_or(TransportId::Http)
 }
 
+/// Wrapper (delegating) consumer schemes: the component's consumer forwards
+/// consumption to a nested delegate URI carried inside the `from` URI, so the
+/// route's EFFECTIVE consumer is the delegate's.
+///
+/// `master` is the repo's only such component —
+/// `master:<lock-name>:<delegate-uri>`, parsed by
+/// `MasterUriConfig::parse` (`camel-master/src/config.rs`). Add a scheme here
+/// when a component starts a nested consumer on a delegate URI (the parse
+/// shape must then also be extended below).
+const WRAPPER_SCHEMES: [&str; 1] = ["master"];
+
+/// Maximum wrapper nesting (`master:a:master:b:http://…`). A chain deeper than
+/// this is treated as non-HTTP (fail-closed) so a pathological URI terminates.
+const MAX_WRAPPER_DEPTH: usize = 8;
+
+/// Strip ONE wrapper layer, returning the delegate URI.
+///
+/// Mirrors `MasterUriConfig::parse` (`camel-master/src/config.rs`):
+/// `splitn(3, ':')` — wrapper scheme, wrapper argument (the lock name), then
+/// the delegate URI verbatim (which may itself be wrapped, or contain `:` in
+/// its authority). A malformed wrapper URI (`master:lock` with no delegate,
+/// empty args) does NOT unwrap: it stays whatever the wrapper scheme is.
+fn unwrap_delegate_uri(uri: &str) -> Option<&str> {
+    let mut parts = uri.splitn(3, ':');
+    let scheme = parts.next()?;
+    if !WRAPPER_SCHEMES.contains(&scheme) {
+        return None;
+    }
+    let wrapper_arg = parts.next()?;
+    let delegate = parts.next()?;
+    if wrapper_arg.is_empty() || delegate.is_empty() {
+        return None;
+    }
+    Some(delegate)
+}
+
+/// Resolve the route's EFFECTIVE consumer URI by unwrapping delegating wrapper
+/// layers (`master:<lock>:http://…` → `http://…`).
+///
+/// Termination is the [`MAX_WRAPPER_DEPTH`] bound (the cycle guard): each
+/// layer strips its own prefix, and a chain that never reaches a terminal
+/// scheme is classified on the wrapper scheme itself (non-HTTP, fail-closed)
+/// instead of recursing forever. Anything not a recognised wrapper is terminal
+/// and returned verbatim.
+fn effective_consumer_uri(uri: &str) -> &str {
+    let mut current = uri;
+    for _ in 0..MAX_WRAPPER_DEPTH {
+        let Some(delegate) = unwrap_delegate_uri(current) else {
+            break;
+        };
+        current = delegate;
+    }
+    current
+}
+
+/// `true` when the route's EFFECTIVE consumer IS the HTTP transport
+/// (`http`/`https` scheme — the camel-http component, plain and rest-lowered
+/// routes alike).
+///
+/// This is the compile-time reply-ownership signal (business-error-model,
+/// bd rc-c3vds): that component's consumer finalizes every reply of its route
+/// through `pipeline_error_to_reply`, so the route's unmatched-propagate
+/// record is transport-owned and the resolved error handler logs DEBUG only.
+///
+/// Wrapper consumers (`master:<lock>:http://…`) delegate consumption to the
+/// nested URI, so classification unwraps to the EFFECTIVE consumer — otherwise
+/// such a route replies through the HTTP finalizer while the handler still
+/// logs its own WARN (double record). Deliberately a STRICT terminal scheme
+/// check — NOT [`transport_from_uri`], whose `Http` fallback would misclassify
+/// every non-server consumer (`timer`, `seda`, `direct`, …) as reply-owned;
+/// unknown or non-HTTP terminal schemes stay non-HTTP.
+pub(crate) fn route_is_http_consumer(uri: &str) -> bool {
+    matches!(
+        scheme_transport(effective_consumer_uri(uri)),
+        Some(TransportId::Http)
+    )
+}
+
 /// Consumer-backed server schemes that receive a [`RouteSecurityPlan`].
 /// Everything else (`timer:`, `direct:`, `mock:`, …) is not a server
 /// consumer and gets no plan.
@@ -215,3 +293,68 @@ pub fn compile_route_security_plan(
 #[cfg(test)]
 #[path = "route_compiler_ext_tests.rs"]
 mod compile_route_security;
+
+/// Wrapper-unwrapping tests (bd rc-c3vds fix): the effective-consumer
+/// unwrapping and its termination guard.
+#[cfg(test)]
+mod wrapper_consumer_tests {
+    use super::*;
+
+    #[test]
+    fn wrapper_over_http_is_http() {
+        assert!(route_is_http_consumer(
+            "master:lock:http://127.0.0.1:8080/x"
+        ));
+        assert!(route_is_http_consumer(
+            "master:lock:https://example.test/x?q=1"
+        ));
+        // Nested wrappers unwrap recursively.
+        assert!(route_is_http_consumer(
+            "master:outer:master:inner:http://127.0.0.1:8080/x"
+        ));
+    }
+
+    #[test]
+    fn wrapper_over_non_http_stays_non_http() {
+        assert!(!route_is_http_consumer("master:lock:seda:jobs"));
+        assert!(!route_is_http_consumer("master:lock:timer:tick"));
+        // Direct non-HTTP consumers are unaffected.
+        assert!(!route_is_http_consumer("seda:jobs"));
+        assert!(!route_is_http_consumer("timer:tick"));
+        assert!(route_is_http_consumer("http://127.0.0.1:8080/x"));
+    }
+
+    #[test]
+    fn malformed_wrapper_does_not_unwrap() {
+        assert!(!route_is_http_consumer("master:lock"));
+        assert!(!route_is_http_consumer("master::http://127.0.0.1:8080/x"));
+        assert!(!route_is_http_consumer("master:lock:"));
+        // The master parser is case-sensitive; classification mirrors it.
+        assert!(!route_is_http_consumer(
+            "Master:lock:http://127.0.0.1:8080/x"
+        ));
+    }
+
+    #[test]
+    fn wrapper_unwrapping_is_cycle_safe() {
+        // A pathological nested chain terminates at the depth bound instead of
+        // recursing; past the bound the terminal scheme is the wrapper itself
+        // → non-HTTP (fail-closed).
+        let mut uri = String::from("http://127.0.0.1:8080/x");
+        for _ in 0..MAX_WRAPPER_DEPTH + 2 {
+            uri = format!("master:lock:{uri}");
+        }
+        assert!(!route_is_http_consumer(&uri));
+        // Exactly at the bound still unwraps to the HTTP terminal.
+        let mut uri = String::from("http://127.0.0.1:8080/x");
+        for _ in 0..MAX_WRAPPER_DEPTH {
+            uri = format!("master:lock:{uri}");
+        }
+        assert!(route_is_http_consumer(&uri));
+        // A self-similar chain (same lock and tail repeated) also terminates.
+        assert_eq!(
+            effective_consumer_uri("master:a:master:a:master:a:seda:jobs"),
+            "seda:jobs"
+        );
+    }
+}

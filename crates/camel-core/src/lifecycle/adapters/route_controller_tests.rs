@@ -182,6 +182,7 @@ fn helper_functions_cover_non_async_branches() {
             security_authenticator: None,
             provider_registry: None,
             security_plan: None,
+            http_error_mapping: None,
         },
     };
 
@@ -2443,6 +2444,7 @@ fn swap_pipeline_rejects_lifecycle_bearing_route() {
             security_authenticator: None,
             provider_registry: None,
             security_plan: None,
+            http_error_mapping: None,
         },
     };
 
@@ -2502,6 +2504,7 @@ fn swap_pipeline_rejects_agg_service_route() {
             security_authenticator: None,
             provider_registry: None,
             security_plan: None,
+            http_error_mapping: None,
         },
     };
 
@@ -2547,6 +2550,7 @@ fn swap_pipeline_raw_bypasses_lifecycle_rejection() {
             security_authenticator: None,
             provider_registry: None,
             security_plan: None,
+            http_error_mapping: None,
         },
     };
 

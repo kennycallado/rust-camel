@@ -231,6 +231,7 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
             | BuilderStep::DeclarativeRemoveHeader { .. }
             | BuilderStep::DeclarativeSetProperty { .. }
             | BuilderStep::DeclarativeSetBody { .. }
+            | BuilderStep::DeclarativeThrow { .. }
             | BuilderStep::DeclarativeScript { .. }
             | BuilderStep::DeclarativeFunction { .. }
             | BuilderStep::Aggregate { .. }

@@ -1061,6 +1061,7 @@ mod tests {
                 security_authenticator: None,
                 provider_registry: None,
                 security_plan: None,
+                http_error_mapping: None,
             },
         }
     }
@@ -1551,6 +1552,7 @@ mod tests {
                     security_authenticator: None,
                     provider_registry: None,
                     security_plan: None,
+                    http_error_mapping: None,
                 },
             },
         );

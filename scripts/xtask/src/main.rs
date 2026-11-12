@@ -2279,6 +2279,9 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestBinding);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestOperation);
     ts_export!(ts_config, camel_dsl::route_ast::RouteDslRestResponse);
+    // Business-error-model Task 2.2: the rest block's error_mapping table
+    // (DSL-side serde mirror of camel_api::HttpErrorMapping, review m2).
+    ts_export!(ts_config, camel_dsl::route_ast::HttpErrorMappingTable);
     // MCP DSL types (rc-6pikg) — the mcp block surface modeled in
     // route-schema.json's envelope.
     ts_export!(ts_config, camel_dsl::mcp::RouteDslMcp);
@@ -2335,6 +2338,7 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::SplitStep);
     ts_export!(ts_config, camel_dsl::route_ast::StopStep);
     ts_export!(ts_config, camel_dsl::route_ast::StreamCacheStep);
+    ts_export!(ts_config, camel_dsl::route_ast::ThrowStep);
     ts_export!(ts_config, camel_dsl::route_ast::ThrottleStep);
     ts_export!(ts_config, camel_dsl::route_ast::ToStep);
     ts_export!(ts_config, camel_dsl::route_ast::TransformStep);
@@ -2367,6 +2371,7 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::SplitData);
     ts_export!(ts_config, camel_dsl::route_ast::SplitExpressionConfig);
     ts_export!(ts_config, camel_dsl::route_ast::StreamConfigYaml);
+    ts_export!(ts_config, camel_dsl::route_ast::ThrowData);
     ts_export!(ts_config, camel_dsl::route_ast::ThrottleData);
     ts_export!(ts_config, camel_dsl::route_ast::LoopFullConfig);
     ts_export!(ts_config, camel_dsl::route_ast::LoopWhileExpr);

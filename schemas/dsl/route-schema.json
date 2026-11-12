@@ -351,6 +351,20 @@
     "CatchClauseData": {
       "additionalProperties": false,
       "properties": {
+        "business_kind": {
+          "description": "Match a `CamelError::Business` by its `kind` payload.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "code": {
+          "description": "Match a `CamelError::Business` by its `code` payload.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "disposition": {
           "$ref": "#/$defs/ExceptionDisposition"
         },
@@ -858,6 +872,35 @@
       "required": [
         "function"
       ],
+      "type": "object"
+    },
+    "HttpErrorMappingTable": {
+      "additionalProperties": false,
+      "description": "The DSL-side serde surface of a business error to HTTP status table\n(review m2): mirrors [`camel_api::HttpErrorMapping`]'s `{codes, kinds}`\nwith plain serde maps so the rest block stays schema/ts-derived. Both\ntables are exact, case-sensitive string keys to client/server statuses;\nload-time validation rejects blank keys and values outside `400..=599`.",
+      "properties": {
+        "codes": {
+          "additionalProperties": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Exact business error code to HTTP status.",
+          "type": "object"
+        },
+        "kinds": {
+          "additionalProperties": {
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "Exact business error kind to HTTP status.",
+          "type": "object"
+        }
+      },
       "type": "object"
     },
     "IdempotentConsumerBody": {
@@ -1784,6 +1827,14 @@
     "RouteDslOnException": {
       "additionalProperties": false,
       "properties": {
+        "code": {
+          "default": null,
+          "description": "Restricts the clause to a business error whose `code` equals this value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "continued": {
           "default": null,
           "type": [
@@ -2046,6 +2097,17 @@
       "additionalProperties": false,
       "description": "A top-level REST block (`rest:` in YAML/JSON).",
       "properties": {
+        "error_mapping": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpErrorMappingTable"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Route-level business error to HTTP status mapping for EVERY operation\nin this block (business-error-model Task 2.2). The table mirrors\n[`camel_api::HttpErrorMapping`] with serde maps; lowering validates it\nwith the same load-time rules as the camel-api type (non-blank keys,\n400-599 values) and copies it onto each lowered route's\n`http_error_mapping` seam field. This rest block is the ONLY\ndocument-level authoring path — plain-route YAML authoring is deferred\nto the phase-3 errors catalog (owner decision Q5), and\n`deny_unknown_fields` keeps the key rejected on route documents."
+        },
         "host": {
           "default": "0.0.0.0",
           "description": "Listen host address.",
@@ -2434,6 +2496,10 @@
         },
         {
           "$ref": "#/$defs/SetHeaderStep"
+        },
+        {
+          "$ref": "#/$defs/ThrowStep",
+          "description": "Authored `throw` step."
         },
         {
           "$ref": "#/$defs/RemoveHeaderStep"
@@ -3286,6 +3352,55 @@
       },
       "required": [
         "throttle"
+      ],
+      "type": "object"
+    },
+    "ThrowData": {
+      "additionalProperties": false,
+      "description": "Authored `throw` payload: business `code`, `kind`, message, and diagnostics.",
+      "properties": {
+        "code": {
+          "default": null,
+          "description": "Stable machine-readable business code. Required and non-blank.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "data": {
+          "default": null,
+          "description": "Optional object of diagnostics; string leaves are Simple templates."
+        },
+        "kind": {
+          "default": null,
+          "description": "Optional business kind; defaults to `failed`. Non-blank when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "default": null,
+          "description": "Optional Simple message template; defaults to the `code` value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ThrowStep": {
+      "additionalProperties": false,
+      "description": "Authored `throw` step. `code` and `kind` are literal config; `message` is\na Simple template; `data` is an object whose string leaves are Simple\ntemplates interpolated at runtime.",
+      "properties": {
+        "throw": {
+          "$ref": "#/$defs/ThrowData",
+          "description": "The committed `throw` payload."
+        }
+      },
+      "required": [
+        "throw"
       ],
       "type": "object"
     },

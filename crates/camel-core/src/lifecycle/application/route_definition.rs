@@ -45,6 +45,10 @@ pub struct DeclarativeWhenStep {
 pub struct DoTryCatchClauseBuilder {
     pub exception: Option<Vec<String>>,
     pub when: Option<LanguageExpressionDef>,
+    /// Match a `CamelError::Business` whose `code` equals this value.
+    pub code: Option<String>,
+    /// Match a `CamelError::Business` whose `kind` equals this value.
+    pub business_kind: Option<String>,
     pub on_when: Option<LanguageExpressionDef>,
     pub disposition: camel_api::error_handler::ExceptionDisposition,
     pub steps: Vec<BuilderStep>,
@@ -136,6 +140,18 @@ pub enum BuilderStep {
     DeclarativeSetHeaderIfAbsent {
         key: String,
         value: ValueSourceDef,
+    },
+    /// Declarative throw: raises `CamelError::Business` at route-add time.
+    /// `message` and the string leaves of `data` are evaluated per exchange.
+    DeclarativeThrow {
+        /// Stable machine-readable business code (required, non-blank).
+        code: String,
+        /// Optional business kind; `None` means `failed`.
+        kind: Option<String>,
+        /// Optional message template; defaults to the `code` value.
+        message: Option<ValueSourceDef>,
+        /// Optional diagnostics object; its string leaves are templates.
+        data: Option<serde_json::Value>,
     },
     /// Declarative remove_header, resolved at route-add time.
     DeclarativeRemoveHeader {
@@ -456,6 +472,7 @@ impl BuilderStep {
 
             Self::DeclarativeSetHeader { .. } => Some("set-header".into()),
             Self::DeclarativeSetHeaderIfAbsent { .. } => Some("set-header-if-absent".into()),
+            Self::DeclarativeThrow { .. } => Some("throw".into()),
             Self::DeclarativeRemoveHeader { .. } => Some("remove-header".into()),
             Self::DeclarativeSetProperty { .. } => Some("set-property".into()),
             Self::DeclarativeSetBody { .. } => Some("set-body".into()),
@@ -530,6 +547,7 @@ impl BuilderStep {
             | Self::Log { .. }
             | Self::DeclarativeSetHeader { .. }
             | Self::DeclarativeSetHeaderIfAbsent { .. }
+            | Self::DeclarativeThrow { .. }
             | Self::DeclarativeRemoveHeader { .. }
             | Self::DeclarativeSetProperty { .. }
             | Self::DeclarativeSetBody { .. }
@@ -612,6 +630,7 @@ impl BuilderStep {
             | Self::Log { .. }
             | Self::DeclarativeSetHeader { .. }
             | Self::DeclarativeSetHeaderIfAbsent { .. }
+            | Self::DeclarativeThrow { .. }
             | Self::DeclarativeRemoveHeader { .. }
             | Self::DeclarativeSetProperty { .. }
             | Self::DeclarativeSetBody { .. }
@@ -733,6 +752,13 @@ pub struct RouteDefinition {
     pub(crate) security_audiences: Option<Vec<String>>,
     /// Optional Unit of Work config for in-flight tracking and completion hooks.
     pub(crate) unit_of_work: Option<UnitOfWorkConfig>,
+    /// Route-level business error to HTTP status mapping
+    /// ([`camel_api::HttpErrorMapping`], business-error-model Task 2.2).
+    /// Set ONLY by the rest-lowering seam (via the DSL compile); camel-core
+    /// installs it as an immutable snapshot on the consumer registration
+    /// ([`camel_component_api::ConsumerContext`]) at start AND resume so the
+    /// transport's reply finalizer maps business errors per route.
+    pub(crate) http_error_mapping: Option<camel_api::HttpErrorMapping>,
     /// User override for the consumer's concurrency model. `None` means
     /// "use whatever the consumer declares".
     pub(crate) concurrency: Option<ConcurrencyModel>,
@@ -760,6 +786,7 @@ impl RouteDefinition {
             security_provider: None,
             security_audiences: None,
             unit_of_work: None,
+            http_error_mapping: None,
             concurrency: None,
             route_id: String::new(), // Will be set by with_route_id()
             auto_startup: true,
@@ -870,6 +897,20 @@ impl RouteDefinition {
     pub fn with_unit_of_work(mut self, config: UnitOfWorkConfig) -> Self {
         self.unit_of_work = Some(config);
         self
+    }
+
+    /// Set the route-level business error to HTTP status mapping
+    /// (business-error-model Task 2.2). Produced by the rest-lowering seam;
+    /// camel-core snapshots it onto the consumer registration at start and
+    /// resume so suspend/resume preserves it.
+    pub fn with_http_error_mapping(mut self, mapping: camel_api::HttpErrorMapping) -> Self {
+        self.http_error_mapping = Some(mapping);
+        self
+    }
+
+    /// The route-level business error mapping, if set.
+    pub fn http_error_mapping(&self) -> Option<&camel_api::HttpErrorMapping> {
+        self.http_error_mapping.as_ref()
     }
 
     /// Get the unit of work config, if set.

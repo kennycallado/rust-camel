@@ -49,6 +49,19 @@ pub enum Expr {
     BodyField(Vec<PathSegment>),
     ExchangeProperty(String),
     ExceptionMessage,
+    /// The `CamelError::classify()` name of the current error
+    /// (`"io"`, `"http"`, …); `Null` when no error. ADR-0097 Q2.
+    ExceptionKind,
+    /// The business `code` of the current error; `Null` when the error is not
+    /// `CamelError::Business` or no error is present. ADR-0097.
+    ExceptionCode,
+    /// The business `kind` payload of the current error — the `Business.kind`
+    /// field, not `classify()`; `Null` for other variants. ADR-0097.
+    ExceptionBusinessKind,
+    /// A key path into the business `data` object; `Null` for any missing,
+    /// null, or non-traversable step. Index segments are rejected at parse
+    /// time (the spec traverses nested objects only). ADR-0097.
+    ExceptionData(Vec<PathSegment>),
     /// The whole error as `<variant_name>: <Display>`; `Null` when no error.
     Exception,
     LanguageDelegate {
@@ -1195,12 +1208,17 @@ fn parse_identifier(word: &str, input: &str) -> Result<Expr, LanguageError> {
 }
 
 /// True when `word` names a Simple lookup: `body`, `exception`,
-/// `exception.message`, or a scoped path under `body.`, `header.`,
-/// `property.`, or `exchangeProperty.`.
+/// `exception.message`, `exception.kind`, the business exception paths
+/// (`exception.code`, `exception.business_kind`, `exception.data.<path>`), or a
+/// scoped path under `body.`, `header.`, `property.`, or `exchangeProperty.`.
 fn is_lookup_word(word: &str) -> bool {
     word == "body"
         || word == "exception"
         || word == "exception.message"
+        || word == "exception.kind"
+        || word == "exception.code"
+        || word == "exception.business_kind"
+        || word.starts_with("exception.data.")
         || word.starts_with("body.")
         || word.starts_with("header.")
         || word.starts_with("property.")
@@ -1308,6 +1326,27 @@ fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
         return Ok(Expr::ExceptionMessage);
     }
 
+    // `exception.kind` is the classify() name, not a scoped body-ish path:
+    // handled inline like `exception.message` (ADR-0097 Q2, rc-7qv90).
+    if s == "exception.kind" {
+        return Ok(Expr::ExceptionKind);
+    }
+
+    // Business-error paths: `code`/`business_kind`/`data.<path>` (ADR-0097).
+    // Inline like the other exception lookups; the data path walks nested
+    // objects only.
+    if s == "exception.code" {
+        return Ok(Expr::ExceptionCode);
+    }
+
+    if s == "exception.business_kind" {
+        return Ok(Expr::ExceptionBusinessKind);
+    }
+
+    if let Some(path) = s.strip_prefix("exception.data.") {
+        return parse_exception_data_path(s, path);
+    }
+
     // Language delegate: `${jsonpath:$.a[0]}` etc. NOT a lookup path; the
     // `:` would be rejected by ExchangeLookupPath anyway, so this stays
     // inline.
@@ -1338,6 +1377,35 @@ fn parse_expr_atom(s: &str) -> Result<Expr, LanguageError> {
         expr: s.to_string(),
         reason: "unrecognized token".to_string(),
     })
+}
+
+/// Parse the dot path after `exception.data.` into key-only segments.
+///
+/// The business-error spec traverses nested objects only, so a numeric segment
+/// that the shared body grammar would read as an array index is a parse error
+/// here instead of silently inheriting body-field array semantics. Leading-zero
+/// runs (`"01"`) stay keys, matching the shared path rule.
+fn parse_exception_data_path(full: &str, path: &str) -> Result<Expr, LanguageError> {
+    let mut segments = Vec::new();
+    for seg in path.split('.') {
+        if seg.is_empty() {
+            return Err(LanguageError::ParseError {
+                expr: format!("${{{full}}}"),
+                reason: "empty segment in exception.data path".to_string(),
+            });
+        }
+        let index_like = seg.parse::<usize>().is_ok() && (seg == "0" || !seg.starts_with('0'));
+        if index_like {
+            return Err(LanguageError::ParseError {
+                expr: format!("${{{full}}}"),
+                reason: format!(
+                    "array index segment `{seg}` is not supported in exception.data paths (nested objects only)"
+                ),
+            });
+        }
+        segments.push(PathSegment::Key(seg.to_string()));
+    }
+    Ok(Expr::ExceptionData(segments))
 }
 
 /// Parse a scoped form via [`camel_api::ExchangeLookupPath`] and project to
@@ -1707,8 +1775,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_exception_kind_unsupported() {
-        assert!(parse("${exception.kind}").is_err());
+    fn parse_exception_kind() {
+        assert_eq!(parse("${exception.kind}").unwrap(), Expr::ExceptionKind);
+        let result = parse("kind: ${exception.kind}").unwrap();
+        assert_eq!(
+            result,
+            Expr::Interpolated(vec![
+                InterpolatedPart::Literal("kind: ".to_string()),
+                InterpolatedPart::Expr(Box::new(Expr::ExceptionKind)),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_exception_code_business_kind_and_data() {
+        assert_eq!(parse("${exception.code}").unwrap(), Expr::ExceptionCode);
+        assert_eq!(
+            parse("${exception.business_kind}").unwrap(),
+            Expr::ExceptionBusinessKind
+        );
+        assert_eq!(
+            parse("${exception.data.order.id}").unwrap(),
+            Expr::ExceptionData(vec![
+                PathSegment::Key("order".into()),
+                PathSegment::Key("id".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_exception_data_index_rejected() {
+        let err = parse("${exception.data.items.0}").expect_err("index segment must be rejected");
+        match err {
+            LanguageError::ParseError { reason, .. } => assert!(
+                reason.contains("index"),
+                "rejection must name the index-segment rule: {reason}"
+            ),
+            other => panic!("expected a typed parse error, got: {other:?}"),
+        }
     }
 
     #[test]

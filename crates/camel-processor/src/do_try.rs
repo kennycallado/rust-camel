@@ -15,6 +15,12 @@ pub enum CatchMatcher {
     ByVariant(Vec<String>),
     /// Match by a fallible predicate over the Exchange.
     Predicate(PredicateSource),
+    /// Match a `CamelError::Business` whose `code` equals this value.
+    /// Non-`Business` errors never match.
+    ByCode(String),
+    /// Match a `CamelError::Business` whose `kind` equals this value.
+    /// Non-`Business` errors never match.
+    ByBusinessKind(String),
 }
 
 impl CatchMatcher {
@@ -31,6 +37,17 @@ impl CatchMatcher {
                 Ok(names.iter().any(|n| n == err.variant_name()))
             }
             CatchMatcher::Predicate(source) => source.matches(ex).await,
+            CatchMatcher::ByCode(code) => Ok(matches!(
+                err,
+                CamelError::Business {
+                    code: error_code,
+                    ..
+                } if error_code == code
+            )),
+            CatchMatcher::ByBusinessKind(kind) => Ok(matches!(
+                err,
+                CamelError::Business { kind: error_kind, .. } if error_kind == kind
+            )),
         }
     }
 }

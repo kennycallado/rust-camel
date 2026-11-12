@@ -313,6 +313,7 @@ mod tests {
             })
             .collect();
         RouteDslRest {
+            error_mapping: None,
             host: "0.0.0.0".to_string(),
             port: 8080,
             path: path.to_string(),
@@ -592,6 +593,7 @@ mod tests {
             })
             .collect();
         RouteDslRest {
+            error_mapping: None,
             host: host.to_string(),
             port,
             path: path.to_string(),

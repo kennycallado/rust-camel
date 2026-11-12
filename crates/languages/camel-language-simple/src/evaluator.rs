@@ -2,6 +2,7 @@ use crate::ResolverFn;
 use crate::date::{DateOutput, DateSource};
 use crate::parser::{CallKind, Expr, InterpolatedPart, LogicalOp, Op, PathSegment};
 use camel_api::ExpressionErrorClass;
+use camel_api::error::CamelError;
 use camel_language_api::{Body, Exchange, LanguageError, Value};
 use serde_json::Number;
 use std::future::Future;
@@ -270,6 +271,50 @@ fn body_field_value(exchange: &Exchange, segments: &[PathSegment]) -> Result<Val
     }
 }
 
+/// Business `code` of the current error; `Null` for non-business variants and
+/// when no error is present. ADR-0097.
+fn business_code_value(exchange: &Exchange) -> Value {
+    match &exchange.error {
+        Some(CamelError::Business { code, .. }) => Value::String(code.clone()),
+        _ => Value::Null,
+    }
+}
+
+/// Business `kind` payload of the current error (not `classify()`); `Null` for
+/// non-business variants and when no error is present. ADR-0097.
+fn business_kind_value(exchange: &Exchange) -> Value {
+    match &exchange.error {
+        Some(CamelError::Business { kind, .. }) => Value::String(kind.clone()),
+        _ => Value::Null,
+    }
+}
+
+/// Walk the business `data` object by a key path.
+///
+/// Missing keys, explicit nulls, and traversal into a scalar or array end as
+/// `Null`: the grammar admits key segments only. Leaves keep their JSON shape,
+/// mirroring body-field scalar rendering (ADR-0092). ADR-0097.
+fn business_data_value(exchange: &Exchange, segments: &[PathSegment]) -> Value {
+    let Some(CamelError::Business {
+        data: Some(data), ..
+    }) = &exchange.error
+    else {
+        return Value::Null;
+    };
+    let mut current = data.as_value();
+    for seg in segments {
+        let key = match seg {
+            PathSegment::Key(key) => key,
+            _ => return Value::Null,
+        };
+        match current.get(key.as_str()) {
+            Some(next) => current = next,
+            None => return Value::Null,
+        }
+    }
+    current.clone()
+}
+
 /// Evaluate atom/leaf variants. The caller is responsible for charging one
 /// work unit. Returns `None` for compound nodes.
 #[inline]
@@ -281,6 +326,13 @@ fn eval_leaf(expr: &Expr, exchange: &Exchange) -> Option<Value> {
             Some(err) => Value::String(err.to_string()),
             None => Value::Null,
         },
+        Expr::ExceptionKind => match &exchange.error {
+            Some(err) => Value::String(err.classify().to_string()),
+            None => Value::Null,
+        },
+        Expr::ExceptionCode => business_code_value(exchange),
+        Expr::ExceptionBusinessKind => business_kind_value(exchange),
+        Expr::ExceptionData(segments) => business_data_value(exchange, segments),
         Expr::Exception => match &exchange.error {
             Some(err) => Value::String(format!("{}: {}", err.variant_name(), err)),
             None => Value::Null,
@@ -467,6 +519,17 @@ where
                 Some(err) => Ok(Value::String(err.to_string())),
                 None => Ok(Value::Null),
             },
+
+            Expr::ExceptionKind => match &ctx.exchange.error {
+                Some(err) => Ok(Value::String(err.classify().to_string())),
+                None => Ok(Value::Null),
+            },
+
+            Expr::ExceptionCode => Ok(business_code_value(ctx.exchange)),
+
+            Expr::ExceptionBusinessKind => Ok(business_kind_value(ctx.exchange)),
+
+            Expr::ExceptionData(segments) => Ok(business_data_value(ctx.exchange, segments)),
 
             Expr::Exception => match &ctx.exchange.error {
                 Some(err) => Ok(Value::String(format!("{}: {}", err.variant_name(), err))),
@@ -837,7 +900,7 @@ pub(crate) fn value_type_name(v: &Value) -> &'static str {
 mod tests {
     use super::*;
     use camel_api::error::CamelError;
-    use camel_api::{StreamBody, StreamMetadata};
+    use camel_api::{RedactedJson, StreamBody, StreamMetadata};
     use camel_language_api::{Expression, Language, Message};
     use serde_json::json;
     use std::sync::Arc;
@@ -1205,6 +1268,153 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(or_short, Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn evaluate_exception_kind_with_error() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::Io("disk".to_string()));
+        let result = evaluate(&Expr::ExceptionKind, &ex, &None).await.unwrap();
+        assert_eq!(result, Value::String("io".to_string()));
+    }
+
+    #[tokio::test]
+    async fn evaluate_exception_kind_without_error() {
+        let ex = Exchange::default();
+        let result = evaluate(&Expr::ExceptionKind, &ex, &None).await.unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    /// Build an exchange carrying a `Business` error with `data`.
+    fn business_exchange(code: &str, kind: &str, data: serde_json::Value) -> Exchange {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::Business {
+            code: code.to_string(),
+            kind: kind.to_string(),
+            message: String::new(),
+            data: Some(RedactedJson::new(data)),
+        });
+        ex
+    }
+
+    /// `ExceptionData` for a key path.
+    fn data_path(keys: &[&str]) -> Expr {
+        Expr::ExceptionData(
+            keys.iter()
+                .map(|key| PathSegment::Key((*key).to_string()))
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn eval_business_code_payload_kind_and_nested_data() {
+        let ex = business_exchange(
+            "ORDER_NOT_FOUND",
+            "not-found",
+            json!({"order": {"id": "A-1"}}),
+        );
+        assert_eq!(
+            evaluate(&Expr::ExceptionCode, &ex, &None).await.unwrap(),
+            json!("ORDER_NOT_FOUND")
+        );
+        assert_eq!(
+            evaluate(&Expr::ExceptionBusinessKind, &ex, &None)
+                .await
+                .unwrap(),
+            json!("not-found")
+        );
+        assert_eq!(
+            evaluate(&data_path(&["order", "id"]), &ex, &None)
+                .await
+                .unwrap(),
+            json!("A-1")
+        );
+        // rc-7qv90 surface: classify() name, not the business payload kind.
+        assert_eq!(
+            evaluate(&Expr::ExceptionKind, &ex, &None).await.unwrap(),
+            json!("business")
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_non_business_code_empty_business_paths() {
+        let mut ex = Exchange::default();
+        ex.set_error(CamelError::Io("disk".to_string()));
+        assert_eq!(
+            evaluate(&Expr::ExceptionCode, &ex, &None).await.unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&Expr::ExceptionBusinessKind, &ex, &None)
+                .await
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&Expr::ExceptionKind, &ex, &None).await.unwrap(),
+            json!("io")
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_no_error_paths_empty() {
+        let ex = Exchange::default();
+        assert_eq!(
+            evaluate(&Expr::ExceptionCode, &ex, &None).await.unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&Expr::ExceptionBusinessKind, &ex, &None)
+                .await
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&data_path(&["any"]), &ex, &None).await.unwrap(),
+            Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_null_and_scalar_intermediate_data_empty() {
+        let ex = business_exchange("C", "kind", json!({"a": {"b": null}, "n": 3}));
+        assert_eq!(
+            evaluate(&data_path(&["a", "b"]), &ex, &None).await.unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&data_path(&["a", "b", "c"]), &ex, &None)
+                .await
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&data_path(&["n"]), &ex, &None).await.unwrap(),
+            json!(3)
+        );
+        assert_eq!(
+            evaluate(&data_path(&["n", "child"]), &ex, &None)
+                .await
+                .unwrap(),
+            Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_missing_null_untraversable_data_empty() {
+        let ex = business_exchange("C", "kind", json!({"a": {"b": 1}}));
+        assert_eq!(
+            evaluate(&data_path(&["zzz"]), &ex, &None).await.unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&data_path(&["a", "c"]), &ex, &None).await.unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            evaluate(&data_path(&["a", "b"]), &ex, &None).await.unwrap(),
+            json!(1)
+        );
     }
 
     #[tokio::test]

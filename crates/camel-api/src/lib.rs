@@ -29,6 +29,7 @@ pub mod filter;
 pub mod from_body;
 pub mod function;
 pub mod health;
+pub mod http_error_mapping;
 
 pub mod idempotent;
 pub mod in_flight;
@@ -86,7 +87,7 @@ pub use endpoint_pipeline::{CAMEL_SLIP_ENDPOINT, EndpointPipelineConfig, Endpoin
 pub use endpoint_uri::EndpointUri;
 pub use error::{
     BoxError, CIRCUIT_OPEN, CamelError, ConfigValidationError, ConversionDetail, EndpointUriError,
-    ErrorPosition, ExpressionErrorClass, OpaqueErrorSource,
+    ErrorPosition, ExpressionErrorClass, OpaqueErrorSource, RedactedJson,
 };
 pub use error_handler::{
     BoundaryKind, ErrorHandlerConfig, ExceptionDisposition, ExceptionPolicy,
@@ -110,6 +111,11 @@ pub use function::{
     FunctionInvoker, FunctionInvokerSync, PatchBody,
 };
 pub use health::{AsyncHealthCheck, CheckResult, HealthReport, HealthSource, ServiceHealth};
+pub use http_error_mapping::{
+    DEFAULT_BUSINESS_STATUS, HttpErrorMapping, HttpErrorMappingError, MAX_MAPPED_STATUS,
+    MIN_MAPPED_STATUS, MappingTable, business_status, default_kind_status, is_mapped_status,
+    validate_key, validate_status,
+};
 pub use idempotent::IdempotentRepository;
 pub use in_flight::{InFlightClaim, InFlightGauge};
 pub use layer::{CamelErrorAdapter, LayerFactory, ProcessorLayer, SegmentProcessor};

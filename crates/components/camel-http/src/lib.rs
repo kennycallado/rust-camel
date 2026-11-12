@@ -61,6 +61,7 @@ use tracing::debug;
 use axum::body::BodyDataStream;
 use camel_api::PROPERTY_HTTP_CONTENT_TYPE_INHERITED;
 use camel_api::component_metadata::ComponentMetadata;
+use camel_api::http_error_mapping::HttpErrorMapping;
 use camel_auth::bearer_token_layer::BearerTokenLayer;
 use camel_auth::oauth2::TokenProvider;
 use camel_component_api::tls_source::ServerTlsSource;
@@ -2097,6 +2098,15 @@ impl Consumer for HttpConsumer {
         // claim minted at the acceptance dequeue below.
         let in_flight = ctx.in_flight_counter();
 
+        // Business-error-model Task 2.2: capture the route's business error
+        // mapping snapshot ONCE per registration (start; the runtime also
+        // installs it on the resume path) and pass it to the reply finalizer
+        // per invocation. No global or ambient lookup — the registration
+        // seam is the only carriage. `Some(_)` marks a seam route. Reply
+        // ownership is NOT carried here: it derives from the route's
+        // `http`/`https` consumer scheme at route-compile time (bd rc-c3vds).
+        let error_mapping = ctx.http_error_mapping();
+
         let path = self.config.path.clone();
         let registry_for_cleanup = registry.clone();
         let server_exited = registry.server_exited.clone();
@@ -2208,6 +2218,10 @@ impl Consumer for HttpConsumer {
                         full.parse().unwrap_or_default()
                     };
                     let kernel = kernel.clone();
+                    // Per-registration mapping snapshot (Task 2.2): cloned
+                    // into the per-request task so the reply finalizer maps
+                    // business errors with THIS route's table.
+                    let error_mapping = error_mapping.clone();
 
                     // Spawn a task to handle this request concurrently
                     //
@@ -2284,6 +2298,7 @@ impl Consumer for HttpConsumer {
                                             let _ = reply_tx.send(pipeline_error_to_reply(
                                                 e,
                                                 &path_clone,
+                                                None,
                                             ));
                                             return;
                                         }
@@ -2300,6 +2315,7 @@ impl Consumer for HttpConsumer {
                                             "no credential found in any source".to_string(),
                                         ),
                                         &path_clone,
+                                        None,
                                     ));
                                     return;
                                 }
@@ -2327,7 +2343,18 @@ impl Consumer for HttpConsumer {
                         .and_then(|r| r);
 
                         let reply = match result {
-                            Ok(out) => {
+                            Ok(mut out) => {
+                                // rc-7lkp2: a completed pipeline result that
+                                // still carries an error must never answer
+                                // 2xx. Map it exactly like any other pipeline
+                                // error (route mapping for business errors,
+                                // existing variant mappings otherwise).
+                                if let Some(reply) =
+                                    carried_error_reply(&mut out, &path_clone, error_mapping.as_ref())
+                                {
+                                    let _ = reply_tx.send(reply);
+                                    return;
+                                }
                                 let status = out
                                     .input
                                     .header("CamelHttpResponseCode")
@@ -2413,7 +2440,7 @@ impl Consumer for HttpConsumer {
                                 }
                             }
                             Err(e) => {
-                                pipeline_error_to_reply(e, &path_clone)
+                                pipeline_error_to_reply(e, &path_clone, error_mapping.as_ref())
                             }
                         };
 
@@ -3680,8 +3707,18 @@ pub(crate) fn lock_registry_test_mutex() -> std::sync::MutexGuard<'static, ()> {
 ///   `not_acceptable` (REST lowering gate),
 /// - `Unauthenticated`/`Unauthorized` → 401/403,
 /// - `ConsumerStopping` → 503,
+/// - `Business` → the route's `HttpErrorMapping` (explicit code, explicit
+///   kind, built-in default kind map, then 500) with a body of exactly
+///   `{"error": <code>, "kind": <kind>}` — never `message`/`data`, never 2xx;
+///   the propagate record is info below 500 and warn at 500 or above,
+///   following the effective mapped status: an absent mapping still applies
+///   the built-in default kind map and the 500 closure, so it logs too,
 /// - all other errors → 500 Internal Server Error.
-fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
+fn pipeline_error_to_reply(
+    e: CamelError,
+    path: &str,
+    mapping: Option<&HttpErrorMapping>,
+) -> HttpReply {
     match e {
         CamelError::Unauthenticated(msg) => {
             tracing::warn!(error = %msg, path = %path, "Authentication failed");
@@ -3734,6 +3771,37 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
                 format!("accept {accept}, produced {produced}"),
             )
         }
+        CamelError::Business { code, kind, .. } => {
+            // The log names the operator-authored code and kind only.
+            // `message` is log-only by contract and `data` is redacted
+            // diagnostics, so neither enters the record or the reply body
+            // (ADR-0032).
+            let status = camel_api::http_error_mapping::business_status(mapping, &code, &kind);
+            // The finalizer owns the single propagate record for the business
+            // error it maps: info below 500, warn at 500 or above including the
+            // built-in 500 closure (owner decision Q7). The level follows the
+            // effective mapped status, not the presence of a route mapping: an
+            // absent mapping still applies the built-in default kind map and
+            // the 500 closure.
+            if status < 500 {
+                tracing::info!(
+                    code = %code,
+                    kind = %kind,
+                    status,
+                    path = %path,
+                    "Business error propagated to HTTP reply"
+                );
+            } else {
+                tracing::warn!(
+                    code = %code,
+                    kind = %kind,
+                    status,
+                    path = %path,
+                    "Business error propagated to HTTP reply (server error closure)"
+                );
+            }
+            business_error_reply(status, &code, &kind)
+        }
         e => {
             // log-policy: handler-owned
             tracing::warn!(error = %e, path = %path, "Pipeline error processing HTTP request");
@@ -3745,6 +3813,47 @@ fn pipeline_error_to_reply(e: CamelError, path: &str) -> HttpReply {
             }
         }
     }
+}
+
+/// Build the JSON reply for a business error.
+///
+/// The body is exactly `{"error": <code>, "kind": <kind>}`. `message` and
+/// `data` never appear in it: `code` and `kind` are operator-authored, while
+/// the rest of the payload is runtime exchange data (ADR-0032). The status is
+/// resolved upstream by `camel_api::http_error_mapping::business_status`,
+/// which never yields 2xx.
+fn business_error_reply(status: u16, code: &str, kind: &str) -> HttpReply {
+    let body = serde_json::to_string(&serde_json::json!({
+        "error": code,
+        "kind": kind,
+    }))
+    .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+    HttpReply {
+        status,
+        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+        body: HttpReplyBody::Bytes(bytes::Bytes::from(body)),
+        failed: true,
+    }
+}
+
+/// Reply for a pipeline result that completed but still carries an error
+/// (bd `rc-7lkp2`).
+///
+/// A handler-configured or seam route can return `Ok(exchange)` with the
+/// error still set (for example when the seam suppresses the synthetic
+/// dead-letter producer without clearing the error). Such an exchange must
+/// never answer 2xx, so it is mapped through the same finalizer as any other
+/// pipeline error: the existing variant mappings for non-business errors and
+/// the route's error mapping for a business error. Returns `None` when the
+/// exchange carries no error, leaving the normal success path untouched.
+fn carried_error_reply(
+    out: &mut Exchange,
+    path: &str,
+    mapping: Option<&HttpErrorMapping>,
+) -> Option<HttpReply> {
+    out.error
+        .take()
+        .map(|e| pipeline_error_to_reply(e, path, mapping))
 }
 
 /// Build a JSON error reply with the given status, error code, and message.

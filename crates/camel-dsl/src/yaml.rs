@@ -34,8 +34,8 @@ use crate::model::{
     RecipientListStepDef, RemoveHeaderStepDef, ResequenceModeDef, ResequenceStepDef,
     RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef,
     SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef,
-    SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
-    ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ThrowStepDef,
+    ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, CacheBody, CacheClearBody,
@@ -52,15 +52,16 @@ pub use crate::route_ast::{
     SetBodyConfig, SetBodyData, SetBodyStep, SetHeaderData, SetHeaderStep, SetPropertyData,
     SetPropertyStep, SortBody, SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml,
     SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
-    StreamCapacityPolicyYaml, StreamGapPolicyYaml, ThrottleData, ThrottleStep, ToStep,
-    TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
+    StreamCapacityPolicyYaml, StreamGapPolicyYaml, ThrottleData, ThrottleStep, ThrowData,
+    ThrowStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
-const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 41] = [
+const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 42] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
+    DeclarativeStepKind::Throw,
     DeclarativeStepKind::SetProperty,
     DeclarativeStepKind::SetBody,
     DeclarativeStepKind::Filter,
@@ -465,6 +466,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                                 .map(route_step_to_declarative_step)
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok::<_, CamelError>(DeclarativeOnException {
+                                code: clause.code,
                                 kind: clause.kind,
                                 message_contains: clause.message_contains,
                                 retry: clause.retry.map(|retry| DeclarativeRedeliveryPolicy {
@@ -719,6 +721,10 @@ pub(crate) fn route_dsl_to_declarative_route(
         security_policy,
         unit_of_work,
         steps,
+        // Business-error-model Task 2.2: the seam carriage set by rest
+        // lowering (plain-route YAML cannot author it — the
+        // `#[serde(skip_deserializing)]` fence rejects the key).
+        http_error_mapping: route.http_error_mapping,
     })
 }
 
@@ -926,6 +932,44 @@ pub(crate) fn route_step_to_declarative_step(
             Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
                 key: set_header.key,
                 value,
+            }))
+        }
+        RouteDslStep::Throw(ThrowStep { throw }) => {
+            let code = throw.code.unwrap_or_default();
+            if code.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "throw: code must not be empty".into(),
+                ));
+            }
+            let kind = match throw.kind {
+                Some(kind) => {
+                    if kind.trim().is_empty() {
+                        return Err(CamelError::RouteError(
+                            "throw: kind must not be empty".into(),
+                        ));
+                    }
+                    Some(kind.trim().to_string())
+                }
+                None => None,
+            };
+            if let Some(data) = throw.data.as_ref()
+                && !data.is_object()
+            {
+                return Err(CamelError::RouteError(
+                    "throw: data must be a JSON object".into(),
+                ));
+            }
+            let message = throw.message.map(|source| {
+                ValueSourceDef::Expression(LanguageExpressionDef {
+                    language: "simple".to_string(),
+                    source,
+                })
+            });
+            Ok(DeclarativeStep::Throw(ThrowStepDef {
+                code: code.trim().to_string(),
+                kind,
+                message,
+                data: throw.data,
             }))
         }
         RouteDslStep::RemoveHeader(RemoveHeaderStep { remove_header }) => {
@@ -1832,24 +1876,31 @@ pub(crate) fn route_step_to_declarative_step(
                                 .into(),
                         ));
                     }
-                    // Spec §7.2 Rule 1: matcher exclusivity — must have exactly one main matcher.
-                    if c.exception.is_some() && c.when.is_some() {
+                    // Spec §7.2 Rule 1: matcher exclusivity — exactly one main matcher
+                    // (`exception` XOR `when` XOR `code` XOR `business_kind`).
+                    let main_matchers = [
+                        c.exception.is_some(),
+                        c.when.is_some(),
+                        c.code.is_some(),
+                        c.business_kind.is_some(),
+                    ]
+                    .into_iter()
+                    .filter(|present| *present)
+                    .count();
+                    if main_matchers != 1 {
                         return Err(CamelError::Config(
-                            "doTry catch clause cannot specify both `exception` and `when`".into(),
-                        ));
-                    }
-                    if c.exception.is_none() && c.when.is_none() {
-                        return Err(CamelError::Config(
-                            "doTry catch clause must specify exactly one of `exception` or `when`"
+                            "doTry catch clause must specify exactly one main matcher: \
+                             `exception`, `when`, `code`, or `business_kind`"
                                 .into(),
                         ));
                     }
-                    // Spec §7.2 Rule 2: `on_when` is allowed ONLY when `exception` is the main
-                    // matcher. `on_when` alongside `when` (alone) is a hard error.
-                    if c.on_when.is_some() && c.exception.is_none() {
+                    // Spec §7.2 Rule 2: `on_when` is allowed ONLY with `exception`,
+                    // `code`, or `business_kind` as the main matcher. `on_when`
+                    // alongside `when` (alone) is a hard error.
+                    if c.on_when.is_some() && c.when.is_some() {
                         return Err(CamelError::Config(
-                            "doTry catch clause `on_when` requires `exception` as the main matcher \
-                             (not `when`)"
+                            "doTry catch clause `on_when` requires `exception`, `code`, or \
+                             `business_kind` as the main matcher (not `when`)"
                                 .into(),
                         ));
                     }
@@ -1900,6 +1951,8 @@ pub(crate) fn route_step_to_declarative_step(
                     Ok(DoTryCatchClauseDef {
                         exception,
                         when,
+                        code: c.code,
+                        business_kind: c.business_kind,
                         on_when,
                         disposition: c.disposition,
                         steps: clause_steps,
@@ -6361,6 +6414,7 @@ routes:
             security_policy: None,
             on_complete: None,
             on_failure: None,
+            http_error_mapping: None,
         };
         let declarative = route_dsl_to_declarative_route(route).unwrap();
         match &declarative.steps[0] {

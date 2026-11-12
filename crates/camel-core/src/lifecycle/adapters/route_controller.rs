@@ -34,7 +34,7 @@ use crate::lifecycle::CohortActivationGate;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::route_compiler::TracerPipelineGating;
 use crate::lifecycle::adapters::route_compiler_ext::{
-    RouteCompilerExt, build_eh_config_pipeline, transport_from_uri,
+    RouteCompilerExt, build_eh_config_pipeline, route_is_http_consumer, transport_from_uri,
 };
 use crate::lifecycle::adapters::route_helpers::{
     AggregateSplitInfo, CrashNotification, ManagedRoute, assert_no_mixed_top_level_splits,
@@ -619,6 +619,7 @@ impl DefaultRouteController {
             provider_registry,
             unit_of_work,
             concurrency,
+            http_error_mapping,
             ..
         } = definition;
 
@@ -644,8 +645,18 @@ impl DefaultRouteController {
         )?;
         lifecycle.extend(fallback_lifecycle);
         let route_id_for_tracing = route_id.clone();
+        // Business-error-model Task 2.2: capture the seam mapping BEFORE the
+        // handler configuration is consumed (eh_config resolution below) — the
+        // mapping is orthogonal to the error handler and must survive staging
+        // so BOTH start and resume registrations can install it.
+        let business_seam_bypass = http_error_mapping.is_some();
         let eh_config = error_handler.or_else(|| self.global_error_handler.clone());
         let transport = transport_from_uri(&from_uri);
+        // Reply ownership (bd rc-c3vds) is keyed on the consumer SCHEME, not
+        // on the mapping: an HTTP consumer finalizes every reply (plain and
+        // rest-lowered alike), so the handler must leave the propagate record
+        // to the finalizer.
+        let reply_seam = route_is_http_consumer(&from_uri);
 
         let mut pipeline = build_eh_config_pipeline(
             eh_config.as_ref(),
@@ -663,6 +674,8 @@ impl DefaultRouteController {
             transport,
             circuit_breaker,
             Arc::clone(&self.in_flight_total),
+            business_seam_bypass,
+            reply_seam,
         )?;
 
         let uow_counter = if let Some(uow_config) = &unit_of_work {
@@ -717,6 +730,7 @@ impl DefaultRouteController {
                 security_authenticator,
                 provider_registry,
                 security_plan,
+                http_error_mapping,
             },
         })
     }

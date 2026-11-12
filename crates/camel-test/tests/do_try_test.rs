@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use camel_api::body::Body;
-use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange};
+use camel_api::{BoxProcessor, BoxProcessorExt, CamelError, Exchange, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::test_support::acquire_deadline;
 use camel_component_http::HttpComponent;
@@ -1036,6 +1036,384 @@ routes:
         .unwrap()
         .assert_exchange_count(0)
         .await;
+
+    h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// doTry catch business matchers (business-error-model task 1.3)
+// ---------------------------------------------------------------------------
+
+/// doTry body throws `Business { code: "ORDER_NOT_FOUND" }`; the catch clause
+/// matches by `code` with a `handled` disposition → the route completes and
+/// the catch body runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn catch_by_code_matches_business_error() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = r#"
+routes:
+  - id: "catch-by-code"
+    from: "direct:catch-by-code"
+    steps:
+      - do_try:
+          steps:
+            - throw: { code: "ORDER_NOT_FOUND", kind: "not-found" }
+          catch:
+            - code: "ORDER_NOT_FOUND"
+              disposition: handled
+              steps:
+                - set_body: "caught"
+                - to: "mock:code-caught"
+"#;
+    for route in parse_yaml(yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let outcome = send_when_registered(&h, "direct:catch-by-code", Exchange::default()).await;
+    assert!(
+        outcome.is_ok(),
+        "handled `code` catch must complete the route, got: {outcome:?}"
+    );
+
+    let endpoint = h.mock().get_endpoint("code-caught").unwrap();
+    endpoint.await_exchanges(1, Duration::from_secs(5)).await;
+    endpoint.assert_exchange_count(1).await;
+    let received = endpoint.get_received_exchanges().await;
+    assert_eq!(received[0].input.body.as_text(), Some("caught"));
+
+    h.stop().await;
+}
+
+/// Two `code` clauses: the first is refined by `on_when`. With
+/// `retry: "true"` the first clause runs; with `retry: "false"` it falls
+/// through to the second.
+#[tokio::test(flavor = "multi_thread")]
+async fn catch_by_code_with_on_when_combination() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = r#"
+routes:
+  - id: "catch-by-code-on-when"
+    from: "direct:code-on-when"
+    steps:
+      - do_try:
+          steps:
+            - throw: { code: "ORDER_NOT_FOUND", kind: "not-found" }
+          catch:
+            - code: "ORDER_NOT_FOUND"
+              on_when: "${header.retry} == 'true'"
+              disposition: handled
+              steps:
+                - set_body: "first"
+                - to: "mock:first"
+            - code: "ORDER_NOT_FOUND"
+              disposition: handled
+              steps:
+                - set_body: "second"
+                - to: "mock:second"
+"#;
+    for route in parse_yaml(yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let mut retry_true = Exchange::default();
+    retry_true
+        .input
+        .set_header("retry", Value::String("true".into()));
+    let outcome = send_when_registered(&h, "direct:code-on-when", retry_true).await;
+    assert!(outcome.is_ok(), "retry=true must be handled: {outcome:?}");
+
+    let first = h.mock().get_endpoint("first").unwrap();
+    first.await_exchanges(1, Duration::from_secs(5)).await;
+    first.assert_exchange_count(1).await;
+    h.mock()
+        .get_endpoint("second")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    let mut retry_false = Exchange::default();
+    retry_false
+        .input
+        .set_header("retry", Value::String("false".into()));
+    let outcome = send_when_registered(&h, "direct:code-on-when", retry_false).await;
+    assert!(outcome.is_ok(), "retry=false must be handled: {outcome:?}");
+
+    let second = h.mock().get_endpoint("second").unwrap();
+    second.await_exchanges(1, Duration::from_secs(5)).await;
+    second.assert_exchange_count(1).await;
+    first.assert_exchange_count(1).await;
+
+    h.stop().await;
+}
+
+/// `business_kind` matches the `Business.kind` payload and nothing else:
+/// a `ValidationError` never matches the same clause.
+#[tokio::test(flavor = "multi_thread")]
+async fn catch_by_business_kind() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let validation_route = RouteBuilder::from("direct:validation-fail")
+        .route_id("validation-fail")
+        .process_fn(BoxProcessor::from_fn(|_ex: Exchange| {
+            Box::pin(async { Err(CamelError::ValidationError("bad".into())) })
+        }))
+        .build()
+        .unwrap();
+    h.add_route(validation_route).await.unwrap();
+
+    let yaml = r#"
+routes:
+  - id: "catch-by-business-kind"
+    from: "direct:kind-business"
+    steps:
+      - do_try:
+          steps:
+            - throw: { code: "ORDER_CONFLICT", kind: "conflict" }
+          catch:
+            - business_kind: "conflict"
+              disposition: handled
+              steps:
+                - set_body: "handled"
+                - to: "mock:kind-caught"
+  - id: "catch-by-business-kind-non-business"
+    from: "direct:kind-non-business"
+    steps:
+      - do_try:
+          steps:
+            - to: "direct:validation-fail"
+          catch:
+            - business_kind: "conflict"
+              disposition: handled
+              steps:
+                - to: "mock:kind-should-not-run"
+"#;
+    for route in parse_yaml(yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let outcome = send_when_registered(&h, "direct:kind-business", Exchange::default()).await;
+    assert!(
+        outcome.is_ok(),
+        "kind conflict must be handled: {outcome:?}"
+    );
+    let caught = h.mock().get_endpoint("kind-caught").unwrap();
+    caught.await_exchanges(1, Duration::from_secs(5)).await;
+    caught.assert_exchange_count(1).await;
+
+    let outcome = send_when_registered(&h, "direct:kind-non-business", Exchange::default()).await;
+    match outcome {
+        Err(CamelError::ValidationError(msg)) => assert_eq!(msg, "bad"),
+        other => panic!("non-business error must not match `business_kind`: {other:?}"),
+    }
+    h.mock()
+        .get_endpoint("kind-should-not-run")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    h.stop().await;
+}
+
+/// Two payload matchers on one clause are rejected at load with the typed
+/// matcher-exclusivity error.
+#[test]
+fn two_payload_matchers_fail_load() {
+    let yaml = r#"
+routes:
+  - id: "two-payload-matchers"
+    from: "direct:two-payload-matchers"
+    steps:
+      - do_try:
+          steps:
+            - throw: { code: "ORDER_NOT_FOUND" }
+          catch:
+            - code: "ORDER_NOT_FOUND"
+              business_kind: "not-found"
+              disposition: handled
+              steps:
+                - set_body: "caught"
+"#;
+    let err = match parse_yaml(yaml) {
+        Ok(_) => panic!("two payload matchers must fail load"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected the typed matcher-exclusivity error, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exactly one") && msg.contains("code") && msg.contains("business_kind"),
+        "error must name the exclusivity rule and both matchers: {msg}"
+    );
+}
+
+/// `on_when` alongside a `when` main matcher keeps failing load with the
+/// existing `on_when` rule error.
+#[test]
+fn on_when_with_when_alone_fails_load() {
+    let yaml = r#"
+routes:
+  - id: "on-when-with-when"
+    from: "direct:on-when-with-when"
+    steps:
+      - do_try:
+          steps:
+            - throw: { code: "ORDER_NOT_FOUND" }
+          catch:
+            - when: "${body} == 'x'"
+              on_when: "${header.retry} == 'true'"
+              disposition: handled
+              steps:
+                - set_body: "caught"
+"#;
+    let err = match parse_yaml(yaml) {
+        Ok(_) => panic!("on_when with `when` alone must fail load"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, CamelError::Config(_)),
+        "expected the typed `on_when` rule error, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("on_when"),
+        "error must name `on_when`: {err}"
+    );
+}
+
+/// A non-`Business` error never matches a `code` clause.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_business_never_matches_code_clause() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let io_route = RouteBuilder::from("direct:io-fail")
+        .route_id("io-fail")
+        .process_fn(BoxProcessor::from_fn(|_ex: Exchange| {
+            Box::pin(async { Err(CamelError::Io("disk".into())) })
+        }))
+        .build()
+        .unwrap();
+    h.add_route(io_route).await.unwrap();
+
+    let yaml = r#"
+routes:
+  - id: "non-business-code"
+    from: "direct:non-business-code"
+    steps:
+      - do_try:
+          steps:
+            - to: "direct:io-fail"
+          catch:
+            - code: "X"
+              disposition: handled
+              steps:
+                - to: "mock:code-should-not-run"
+"#;
+    for route in parse_yaml(yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let outcome = send_when_registered(&h, "direct:non-business-code", Exchange::default()).await;
+    match outcome {
+        Err(CamelError::Io(msg)) => assert_eq!(msg, "disk"),
+        other => panic!("non-business error must not match a `code` clause: {other:?}"),
+    }
+    h.mock()
+        .get_endpoint("code-should-not-run")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    h.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// doTry catch-body exception paths (business-error-model task 1.5)
+// ---------------------------------------------------------------------------
+
+/// Inside the matching catch body, `${exception.code}` reads the business
+/// `code`; after the block the error is cleared, so the same expression
+/// renders empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn catch_visibility_simple_code_inside_catch_body() {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .build()
+        .await;
+
+    let yaml = r#"
+routes:
+  - id: "catch-visibility"
+    from: "direct:catch-visibility"
+    steps:
+      - do_try:
+          steps:
+            - throw: { code: "Y" }
+          catch:
+            - code: "Y"
+              disposition: handled
+              steps:
+                - set_body: "inside=${exception.code}"
+                - to: "mock:catch-visible"
+      - set_body: "after=${exception.code}"
+      - to: "mock:catch-cleared"
+"#;
+    for route in parse_yaml(yaml).expect("YAML parse failed") {
+        h.add_route(route).await.unwrap();
+    }
+
+    h.start().await;
+
+    let outcome = send_when_registered(&h, "direct:catch-visibility", Exchange::default()).await;
+    assert!(
+        outcome.is_ok(),
+        "handled `code` catch must complete the route, got: {outcome:?}"
+    );
+
+    let inside = h.mock().get_endpoint("catch-visible").unwrap();
+    inside.await_exchanges(1, Duration::from_secs(5)).await;
+    let received = inside.get_received_exchanges().await;
+    assert_eq!(
+        received[0].input.body.as_text(),
+        Some("inside=Y"),
+        "`${{exception.code}}` must read the business code inside the catch body"
+    );
+
+    let after = h.mock().get_endpoint("catch-cleared").unwrap();
+    after.await_exchanges(1, Duration::from_secs(5)).await;
+    let received = after.get_received_exchanges().await;
+    assert_eq!(
+        received[0].input.body.as_text(),
+        Some("after="),
+        "`${{exception.code}}` must be empty after the block clears the error"
+    );
 
     h.stop().await;
 }

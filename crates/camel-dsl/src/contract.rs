@@ -4,6 +4,8 @@ pub enum DeclarativeStepKind {
     Log,
     SetHeader,
     SetHeaderIfAbsent,
+    /// Raises a business error from committed `throw` config.
+    Throw,
     ContentNegotiation,
     SetProperty,
     SetBody,
@@ -50,10 +52,11 @@ pub enum DeclarativeStepKind {
     RemoveHeader,
 }
 
-pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 41] = [
+pub const MANDATORY_DECLARATIVE_STEP_KINDS: [DeclarativeStepKind; 42] = [
     DeclarativeStepKind::To,
     DeclarativeStepKind::Log,
     DeclarativeStepKind::SetHeader,
+    DeclarativeStepKind::Throw,
     DeclarativeStepKind::SetProperty,
     DeclarativeStepKind::SetBody,
     DeclarativeStepKind::Filter,
@@ -158,9 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn mandatory_kinds_has_41_entries() {
-        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 41);
-        assert_eq!(mandatory_declarative_step_kinds().len(), 41);
+    fn mandatory_kinds_has_42_entries() {
+        assert_eq!(MANDATORY_DECLARATIVE_STEP_KINDS.len(), 42);
+        assert_eq!(mandatory_declarative_step_kinds().len(), 42);
+        assert!(
+            mandatory_declarative_step_kinds().contains(&DeclarativeStepKind::Throw),
+            "the throw step is a mandatory declarative kind"
+        );
     }
 
     #[test]

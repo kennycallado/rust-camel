@@ -198,7 +198,10 @@ fn record_step_metrics(
     }
     if let Err(e) = result {
         let error_class = e.classify();
-        if error_class != CIRCUIT_OPEN {
+        // Business failures are breaker-neutral (they count as a success) and
+        // skip the error family exactly like `CircuitOpen`; the exchange and
+        // duration families still count.
+        if error_class != CIRCUIT_OPEN && !matches!(e, CamelError::Business { .. }) {
             // allow-open-label rc-otxh (classify() returns a closed &'static str set: exhaustive match in CamelError::classify)
             metrics.increment_errors(route_id, error_class);
         }

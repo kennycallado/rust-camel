@@ -14,6 +14,16 @@ use camel_api::{CamelError, Exchange, PredicateSource};
 use std::future::Future;
 use std::pin::Pin;
 
+/// Emit the catch-handled business log (business-error-model 1.6).
+///
+/// Only `code`/`kind` are structured; `message` and `data` are never
+/// serialized into the record.
+fn log_catch_business(error: &CamelError) {
+    if let CamelError::Business { code, kind, .. } = error {
+        tracing::info!(code = %code, kind = %kind, "business error handled by doTry catch");
+    }
+}
+
 /// - `Handled`: the exchange continues through finally and downstream.
 /// - `Propagate`: the catch body runs for side effects, finally runs with the
 ///   catch body's exchange, and the original try-error re-throws as `Failed`.
@@ -197,12 +207,14 @@ impl OutcomePipeline for DoTrySegment {
                             PipelineOutcome::Completed(mut next) => {
                                 match catch.disposition {
                                     ExceptionDisposition::Handled => {
+                                        log_catch_business(&err);
                                         next.handle_error();
                                         current_ex = next;
                                         catch_matched = true;
                                         break;
                                     }
                                     ExceptionDisposition::Continued => {
+                                        log_catch_business(&err);
                                         next.clear_error();
                                         current_ex = next;
                                         catch_matched = true;

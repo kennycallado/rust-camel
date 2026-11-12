@@ -49,6 +49,7 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
     match step {
         RouteDslStep::To(_) => (),
         RouteDslStep::SetHeader(_) => (),
+        RouteDslStep::Throw(_) => (),
         RouteDslStep::SetHeaderIfAbsent(_) => (),
         // Skip-deserializing variant (like SetHeaderIfAbsent): no parity
         // case possible — it never round-trips through YAML/JSON.

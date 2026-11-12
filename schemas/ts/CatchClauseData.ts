@@ -2,4 +2,12 @@
 import type { ExceptionDisposition } from "./ExceptionDisposition";
 import type { RouteDslStep } from "./RouteDslStep";
 
-export type CatchClauseData = { exception: Array<string> | null, when: string | null, on_when: string | null, disposition: ExceptionDisposition, steps: Array<RouteDslStep>, };
+export type CatchClauseData = { exception: Array<string> | null, when: string | null, 
+/**
+ * Match a `CamelError::Business` by its `code` payload.
+ */
+code: string | null, 
+/**
+ * Match a `CamelError::Business` by its `kind` payload.
+ */
+business_kind: string | null, on_when: string | null, disposition: ExceptionDisposition, steps: Array<RouteDslStep>, };

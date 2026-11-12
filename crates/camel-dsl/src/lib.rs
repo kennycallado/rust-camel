@@ -53,8 +53,8 @@ pub use model::{
     DeclarativeSecurityPolicy, DeclarativeStep, EnrichStepDef, FilterStepDef,
     LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
     ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
-    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ToStepDef,
-    ValueSourceDef, WhenStepDef, WireTapStepDef,
+    SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrowStepDef,
+    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use openapi::generate_openapi;
 pub use util::MAX_ROUTE_FILE_SIZE;

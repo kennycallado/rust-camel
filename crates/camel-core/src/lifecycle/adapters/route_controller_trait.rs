@@ -372,8 +372,13 @@ impl camel_api::RouteController for DefaultRouteController {
         let tx_for_storage = tx.clone();
         // drainclaim: the consumer context mints one claim per envelope
         // sent through `send`/`send_and_wait` — counted from acceptance.
+        // Business-error-model Task 2.2: the route's mapping snapshot is
+        // installed on the same registration seam so the consumer's reply
+        // finalizer maps business errors per route.
+        let http_error_mapping = managed.compiled.http_error_mapping.clone();
         let consumer_ctx = ConsumerContext::new(tx, consumer_cancel.clone(), route_id.to_string())
-            .with_in_flight_counter(Arc::clone(&self.in_flight_total));
+            .with_in_flight_counter(Arc::clone(&self.in_flight_total))
+            .with_http_error_mapping(http_error_mapping);
 
         // direct-inline-dispatch Task 2.2: publish the inline dispatcher
         // capability for every non-Concurrent topology. Sequential and the
@@ -988,9 +993,13 @@ impl camel_api::RouteController for DefaultRouteController {
 
         // Create ConsumerContext with the stored sender. drainclaim: same
         // counter installation as the start path — resumed routes count.
+        // Business-error-model Task 2.2: the mapping snapshot rides the
+        // resume registration too, so a suspend/resume cycle preserves it.
+        let http_error_mapping = managed.compiled.http_error_mapping.clone();
         let consumer_ctx =
             ConsumerContext::new(sender, consumer_cancel.clone(), route_id.to_string())
-                .with_in_flight_counter(Arc::clone(&self.in_flight_total));
+                .with_in_flight_counter(Arc::clone(&self.in_flight_total))
+                .with_http_error_mapping(http_error_mapping);
 
         // direct-inline-dispatch Task 3.3 (bd rc-y4vk): mirror the
         // start_route publication on the resume path. Without this the

@@ -204,6 +204,15 @@ pub struct ConsumerContext {
     /// start. The runtime writes the effective stop budget before
     /// cancelling; the channel value `None` means "not yet written".
     stop_budget: Option<watch::Receiver<Option<std::time::Duration>>>,
+    /// Route-level business error to HTTP status mapping
+    /// ([`camel_api::HttpErrorMapping`], business-error-model Task 2.2).
+    /// Immutable snapshot installed by the camel-core runtime at consumer
+    /// registration — on BOTH the start and the resume paths — so the
+    /// consumer passes it to its reply finalizer per invocation. `Some(_)`
+    /// marks a seam route (rest lowering always sets it); `None` for routes
+    /// without a mapping. No global or ambient lookup: this trusted
+    /// registration seam is the only carriage.
+    http_error_mapping: Option<camel_api::HttpErrorMapping>,
 }
 
 impl ConsumerContext {
@@ -234,6 +243,7 @@ impl ConsumerContext {
             inline_dispatcher: Arc::new(OnceLock::new()),
             in_flight: None,
             stop_budget: None,
+            http_error_mapping: None,
         }
     }
 
@@ -263,6 +273,25 @@ impl ConsumerContext {
     /// `None` for contexts without a gauge (tests) — callers mint none.
     pub fn in_flight_counter(&self) -> Option<Arc<InFlightGauge>> {
         self.in_flight.clone()
+    }
+
+    /// Install the route-level business error mapping snapshot on this
+    /// context (business-error-model Task 2.2). The camel-core runtime calls
+    /// this at consumer registration — on BOTH the start and the resume
+    /// paths — so suspend/resume preserves the mapping.
+    pub fn with_http_error_mapping(mut self, mapping: Option<camel_api::HttpErrorMapping>) -> Self {
+        self.http_error_mapping = mapping;
+        self
+    }
+
+    /// Returns the route-level business error mapping snapshot, if the route
+    /// carries one. `Some(_)` marks a seam route (rest lowering always sets
+    /// it, empty tables when the rest block declares none); consumers capture
+    /// it ONCE at `start(ctx)` and pass it to their reply finalizer per
+    /// invocation. There is no global or ambient lookup — this trusted
+    /// registration seam is the only carriage.
+    pub fn http_error_mapping(&self) -> Option<camel_api::HttpErrorMapping> {
+        self.http_error_mapping.clone()
     }
 
     /// Install the stop-budget slot on this context.

@@ -9,6 +9,7 @@ use camel_dsl::{
 #[test]
 fn declarative_route_compiles_literal_steps_and_route_metadata() {
     let route = DeclarativeRoute {
+        http_error_mapping: None,
         from: "timer:tick".into(),
         route_id: "dsl-route".into(),
         auto_startup: false,
@@ -35,6 +36,7 @@ fn declarative_route_compiles_literal_steps_and_route_metadata() {
 #[test]
 fn declarative_script_compiles_to_dedicated_runtime_step() {
     let route = DeclarativeRoute {
+        http_error_mapping: None,
         from: "timer:tick".into(),
         route_id: "dsl-script".into(),
         auto_startup: true,
@@ -63,6 +65,7 @@ fn declarative_script_compiles_to_dedicated_runtime_step() {
 #[test]
 fn declarative_language_steps_are_deferred_to_runtime_registry() {
     let route = DeclarativeRoute {
+        http_error_mapping: None,
         from: "timer:tick".into(),
         route_id: "dsl-langs".into(),
         auto_startup: true,

@@ -30,6 +30,7 @@ use camel_processor::resequencer::{
 // so existing imports and the compile_route_security test filter keep
 // working without churn (split per the 1k-line rule, bd rc-ivro).
 pub use super::route_security::compile_route_security_plan;
+pub(crate) use super::route_security::route_is_http_consumer;
 pub(crate) use super::route_security::transport_from_uri;
 
 use camel_processor::security_policy_layer::SecurityPolicyLayer;
@@ -56,11 +57,27 @@ use crate::shared::observability::domain::DetailLevel;
 // ── Free functions (shared between RouteCompilerExt and DefaultRouteController) ──
 
 /// Resolve an `ErrorHandlerConfig` into a `DefaultRouteErrorHandler`.
+///
+/// `business_seam_bypass` is the route's HTTP seam flag
+/// (business-error-model Task 2.2, review C1): a route carrying
+/// `http_error_mapping: Some(_)` never dispatches BUSINESS errors to the
+/// synthetic Handled catch-all or the default dead-letter producer — the
+/// error propagates to the transport's reply finalizer instead. Explicit
+/// author-authored clauses keep their dispositions and explicit `handled_by`
+/// producers; non-business errors are untouched.
+///
+/// `reply_seam` is the route's reply-ownership flag (bd rc-c3vds): the route's
+/// consumer IS the HTTP transport, so the finalizer owns the single
+/// unmatched-propagate record and the handler logs DEBUG only. Independent of
+/// `business_seam_bypass`: mapping keys the DLC bypass, scheme keys log
+/// ownership.
 pub(super) fn resolve_error_handler(
     config: ErrorHandlerConfig,
     producer_ctx: &ProducerContext,
     rt: Arc<dyn camel_component_api::RuntimeObservability>,
     component_ctx: &dyn ComponentContext,
+    business_seam_bypass: bool,
+    reply_seam: bool,
 ) -> Result<DefaultRouteErrorHandler, CamelError> {
     // Resolve DLC URI → producer.
     let dlc_producer = if let Some(ref uri) = config.dlc_uri {
@@ -76,7 +93,8 @@ pub(super) fn resolve_error_handler(
 
     // Backward compat: when a DLC is configured with no explicit policies,
     // add a catch-all Handled policy so errors are absorbed (old behavior).
-    let policies = if config.policies.is_empty() && dlc_producer.is_some() {
+    let no_explicit_policies = config.policies.is_empty();
+    let policies = if no_explicit_policies && dlc_producer.is_some() {
         vec![ExceptionPolicy {
             matches: Arc::new(|_| true),
             retry: None,
@@ -87,6 +105,10 @@ pub(super) fn resolve_error_handler(
     } else {
         config.policies
     };
+    // The synthetic catch-all is the ONLY policy the bypass excludes from
+    // business errors; author-authored clauses keep matching. `None` when
+    // every policy is author-authored (the bypass then has nothing to skip).
+    let synthetic_policy = (no_explicit_policies && dlc_producer.is_some()).then_some(0usize);
 
     // Resolve per-policy `handled_by` URIs.
     let mut resolved_policies = Vec::new();
@@ -106,7 +128,9 @@ pub(super) fn resolve_error_handler(
 
     Ok(
         DefaultRouteErrorHandler::new(dlc_producer, resolved_policies)
-            .with_use_original_message(config.use_original_message),
+            .with_use_original_message(config.use_original_message)
+            .with_business_seam_bypass(business_seam_bypass, synthetic_policy)
+            .with_reply_seam(reply_seam),
     )
 }
 
@@ -190,6 +214,8 @@ pub(crate) fn build_eh_config_pipeline(
     transport: TransportId,
     circuit_breaker: Option<CircuitBreakerConfig>,
     in_flight_total: Arc<InFlightGauge>,
+    business_seam_bypass: bool,
+    reply_seam: bool,
 ) -> Result<BoxProcessor, CamelError> {
     Ok(if let Some(config) = eh_config {
         // ── New path: RouteChannelService with explicit gates ──
@@ -213,6 +239,8 @@ pub(crate) fn build_eh_config_pipeline(
             producer_ctx,
             rt,
             component_ctx.as_ref(),
+            business_seam_bypass,
+            reply_seam,
         )?) as Arc<dyn RouteErrorHandler>;
 
         // Build ctx: real metrics from controller (or NoOpMetrics fallback) +
@@ -688,6 +716,11 @@ impl RouteCompilerExt<'_> {
     ) -> Result<crate::lifecycle::domain::CompiledPipeline, CamelError> {
         let route_id = def.route_id().to_string();
         let transport = transport_from_uri(def.from_uri());
+        // Reply ownership (bd rc-c3vds) is keyed on the consumer SCHEME, not
+        // on the mapping: an HTTP consumer finalizes every reply (plain and
+        // rest-lowered alike), so the handler must leave the propagate record
+        // to the finalizer. Computed before `def` is partially moved.
+        let reply_seam = route_is_http_consumer(def.from_uri());
 
         let producer_ctx = self.build_producer_context(&route_id)?;
 
@@ -731,6 +764,10 @@ impl RouteCompilerExt<'_> {
             .error_handler
             .clone()
             .or_else(|| self.global_error_handler.clone());
+        // Business-error-model Task 2.2: the seam flag rides the compiled
+        // pipeline so the resolved error handler bypasses default DLC
+        // dispatch for business errors on mapping-carrying routes.
+        let business_seam_bypass = def.http_error_mapping.is_some();
 
         let mut pipeline = build_eh_config_pipeline(
             eh_config.as_ref(),
@@ -748,6 +785,8 @@ impl RouteCompilerExt<'_> {
             transport,
             circuit_breaker,
             Arc::clone(&self.in_flight_total),
+            business_seam_bypass,
+            reply_seam,
         )?;
 
         // Apply UoW layer outermost
