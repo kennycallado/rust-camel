@@ -1,0 +1,46 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "sessionID": "ses_e2feca09affeSHAjNqOHgLD2Y8",
+  "impl_head_at_review": "ef0d744e5",
+  "findings": 3,
+  "disposition": [
+    {
+      "finding": "important — metadata.rs parity surface omitted createGroup/groupStart uri_params",
+      "status": "fixed",
+      "commits": ["post-ef0d744e5 metadata parity commit", "34c16990a"]
+    },
+    {
+      "finding": "minor — XADD mapped server-coded rejections to unknown-outcome text",
+      "status": "fixed + test added (xadd_server_coded_reply_names_definite_no_apply, 34c16990a) + refactor to remove dummy-error probe (00afe4c1)",
+      "commits": ["34c16990a", "00afe4c1"]
+    },
+    {
+      "finding": "minor — docs version-floor sentence states a floor no code enforces (features are Redis 5.0-era)",
+      "status": "discarded — contradicts binding mission decision 4 (owner + e_opus audit mandate the 'Redis >= 7.0 (Valkey >= 7.2 compatible)' docs sentence); recorded-decision deferral"
+    }
+  ],
+  "post_fix_reviews": [
+    { "sessionID": "ses_e2fe2443affeSYIIPPWYgsS83F", "verdict": "APPROVE-WITH-FINDINGS", "findings": "1 minor (dummy-error probe)" },
+    { "sessionID": "ses_e2fdc96b8ffe4BL9vuLUIAQse0", "verdict": "APPROVE" }
+  ],
+  "final_head": "00afe4c1",
+  "stage4_expert": {
+    "expert": "experts/e_gpt",
+    "sessionID": "ses_e2fda8271ffeh9J4iWLxyBL5WC",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "hash_at_review": "sha256:6108ee6706abe164cdb1d30238c739bde895925a6598435f034817de07308436",
+    "finding": "minor — migration note omitted Rust-source breaks (RedisCommand exhaustive matches; RedisEndpointConfig literals)",
+    "disposition": "fixed in ae6dbe916, re-reviewed APPROVE (ses_e2fd6e941ffea32x2ua9A3G64R)"
+  },
+  "final_head_after_stage4": "ae6dbe916",
+  "gates_at_final_head": {
+    "cargo_test_camel_component_redis_lib": "0 (764 passed)",
+    "cargo_fmt_check": "0",
+    "clippy_camel_component_redis": "0",
+    "gates_local_sh": "0 (29 passed, 4 network/docs skipped by script design)",
+    "live_redis_roundtrip": "0 (20 passed, docker 29.9.2, re-run at final head)"
+  },
+  "date": "2026-11-12"
+}

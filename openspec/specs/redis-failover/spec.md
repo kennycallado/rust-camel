@@ -630,7 +630,10 @@ The camel-redis component SHALL classify retry-transience of a
 and `redis::RedisError::kind()` downcast from the preserved source chain —
 not by lowercase substring matching on `err.to_string()`. The verdict table
 SHALL be behaviorally identical to the legacy substring table for every
-realizable redis-transport input. Conversion boundaries on the
+realizable redis-transport input EXCEPT the three settled stream server
+codes `NOGROUP`, `BUSYGROUP`, and `NOPERM`: for those, rule 5 decides by
+code alone, and a legacy classifier word inside such a message SHALL NOT
+flip the verdict to transient. Conversion boundaries on the
 classification paths (component `commands/*.rs`, `topology.rs` resolve and
 connect, `executor.rs` connect, `queue.rs`/`pubsub.rs` reconnect wraps,
 `retry.rs` budget exhaustion) SHALL preserve the structured error in the
@@ -644,15 +647,18 @@ typed marker source (`TransientRetryBudgetExhausted`, `TransportTimeout`,
 source chain whose kind is `Server(ReadOnly)`, `ClusterConnectionNotFound`,
 or `Io` carrying an `io::Error` source of kind `ConnectionRefused`,
 `ConnectionReset`, `ConnectionAborted`, `BrokenPipe`, or `TimedOut` →
-transient; (5) a preserved `redis::RedisError` matched by none of those
-enumerated shapes → an explicit documented legacy-substring fallback on
-THAT RedisError's own Display; (6) anything else (including plain
+transient; (5) a preserved `redis::RedisError` whose server code
+(`RedisError::code()`) is `NOGROUP`, `BUSYGROUP`, or `NOPERM` → not
+transient, decided by the server code alone ahead of any text matching;
+(6) a preserved `redis::RedisError` matched by none of the enumerated
+shapes → an explicit documented legacy-substring fallback on THAT
+RedisError's own Display; (7) anything else (including plain
 `ProcessorError` text with no redis error or marker in its chain) → not
 transient. Verdict identity SHALL be proven per conversion site by a
 static-prose audit: a wrap site whose static prose contains a legacy
 classifier word SHALL produce an always-transient structure (marker), and
 a site whose prose contains no classifier word SHALL have its legacy
-verdict reproduced by rules 4–5 on the preserved error.
+verdict reproduced by rules 4–6 on the preserved error.
 
 #### Scenario: refused connection classified transient through preserved structure
 
@@ -707,12 +713,12 @@ verdict reproduced by rules 4–5 on the preserved error.
 #### Scenario: documented fallback preserves unenumerated spellings
 
 - **GIVEN** a preserved `redis::RedisError` matched by no enumerated kind
-  shape — e.g. a server-controlled message embedding a classifier word
-  (`ERR connection lost while …`), a TLS inner error whose text contains
-  one, or a redis-rs static detail like `SSL Handshake error`
+  shape or server code — e.g. a server-controlled message embedding a
+  classifier word (`ERR connection lost while …`), a TLS inner error whose
+  text contains one, or a redis-rs static detail like `SSL Handshake error`
 - **WHEN** classified
 - **THEN** the verdict matches the legacy substring table exactly (the
-  rule-5 fallback is the only place substring matching remains, it tests
+  rule-6 fallback is the only place substring matching remains, it tests
   only the RedisError's own Display, and it is documented at the match
   site)
 
@@ -733,6 +739,24 @@ verdict reproduced by rules 4–5 on the preserved error.
   (e.g. a CA path containing `readonly`)
 - **WHEN** classified
 - **THEN** the verdict is not transient (rc-ezi0f early return preserved)
+
+#### Scenario: stream server codes are decided by code alone
+
+- **GIVEN** preserved `redis::RedisError` server errors with codes
+  `NOGROUP …`, `BUSYGROUP …`, and `NOPERM …` (one classification run each)
+- **WHEN** classified after boundary conversion
+- **THEN** each verdict is not transient, decided by the server code under
+  rule 5 — no substring test runs on the message text
+
+#### Scenario: classifier word inside a settled code message does not flip the verdict
+
+- **GIVEN** a preserved `redis::RedisError` server error whose code is
+  `NOPERM` and whose message embeds a legacy classifier word (e.g.
+  `NOPERM connection is not allowed for this user`)
+- **WHEN** classified after boundary conversion
+- **THEN** the verdict is not transient — rule 5 decides by code alone,
+  and this verdict deliberately differs from the legacy substring table
+  (which would have matched `connection` and said transient)
 
 ### Requirement: Repository transient classifications are observable in the component-operations family
 

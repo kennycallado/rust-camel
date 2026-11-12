@@ -115,6 +115,8 @@ pub enum RedisCommand {
     Geohash,
 
     // Stream operations
+    Xadd,
+    Xlen,
     Xreadgroup,
 
     // Pub/Sub operations
@@ -237,6 +239,8 @@ impl FromStr for RedisCommand {
             "GEOHASH" => Ok(RedisCommand::Geohash),
 
             // Stream operations
+            "XADD" => Ok(RedisCommand::Xadd),
+            "XLEN" => Ok(RedisCommand::Xlen),
             "XREADGROUP" => Ok(RedisCommand::Xreadgroup),
 
             // Pub/Sub operations
@@ -528,6 +532,38 @@ impl ClusterConfig {
 
 // --- RedisEndpointConfig (parsed from URI) ---
 
+/// Start position used when the consumer creates its group.
+///
+/// Maps to the `XGROUP CREATE` id: [`GroupStart::Latest`] to `$` and
+/// [`GroupStart::Earliest`] to `0`. Parsed from the `groupStart` URI parameter,
+/// which accepts exactly `latest` or `earliest`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupStart {
+    /// Deliver only entries added after the group was created (`$`).
+    Latest,
+    /// Deliver every entry already in the stream (`0`).
+    Earliest,
+}
+
+impl GroupStart {
+    /// The `XGROUP CREATE` id this start position maps to.
+    pub fn as_group_id(self) -> &'static str {
+        match self {
+            GroupStart::Latest => "$",
+            GroupStart::Earliest => "0",
+        }
+    }
+
+    /// Parse the URI spelling: exactly `latest` or `earliest`.
+    fn parse(value: &str) -> Result<Self, CamelError> {
+        match value {
+            "latest" => Ok(GroupStart::Latest),
+            "earliest" => Ok(GroupStart::Earliest),
+            _ => Err(group_start_value_error(value)),
+        }
+    }
+}
+
 /// Configuration parsed from a Redis URI.
 ///
 /// Format: `redis://host:port?command=GET&...` or `redis://?command=GET` (no host/port)
@@ -556,6 +592,9 @@ impl ClusterConfig {
 /// - `streamRecoverEnabled` - Recover pending entries before reading new ones (default: false)
 /// - `streamRecoverMinIdleMs` - Minimum pending idle time for recovery, in ms (default: 60000)
 /// - `streamRecoverBatch` - Maximum pending entries claimed per recovery batch (default: 10)
+/// - `createGroup` - Create the consumer group before the first read (default: false)
+/// - `groupStart` - Start position for group creation, `latest` or `earliest`
+///   (required exactly when `createGroup=true`; no default)
 /// - `username` - Redis ACL username for data-node authentication (default: None)
 /// - `password` - Redis password for authentication (default: None)
 /// - `db` - Redis database number, 0-16383 (default: 0)
@@ -607,6 +646,16 @@ pub struct RedisEndpointConfig {
     /// Maximum pending entries claimed per recovery batch. Only meaningful
     /// for XREADGROUP, range 1..=100. Default: 10.
     pub stream_recover_batch: u64,
+
+    /// Create the consumer group with `XGROUP CREATE ... MKSTREAM` before the
+    /// first read. Only meaningful for XREADGROUP. Default: false, which keeps
+    /// group creation operator-owned.
+    pub create_group: bool,
+
+    /// Start position for group creation. Only meaningful for XREADGROUP, and
+    /// required exactly when `create_group` is true: URI parsing rejects
+    /// either half of the pair on its own.
+    pub group_start: Option<GroupStart>,
 
     /// Redis ACL username (Redis 6+) for authenticating to data nodes.
     /// Default: None.
@@ -662,6 +711,8 @@ impl std::fmt::Debug for RedisEndpointConfig {
                 &self.stream_recover_min_idle_ms,
             )
             .field("stream_recover_batch", &self.stream_recover_batch)
+            .field("create_group", &self.create_group)
+            .field("group_start", &self.group_start)
             .field("username", &redacted_opt(&self.username))
             .field("password", &redacted_opt(&self.password))
             .field("db", &self.db)
@@ -747,6 +798,59 @@ fn parse_stream_recover_params(
     validate_stream_recover_ranges(min_idle_ms, batch)?;
 
     Ok((enabled, min_idle_ms, batch))
+}
+
+fn group_start_value_error(value: impl std::fmt::Display) -> CamelError {
+    CamelError::InvalidUri(format!(
+        "invalid groupStart '{}': expected 'latest' or 'earliest'",
+        value
+    ))
+}
+
+/// Parse the streams group-creation options.
+///
+/// Meaningful only for `XREADGROUP`; ignored entirely for other commands. The
+/// pair fails closed: `createGroup=true` without `groupStart` and `groupStart`
+/// without `createGroup=true` are both rejected because there is no default
+/// start position, and any `groupStart` value other than `latest`/`earliest`
+/// is rejected.
+fn parse_stream_group_params(
+    params: &HashMap<String, String>,
+    command: &RedisCommand,
+) -> Result<(bool, Option<GroupStart>), CamelError> {
+    if command != &RedisCommand::Xreadgroup {
+        return Ok((false, None));
+    }
+
+    let create_group = match params.get("createGroup") {
+        Some(s) => match s.to_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => {
+                return Err(CamelError::InvalidUri(format!(
+                    "invalid createGroup '{}': expected 'true' or 'false'",
+                    s
+                )));
+            }
+        },
+        None => false,
+    };
+
+    let group_start = match params.get("groupStart") {
+        Some(s) => Some(GroupStart::parse(s)?),
+        None => None,
+    };
+
+    match (create_group, group_start) {
+        (true, None) => Err(CamelError::InvalidUri(
+            "createGroup=true requires groupStart ('latest' or 'earliest'): there is no default start position"
+                .to_string(),
+        )),
+        (false, Some(_)) => Err(CamelError::InvalidUri(
+            "groupStart requires createGroup=true".to_string(),
+        )),
+        _ => Ok((create_group, group_start)),
+    }
 }
 
 impl RedisEndpointConfig {
@@ -838,6 +942,7 @@ impl RedisEndpointConfig {
             // Parse XREADGROUP pending-entry recovery options.
             let (stream_recover_enabled, stream_recover_min_idle_ms, stream_recover_batch) =
                 parse_stream_recover_params(&parts.params, &command)?;
+            let (create_group, group_start) = parse_stream_group_params(&parts.params, &command)?;
 
             // Parse password
             let password = parts.params.get("password").cloned();
@@ -859,6 +964,8 @@ impl RedisEndpointConfig {
                 stream_recover_enabled,
                 stream_recover_min_idle_ms,
                 stream_recover_batch,
+                create_group,
+                group_start,
                 username: None,
                 password,
                 db,
@@ -1003,6 +1110,7 @@ impl RedisEndpointConfig {
         // Parse XREADGROUP pending-entry recovery options.
         let (stream_recover_enabled, stream_recover_min_idle_ms, stream_recover_batch) =
             parse_stream_recover_params(&parts.params, &command)?;
+        let (create_group, group_start) = parse_stream_group_params(&parts.params, &command)?;
 
         // Parse password: userinfo (from redis_url) takes precedence over query param
         let password = password_from_userinfo.or_else(|| parts.params.get("password").cloned());
@@ -1058,6 +1166,8 @@ impl RedisEndpointConfig {
             stream_recover_enabled,
             stream_recover_min_idle_ms,
             stream_recover_batch,
+            create_group,
+            group_start,
             username: None,
             password,
             db,
@@ -1434,6 +1544,7 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Hvals
             | RedisCommand::Hgetall
             | RedisCommand::Strlen
+            | RedisCommand::Xlen
             | RedisCommand::Ping
             | RedisCommand::Echo
             // Idempotent writes (same result if retried)
@@ -1584,6 +1695,82 @@ mod tests {
     }
 
     #[test]
+    fn group_start_without_create_group_fails_at_parse() {
+        let uri =
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&groupStart=latest";
+        let err = RedisEndpointConfig::from_uri(uri).unwrap_err();
+        assert!(
+            err.to_string().contains("groupStart"),
+            "error should mention groupStart: {err}"
+        );
+    }
+
+    #[test]
+    fn create_group_without_group_start_fails_at_parse() {
+        let uri =
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&createGroup=true";
+        let err = RedisEndpointConfig::from_uri(uri).unwrap_err();
+        assert!(
+            err.to_string().contains("groupStart"),
+            "error should mention groupStart: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_group_start_value_fails_at_parse() {
+        let uri = "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&createGroup=true&groupStart=now";
+        let err = RedisEndpointConfig::from_uri(uri).unwrap_err();
+        assert!(
+            err.to_string().contains("groupStart"),
+            "error should mention groupStart: {err}"
+        );
+    }
+
+    #[test]
+    fn valid_pair_parses() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c&createGroup=true&groupStart=earliest",
+        )
+        .unwrap();
+        assert!(c.create_group);
+        assert_eq!(c.group_start, Some(GroupStart::Earliest));
+
+        // The pair must survive the consumer-construction threading into the
+        // Streams session parameters.
+        let consumer = crate::consumer::RedisConsumer::new(
+            c,
+            std::sync::Arc::new(camel_component_api::test_support::PanicRuntimeObservability),
+        )
+        .expect("valid XREADGROUP config builds a Streams consumer");
+        let params = consumer
+            .stream_params()
+            .expect("XREADGROUP must resolve to Streams mode");
+        assert!(params.create_group);
+        assert_eq!(params.group_start, Some(GroupStart::Earliest));
+    }
+
+    #[test]
+    fn defaults_parse() {
+        let c = RedisEndpointConfig::from_uri(
+            "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
+        )
+        .unwrap();
+        assert!(!c.create_group);
+        assert_eq!(c.group_start, None);
+
+        let consumer = crate::consumer::RedisConsumer::new(
+            c,
+            std::sync::Arc::new(camel_component_api::test_support::PanicRuntimeObservability),
+        )
+        .expect("plain XREADGROUP config builds a Streams consumer");
+        let params = consumer
+            .stream_params()
+            .expect("XREADGROUP must resolve to Streams mode");
+        assert!(!params.create_group);
+        assert_eq!(params.group_start, None);
+    }
+
+    #[test]
     fn stream_recover_defaults_are_safe() {
         let c = RedisEndpointConfig::from_uri(
             "redis://127.0.0.1:6379?command=XREADGROUP&key=s1&group=g&consumer=c",
@@ -1731,6 +1918,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("pass@word".to_string()),
             db: 0,
@@ -1769,6 +1958,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("pass:word".to_string()),
             db: 0,
@@ -1802,6 +1993,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("pass/word".to_string()),
             db: 0,
@@ -1856,6 +2049,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: None,
             db: 0,
@@ -1889,6 +2084,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: None,
             db: 0,
@@ -1922,6 +2119,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("secret".to_string()),
             db: 0,
@@ -1956,6 +2155,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("secret".to_string()),
             db: 0,
@@ -1990,6 +2191,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("supersecret".to_string()),
             db: 2,
@@ -2030,6 +2233,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: None,
             db: 0,
@@ -2055,6 +2260,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: None,
             db: 0,
@@ -2110,6 +2317,22 @@ mod tests {
         assert!(is_idempotent_command(&RedisCommand::Geohash));
         // GEOADD is a write: not idempotent
         assert!(!is_idempotent_command(&RedisCommand::Geoadd));
+    }
+
+    #[test]
+    fn xadd_xlen_parse_roundtrip() {
+        let xadd = RedisEndpointConfig::from_uri("redis://localhost?command=XADD")
+            .expect("XADD URI must parse");
+        assert_eq!(xadd.command, RedisCommand::Xadd);
+        let xlen = RedisEndpointConfig::from_uri("redis://localhost?command=XLEN")
+            .expect("XLEN URI must parse");
+        assert_eq!(xlen.command, RedisCommand::Xlen);
+    }
+
+    #[test]
+    fn xlen_is_idempotent_xadd_is_not() {
+        assert!(is_idempotent_command(&RedisCommand::Xlen));
+        assert!(!is_idempotent_command(&RedisCommand::Xadd));
     }
 
     // --- RedisConfig tests ---
@@ -2355,6 +2578,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: None,
             db: 0,
@@ -2387,6 +2612,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: None,
             db: 0,
@@ -2847,6 +3074,8 @@ mod tests {
             stream_recover_enabled: false,
             stream_recover_min_idle_ms: 60000,
             stream_recover_batch: 10,
+            create_group: false,
+            group_start: None,
             username: None,
             password: Some("secret123".to_string()),
             db: 0,

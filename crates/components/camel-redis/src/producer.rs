@@ -43,18 +43,23 @@ impl RedisProducer {
         })
     }
 
-    /// Resolves the command to execute.
+    /// Resolves the command to execute from the endpoint URI only.
     ///
-    /// Priority:
-    /// 1. Header `CamelRedis.Command` if present
-    /// 2. Configuration default command
-    fn resolve_command(exchange: &Exchange, config: &RedisEndpointConfig) -> RedisCommand {
-        exchange
-            .input
-            .header("CamelRedis.Command")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| config.command.clone())
+    /// The endpoint URI is the sole command source (ADR-0032). A
+    /// `CamelRedis.Command` header — with any value, parsable or not — is
+    /// rejected so that message payloads cannot select a different Redis
+    /// command than the one the endpoint declares.
+    fn resolve_command(
+        exchange: &Exchange,
+        config: &RedisEndpointConfig,
+    ) -> Result<RedisCommand, CamelError> {
+        if exchange.input.header("CamelRedis.Command").is_some() {
+            return Err(CamelError::ProcessorError(
+                "untrusted header 'CamelRedis.Command' cannot select a Redis command; the endpoint URI 'command=' is the only command source (ADR-0032)"
+                    .into(),
+            ));
+        }
+        Ok(config.command.clone())
     }
 
     fn apply_default_key(exchange: &mut Exchange, config: &RedisEndpointConfig) {
@@ -121,8 +126,9 @@ impl Service<Exchange> for RedisProducer {
         let component_metrics = self.runtime.component_metrics("redis");
 
         Box::pin(async move {
-            // 1. Resolve command from header or config
-            let cmd = Self::resolve_command(&exchange, &config);
+            // 1. Resolve command from the endpoint URI. A `CamelRedis.Command`
+            //    header is rejected here, before any connection is attempted.
+            let cmd = Self::resolve_command(&exchange, &config)?;
 
             // 2. Set defaults from config if missing in headers
             Self::apply_default_key(&mut exchange, &config);
@@ -183,57 +189,102 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_command_from_config() {
+    fn resolve_command_uses_uri_command() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
         let exchange = Exchange::new(Message::default());
 
-        let cmd = RedisProducer::resolve_command(&exchange, &config);
+        let cmd = RedisProducer::resolve_command(&exchange, &config).unwrap();
         assert_eq!(cmd, RedisCommand::Get);
     }
 
+    /// Regression: an injected `DEL` on a `GET` endpoint must be rejected,
+    /// not executed.
     #[test]
-    fn test_resolve_command_from_header() {
-        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=SET").unwrap();
+    fn resolve_command_rejects_valid_header() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
         let mut msg = Message::default();
-        msg.set_header("CamelRedis.Command", serde_json::json!("GET"));
+        msg.set_header("CamelRedis.Command", serde_json::json!("DEL"));
         let exchange = Exchange::new(msg);
 
-        let cmd = RedisProducer::resolve_command(&exchange, &config);
-        assert_eq!(cmd, RedisCommand::Get);
+        let err = RedisProducer::resolve_command(&exchange, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("CamelRedis.Command"),
+            "error must name the rejected header, got: {err}"
+        );
     }
 
     #[test]
-    fn test_resolve_command_header_overrides_config() {
-        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=SET").unwrap();
-        let mut msg = Message::default();
-        msg.set_header("CamelRedis.Command", serde_json::json!("INCR"));
-        let exchange = Exchange::new(msg);
-
-        let cmd = RedisProducer::resolve_command(&exchange, &config);
-        assert_eq!(cmd, RedisCommand::Incr);
-    }
-
-    #[test]
-    fn test_resolve_command_invalid_header_falls_back_to_config() {
-        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=DECR").unwrap();
+    fn resolve_command_rejects_invalid_header() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Command", serde_json::json!("NOT_A_COMMAND"));
         let exchange = Exchange::new(msg);
 
-        let cmd = RedisProducer::resolve_command(&exchange, &config);
-        assert_eq!(cmd, RedisCommand::Decr);
+        let err = RedisProducer::resolve_command(&exchange, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("CamelRedis.Command"),
+            "error must name the rejected header, got: {err}"
+        );
     }
 
     #[test]
-    fn test_resolve_command_non_string_header_falls_back_to_config() {
-        let config =
-            RedisEndpointConfig::from_uri("redis://localhost:6379?command=EXISTS").unwrap();
+    fn resolve_command_rejects_non_string_header() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?command=GET").unwrap();
         let mut msg = Message::default();
         msg.set_header("CamelRedis.Command", serde_json::json!(123));
         let exchange = Exchange::new(msg);
 
-        let cmd = RedisProducer::resolve_command(&exchange, &config);
-        assert_eq!(cmd, RedisCommand::Exists);
+        let err = RedisProducer::resolve_command(&exchange, &config).unwrap_err();
+        assert!(
+            err.to_string().contains("CamelRedis.Command"),
+            "error must name the rejected header, got: {err}"
+        );
+    }
+
+    /// Nothing listens on 127.0.0.1:1, so a connect attempt would fail with a
+    /// connection error. The header-naming error proves rejection happens
+    /// before dialing.
+    #[tokio::test]
+    async fn producer_rejects_command_header_before_connect() {
+        let config = RedisEndpointConfig::from_uri("redis://127.0.0.1:1?command=GET").unwrap();
+        let mut producer = RedisProducer::new(config, test_rt()).unwrap();
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Command", serde_json::json!("DEL"));
+        let exchange = Exchange::new(msg);
+
+        let err = producer.call(exchange).await.unwrap_err();
+        assert!(
+            matches!(err, CamelError::ProcessorError(_)),
+            "expected a processor error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("CamelRedis.Command"),
+            "rejection must happen before connecting, got: {err}"
+        );
+    }
+
+    /// redis-geo MODIFIED scenario: the URI alone resolves a GEO command, and
+    /// a `CamelRedis.Command` header on the same endpoint is rejected.
+    #[tokio::test]
+    async fn geo_uri_and_header_resolution_matches_spec() {
+        let config =
+            RedisEndpointConfig::from_uri("redis://localhost:6379?command=GEOSEARCH").unwrap();
+        assert_eq!(config.command, RedisCommand::Geosearch);
+
+        // Port 1 keeps the test hermetic; no connection is attempted anyway
+        // because the header check runs first.
+        let config =
+            RedisEndpointConfig::from_uri("redis://127.0.0.1:1?command=GEOSEARCH").unwrap();
+        let mut producer = RedisProducer::new(config, test_rt()).unwrap();
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Command", serde_json::json!("GEOADD"));
+        let exchange = Exchange::new(msg);
+
+        let err = producer.call(exchange).await.unwrap_err();
+        assert!(
+            err.to_string().contains("CamelRedis.Command"),
+            "header must be rejected before any connection, got: {err}"
+        );
     }
 
     #[test]

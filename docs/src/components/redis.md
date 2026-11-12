@@ -1,6 +1,6 @@
 # Redis
 
-The Redis component executes Redis commands and subscribes to Redis channels. One crate covers both directions. The Producer sends the Exchange body to Redis as a command argument. The Consumer subscribes to Pub/Sub channels, blocks on a list key, or reads a consumer group with `XREADGROUP`. The `redis` scheme is the route URI scheme. Enable TLS with `ssl = true` on the URI, or `tls_mode` in config; TLS auto-enables for non-loopback hosts. Sentinel clusters register under `redis-sentinel` and `rediss-sentinel`, where a `rediss://` node URL requires TLS.
+The Redis component executes Redis commands and subscribes to Redis channels. One crate covers both directions. The Producer sends the Exchange body to Redis as a command argument, or appends it to a stream with `XADD`. The Consumer subscribes to Pub/Sub channels, blocks on a list key, or reads a consumer group with `XREADGROUP`. The `redis` scheme is the route URI scheme. Enable TLS with `ssl = true` on the URI, or `tls_mode` in config; TLS auto-enables for non-loopback hosts. Sentinel clusters register under `redis-sentinel` and `rediss-sentinel`, where a `rediss://` node URL requires TLS.
 
 The redis-example wires a string producer, a Pub/Sub consumer, a queue consumer, and a Pub/Sub producer against a testcontainers Redis instance:
 
@@ -83,7 +83,7 @@ routes:
 ## URI
 
 ```text
-redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&group=<name>][&consumer=<name>][&count=<n>][&block=<ms>][&streamRecoverEnabled=<bool>][&streamRecoverMinIdleMs=<ms>][&streamRecoverBatch=<n>][&password=<pwd>][&db=<n>][&ssl=<bool>]
+redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&group=<name>][&consumer=<name>][&count=<n>][&block=<ms>][&createGroup=<bool>][&groupStart=<latest|earliest>][&streamRecoverEnabled=<bool>][&streamRecoverMinIdleMs=<ms>][&streamRecoverBatch=<n>][&password=<pwd>][&db=<n>][&ssl=<bool>]
 ```
 
 | Parameter | Required | Default | Description |
@@ -96,6 +96,8 @@ redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&
 | `consumer` | Streams Consumer | none | Consumer name within the group |
 | `count` | no | server default | Maximum entries returned per `XREADGROUP` read; positive |
 | `block` | no | `10000` | `XREADGROUP` block timeout in milliseconds; `0` blocks indefinitely |
+| `createGroup` | no | `false` | Create the consumer group before the first read (Streams Consumer) |
+| `groupStart` | with `createGroup` | none | Group start position, `latest` (`$`) or `earliest` (`0`) |
 | `streamRecoverEnabled` | no | `false` | Recover pending stream entries (opt-in) |
 | `streamRecoverMinIdleMs` | no | `60000` | Minimum pending idle time for recovery, in ms (`1..=3600000`) |
 | `streamRecoverBatch` | no | `10` | Maximum pending entries claimed per recovery pass (`1..=100`) |
@@ -155,7 +157,7 @@ For a computed value, use a Rhai expression. `parse_int` converts the string to 
 
 ## Commands
 
-The component exposes 80+ commands across nine groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
+The component exposes 80+ commands across ten groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
 
 | Group | Commands |
 | --- | --- |
@@ -166,8 +168,11 @@ The component exposes 80+ commands across nine groups. The enum is exhaustive: a
 | Set | `SADD`, `SREM`, `SMEMBERS`, `SCARD`, `SISMEMBER`, `SPOP`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SRANDMEMBER` |
 | Sorted set | `ZADD`, `ZREM`, `ZRANGE`, `ZREVRANGE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`, `ZINCRBY`, `ZCOUNT`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZUNIONSTORE`, `ZINTERSTORE` |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE` |
+| Stream | `XREADGROUP`, `XADD`, `XLEN` |
 | Geospatial | `GEOADD`, `GEOPOS`, `GEODIST`, `GEOSEARCH`, `GEOHASH` |
 | Other | `PING`, `ECHO` |
+
+Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLEN` are Producer commands. `XREADGROUP` is Consumer-only. The component does not expose `ACKED` or `IDMP`.
 
 ### Geospatial
 
@@ -206,6 +211,55 @@ The `command` parameter picks one of the 80+ commands listed above. The Exchange
 
 The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step and reports per-route metrics.
 
+### Command selection
+
+The URI `command=` parameter is the only command source. A producer exchange that carries a `CamelRedis.Command` header, with any value, valid or not, fails with a named `ProcessorError` before the component connects. The header cannot select or change the command.
+
+This is a breaking change from earlier releases, which accepted the header as a per-message command switch. A route that switched commands per message must use one endpoint per command. Branch with `choice`/`when` and pin one command in each producer URI:
+
+```yaml
+routes:
+  - id: redis-command-by-message
+    from: "direct:redis-op"
+    steps:
+      - choice:
+          when:
+            - simple: "${header.RedisOp} == 'increment'"
+              steps:
+                - to: "redis://127.0.0.1:6379?command=INCR"
+            - simple: "${header.RedisOp} == 'read'"
+              steps:
+                - to: "redis://127.0.0.1:6379?command=GET"
+          otherwise:
+            - to: "log:warn?showHeaders=true"
+```
+
+The break reaches Rust library consumers too. `RedisCommand` gained the `Xadd` and `Xlen` variants, so a downstream exhaustive `match` no longer compiles until it handles both. `RedisEndpointConfig` gained the public `create_group: bool` and `group_start: Option<GroupStart>` fields, so a struct literal that names every field must set them. An endpoint built through `from_uri` fills both fields from the URI parser and needs no source change.
+
+### Streams producer
+
+`redis://host:port?command=XADD&key=events` appends one entry to a stream. `redis://host:port?command=XLEN&key=events` reads the entry count. Both take the stream key from the `CamelRedis.Key` header, with the URI `key=` as the fallback.
+
+#### XADD
+
+`XADD` appends one entry. The entry carries exactly one field named `body`. Its value is `body.try_into_text()`: text stays as-is, a structured body becomes compact JSON, and UTF-8 bytes decode to text. `Body::Empty`, `Body::Stream`, and non-UTF-8 bytes fail with a named processor error before any command reaches Redis. The entry ID is always `*`, so Redis assigns it.
+
+The Producer keeps the Exchange body unchanged. It reads one header and sets two:
+
+| Header | Direction | Value |
+| --- | --- | --- |
+| `CamelRedis.Key` | input | Stream key; falls back to the URI `key=` |
+| `CamelRedis.StreamId` | output | Server-assigned entry ID |
+| `CamelRedis.Stream` | output | Resolved stream key |
+
+`CamelRedis.StreamId` and `CamelRedis.Stream` overwrite any upstream value.
+
+XADD is non-idempotent and the component never retries it. At-least-once delivery applies: when the command attempt fails during transport, the outcome is unknown, because the entry may or may not exist. The exchange then fails with an error that names the unknown outcome. A route redelivery can append the same body a second time. Mitigate duplicates with the Idempotent Consumer and `RedisIdempotentRepository`. `CamelRedis.StreamId` is not a deduplication key, because it exists only after a successful append.
+
+#### XLEN
+
+`XLEN` replaces the Exchange body with the entry count of the stream. It is a read, so it is idempotent and the component may retry it.
+
 ## Consumer
 
 `redis://host:port?command=SUBSCRIBE&channels=foo,bar` subscribes to one or more Pub/Sub channels. The Consumer submits one Exchange per published message. The `CamelRedis.Channel` header carries the channel name. `CamelRedis.Pattern` carries the matched pattern for `PSUBSCRIBE`.
@@ -228,11 +282,15 @@ Queue-mode consumers pop on a connection built with `AsyncConnectionConfig::set_
 | `consumer` | Streams | none | Consumer name within the group |
 | `count` | no | server default | Maximum entries returned per read; must be positive |
 | `block` | no | `10000` | `BLOCK` duration in milliseconds; `0` blocks indefinitely |
+| `createGroup` | no | `false` | Create the consumer group before the first read |
+| `groupStart` | with `createGroup` | none | Group start position: `latest` (`$`) or `earliest` (`0`) |
 | `streamRecoverEnabled` | no | `false` | Recover pending entries (opt-in) |
 | `streamRecoverMinIdleMs` | no | `60000` | Minimum pending idle time before recovery, in ms (`1..=3600000`) |
 | `streamRecoverBatch` | no | `10` | Maximum pending entries claimed per recovery pass (`1..=100`) |
 
 The `streamRecover*` options are meaningful only for `XREADGROUP`; other commands ignore them. For `XREADGROUP`, an out-of-range or non-numeric value fails URI parsing and consumer creation with an error that names the option.
+
+Group creation is opt-in. With `createGroup=false`, the default, the group stays operator-owned and a missing group keeps failing with `NOGROUP`. With `createGroup=true`, the session sends `XGROUP CREATE <key> <group> <start> MKSTREAM` once per session, on the read connection, before the first read. `groupStart=latest` maps to `$` and `groupStart=earliest` maps to `0`. Readiness is signalled only after the command succeeds. A `BUSYGROUP` reply is success with an `info!` log: the existing group wins and the component never sends `XGROUP SETID`. `groupStart` is required exactly when `createGroup=true`. `createGroup=true` without `groupStart`, or `groupStart` without `createGroup=true`, fails at URI parse time.
 
 The Consumer delivers one Exchange per entry and waits for the route outcome through `send_and_wait`. It issues `XACK` only after the pipeline accepted the entry. A failed delivery logs at `warn!`, leaves the entry pending, and the Consumer continues with the next entry. Each Exchange carries these headers:
 

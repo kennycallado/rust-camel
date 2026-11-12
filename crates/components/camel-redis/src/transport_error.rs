@@ -18,9 +18,9 @@
 //!   transient regardless of the inner kind — such sites attach a typed
 //!   marker (rule 3) instead of relying on their prose;
 //! - a site whose prose contains no classifier word had a legacy verdict
-//!   equal to "does the inner redis Display match a word" — rule 5's
+//!   equal to "does the inner redis Display match a word" — rule 6's
 //!   fallback over the inner `RedisError` Display reproduces that exactly;
-//! - plain `ProcessorError` text is never sniffed (rule 6): synthetic and
+//! - plain `ProcessorError` text is never sniffed (rule 7): synthetic and
 //!   foreign errors whose message happens to contain a word no longer
 //!   classify transient — an intentional flip that only affects inputs
 //!   the component's real conversion boundaries cannot produce.
@@ -52,12 +52,19 @@
 //!    `io::Error::new(ConnectionRefused, "no route")`) — legacy sniffed
 //!    the text and missed it; the kind is ground truth for an OS
 //!    connection refusal. Pinned by `io_custom_text_refused_kind_is_transient`.
-//! 5. Otherwise that same `RedisError`'s Display is matched against the
+//! 5. A preserved `RedisError` whose server code (`RedisError::code()`) is one
+//!    of [`SETTLED_FATAL_SERVER_CODES`] (`NOGROUP`, `BUSYGROUP`, `NOPERM`) →
+//!    false, decided by the code alone, before any text matching. This
+//!    deliberately diverges from the legacy table when a classifier word
+//!    appears inside such a message (redis-failover MODIFIED, exemption
+//!    sentence: `NOPERM connection is not allowed …` is fatal, although the
+//!    legacy word `connection` said transient).
+//! 6. Otherwise that same `RedisError`'s Display is matched against the
 //!    legacy word set in [`legacy_substring_matches`] — the only substring
 //!    matching in the crate's classification. It preserves
 //!    server-controlled messages (`ERR connection lost …`), TLS inner
 //!    text, and redis-rs static details.
-//! 6. No marker and no `RedisError` in the chain → false.
+//! 7. No marker and no `RedisError` in the chain → false.
 //!
 //! # redis 1.6.0 kind taxonomy
 //!
@@ -171,10 +178,20 @@ pub(crate) fn marker_camel(
 
 // ── Classification ──────────────────────────────────────────────────────────
 
-/// The legacy classifier word set — the rule-5 fallback and the ONLY
+/// Server codes settled as NOT transient by rule 5, decided by the code alone
+/// and ahead of any text matching.
+///
+/// `NOGROUP` (stream group/key gone) and `BUSYGROUP` (consumer group already
+/// exists) are business outcomes of `XREADGROUP`/`XGROUP CREATE`; `NOPERM` is
+/// an ACL denial. None is resolved by reconnecting, so a classifier word
+/// inside their message must not flip the verdict (redis-failover spec,
+/// rule 5 plus its exemption sentence).
+pub(crate) const SETTLED_FATAL_SERVER_CODES: [&str; 3] = ["NOGROUP", "BUSYGROUP", "NOPERM"];
+
+/// The legacy classifier word set — the rule-6 fallback and the ONLY
 /// substring matching in the crate's classification.
 ///
-/// Kept verbatim (lowercased contains) so rule 5 reproduces the legacy
+/// Kept verbatim (lowercased contains) so rule 6 reproduces the legacy
 /// verdict for `RedisError` Displays that match no structural shape:
 /// server-controlled messages, TLS inner text, and redis-rs static
 /// details.
@@ -232,9 +249,9 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
     if matches!(err, CamelError::Io(_)) {
         return true;
     }
-    // Rules 3–6: bounded walk of the source chain. At each hop, markers
+    // Rules 3–7: bounded walk of the source chain. At each hop, markers
     // win (rule 3) before the first `redis::RedisError` terminates the
-    // walk with its own classification (rules 4–5).
+    // walk with its own classification (rules 4–6).
     let mut source = err.source();
     let mut hops = 0;
     while let Some(raw) = source {
@@ -259,6 +276,45 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
     // Rule 6: no marker, no redis error, not Io — plain ProcessorError
     // text is never sniffed.
     false
+}
+
+/// Returns the server code (`RedisError::code()`) of the first
+/// `redis::RedisError` in the chain starting at `root`, if any.
+///
+/// `root` is the first chain node to probe, not a wrapper: call sites that
+/// hold a raw error pass it directly (`Some(&*arc)`), call sites that hold a
+/// `CamelError` use [`redis_error_code`].
+///
+/// Uses the same bounded walk and Arc unwrapping as
+/// [`is_transient_redis_error`], so call sites that must match a reply code
+/// (for example `BUSYGROUP` after `XGROUP CREATE`) inspect the preserved
+/// server error instead of the rendered message text.
+pub(crate) fn redis_error_code_in_source<'a>(
+    root: Option<&'a (dyn std::error::Error + 'static)>,
+) -> Option<&'a str> {
+    let mut source = root;
+    let mut hops = 0;
+    while let Some(raw) = source {
+        if hops >= MAX_SOURCE_HOPS {
+            break;
+        }
+        let src = unwrap_arc_dyn_error(raw);
+        if let Some(redis_err) = src.downcast_ref::<redis::RedisError>() {
+            return redis_err.code();
+        }
+        source = src.source();
+        hops += 1;
+    }
+    None
+}
+
+/// Returns the server code (`RedisError::code()`) of the first
+/// `redis::RedisError` below `err` in its source chain, if any.
+///
+/// Thin wrapper over [`redis_error_code_in_source`] for call sites that
+/// already hold a [`CamelError`].
+pub(crate) fn redis_error_code(err: &CamelError) -> Option<&str> {
+    redis_error_code_in_source(err.source())
 }
 
 /// Returns true when `err` carries the retry-budget-exhaustion marker.
@@ -288,11 +344,12 @@ pub(crate) fn is_retry_budget_exhausted(err: &CamelError) -> bool {
     false
 }
 
-/// Rules 4–5 applied to the first `redis::RedisError` in a source chain.
+/// Rules 4–6 applied to the first `redis::RedisError` in a source chain.
 fn classify_redis_error(err: &redis::RedisError) -> bool {
+    // Rule 4: structural kinds that always rendered a classifier word.
     match err.kind() {
         redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly)
-        | redis::ErrorKind::ClusterConnectionNotFound => true,
+        | redis::ErrorKind::ClusterConnectionNotFound => return true,
         redis::ErrorKind::Io => {
             let enumerated_io_kind = err
                 .source()
@@ -308,10 +365,25 @@ fn classify_redis_error(err: &redis::RedisError) -> bool {
                             | std::io::ErrorKind::TimedOut
                     )
                 });
-            enumerated_io_kind || legacy_substring_matches(&err.to_string())
+            return enumerated_io_kind || legacy_substring_matches(&err.to_string());
         }
-        _ => legacy_substring_matches(&err.to_string()),
+        _ => {}
     }
+    // Rule 5: settled server codes are decided by the code alone, before any
+    // text matching. These three deliberately diverge from the legacy table:
+    // when the server message embeds a classifier word (e.g.
+    // `NOPERM connection is not allowed for this user`), the legacy substring
+    // rule said transient — the code is ground truth that reconnecting cannot
+    // help (redis-failover MODIFIED, exemption sentence).
+    if err
+        .code()
+        .is_some_and(|code| SETTLED_FATAL_SERVER_CODES.contains(&code))
+    {
+        return false;
+    }
+    // Rule 6: the explicit legacy substring fallback on this RedisError's own
+    // Display.
+    legacy_substring_matches(&err.to_string())
 }
 
 // ── Shared test fixtures ────────────────────────────────────────────────────
@@ -340,6 +412,95 @@ mod tests {
 
     fn io_redis_error(kind: std::io::ErrorKind) -> redis::RedisError {
         redis::RedisError::from(std::io::Error::from(kind))
+    }
+
+    /// Builds a real `redis::RedisError` carrying the server code of a RESP
+    /// error reply.
+    ///
+    /// redis-rs 1.8.x has no `Value::Error` constructor, so the reply bytes
+    /// are parsed (`redis::parse_redis_value`) into a `Value::ServerError`
+    /// and converted with `Value::extract_error()` — the same path a live
+    /// connection takes, which is what makes `RedisError::code()` non-`None`.
+    fn parsed_server_error(reply: &[u8]) -> redis::RedisError {
+        let value = redis::parse_redis_value(reply)
+            .unwrap_or_else(|e| panic!("valid RESP error reply {reply:?}: {e}"));
+        match value.extract_error() {
+            Err(err) => err,
+            Ok(other) => panic!("expected a server error reply {reply:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_server_codes_classify_not_transient() {
+        for (reply, expected_code) in [
+            (
+                &b"-NOGROUP No such key 'stream:x' or consumer group 'g' in XREADGROUP with GROUP option\r\n"[..],
+                "NOGROUP",
+            ),
+            (
+                b"-BUSYGROUP Consumer Group name already exists\r\n",
+                "BUSYGROUP",
+            ),
+            (
+                b"-NOPERM this user has no permissions to run the 'xreadgroup' command\r\n",
+                "NOPERM",
+            ),
+        ] {
+            let err = parsed_server_error(reply);
+            // Construction contract: the parsed error really carries the
+            // server code the new rule keys on.
+            assert_eq!(
+                err.code(),
+                Some(expected_code),
+                "parsed RESP reply must carry code {expected_code}: {reply:?}"
+            );
+            let wrapped = redis_error_raw(err);
+            assert!(
+                !is_transient_redis_error(&wrapped),
+                "{expected_code} must be not transient via rule 5 (code alone): {wrapped}"
+            );
+        }
+    }
+
+    #[test]
+    fn noperm_message_with_classifier_word_stays_fatal() {
+        // The deliberate divergence: the legacy substring table matched
+        // "connection" inside this server message and said transient.
+        let err = parsed_server_error(b"-NOPERM connection is not allowed for this user\r\n");
+        assert_eq!(
+            err.code(),
+            Some("NOPERM"),
+            "parsed NOPERM reply must carry its server code"
+        );
+        let wrapped = redis_error_raw(err);
+        assert!(
+            !is_transient_redis_error(&wrapped),
+            "NOPERM decides by code alone; the word 'connection' must not flip it: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn wrongtype_stays_not_transient() {
+        // Existing behavior pinned: WRONGTYPE is a business reply. Its
+        // `code()` is populated but sits outside the settled set, so the
+        // verdict comes from rule 6, not the new code rule.
+        let err = parsed_server_error(
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+        );
+        assert_eq!(
+            err.code(),
+            Some("WRONGTYPE"),
+            "parsed WRONGTYPE reply must carry its server code"
+        );
+        assert!(
+            !SETTLED_FATAL_SERVER_CODES.contains(&"WRONGTYPE"),
+            "WRONGTYPE must stay outside the settled code set"
+        );
+        let wrapped = redis_error_raw(err);
+        assert!(
+            !is_transient_redis_error(&wrapped),
+            "business WRONGTYPE reply must not be transient: {wrapped}"
+        );
     }
 
     #[test]
@@ -429,7 +590,7 @@ mod tests {
         );
         assert!(
             is_transient_redis_error(&err),
-            "server message containing a classifier word must stay transient via rule 5: {err}"
+            "server message containing a classifier word must stay transient via rule 6: {err}"
         );
     }
 
@@ -466,13 +627,13 @@ mod tests {
         );
         assert!(
             is_transient_redis_error(&dropped),
-            "'connection dropped - Io' must stay transient via rule 5: {dropped}"
+            "'connection dropped - Io' must stay transient via rule 6: {dropped}"
         );
     }
 
     #[test]
     fn tls_close_notify_text_falls_back_transient() {
-        // io kind not enumerated by rule 4 — the rule-5 fallback on the
+        // io kind not enumerated by rule 4 — the rule-6 fallback on the
         // RedisError Display (the inner io text) decides, and it contains
         // "connection".
         let err = redis_error_to_camel(
@@ -484,7 +645,7 @@ mod tests {
         );
         assert!(
             is_transient_redis_error(&err),
-            "TLS close-notify text must stay transient via rule 5: {err}"
+            "TLS close-notify text must stay transient via rule 6: {err}"
         );
     }
 

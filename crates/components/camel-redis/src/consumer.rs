@@ -150,6 +150,8 @@ impl RedisConsumer {
                         recover_enabled: config.stream_recover_enabled,
                         recover_min_idle_ms: config.stream_recover_min_idle_ms,
                         recover_batch: config.stream_recover_batch,
+                        create_group: config.create_group,
+                        group_start: config.group_start,
                     },
                 }
             }
@@ -174,6 +176,15 @@ impl RedisConsumer {
             cancel_token: None,
             task_handle: None,
         })
+    }
+
+    /// Test-only accessor exposing the Streams read parameters.
+    #[cfg(test)]
+    pub(crate) fn stream_params(&self) -> Option<&StreamConsumerParams> {
+        match &self.mode {
+            RedisConsumerMode::Streams { params } => Some(params),
+            _ => None,
+        }
     }
 
     /// Test-only accessor exposing the resolved topology so tests can assert

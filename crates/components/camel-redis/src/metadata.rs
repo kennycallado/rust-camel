@@ -33,6 +33,12 @@ pub(super) struct RedisMetadataDescriptor {
     #[uri_param(name = "consumer")]
     pub _consumer: Option<String>,
 
+    #[uri_param(name = "createGroup", default = "false")]
+    pub _create_group: bool,
+
+    #[uri_param(name = "groupStart")]
+    pub _group_start: Option<String>,
+
     #[uri_param(name = "count")]
     pub _count: Option<u64>,
 
@@ -79,6 +85,8 @@ mod tests {
             "ssl",
             "group",
             "consumer",
+            "createGroup",
+            "groupStart",
             "count",
             "block",
             "streamRecoverEnabled",

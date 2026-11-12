@@ -1,0 +1,36 @@
+{
+  "kind": "plan",
+  "verdict": "BLESSED",
+  "hash": "sha256:131d80a020796a8c178bbf1c1abda14b3de32111dc17eadbc48a8bad0e5360ad",
+  "expert": "experts/e_gpt",
+  "rounds": [
+    {
+      "round": 1,
+      "sessionID": "ses_e3063868fffeG7ISk473o1MOUL",
+      "verdict": "REJECTED",
+      "hash": "sha256:dc4b93e95470316f0bacf49475504f75ba0ee00a04b873166c1941f55738c6a2",
+      "findings": 8
+    },
+    {
+      "round": 2,
+      "sessionID": "ses_e305d1fcfffeuDew9ZHLsFZ9H3",
+      "verdict": "REJECTED",
+      "hash": "sha256:c9128d22bd3bc9bc9907a9e7356a6649e832f0a350be780e4aebdd265a20267d",
+      "findings": 3
+    },
+    {
+      "round": 3,
+      "sessionID": "ses_e3058f8c6ffeDybWRKf0Y6YcoS",
+      "verdict": "BLESSED",
+      "hash": "sha256:131d80a020796a8c178bbf1c1abda14b3de32111dc17eadbc48a8bad0e5360ad",
+      "findings": 0
+    }
+  ],
+  "reviewer_loop": {
+    "reviewer": "reviewers/r_glm",
+    "sessionID": "ses_e306be543ffeVKO7jZ2mJdCDAx",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "findings_applied": 6
+  },
+  "date": "2026-11-12"
+}

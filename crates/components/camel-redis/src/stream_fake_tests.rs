@@ -21,13 +21,16 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use camel_component_api::Body;
 use camel_component_api::CamelError;
 use camel_component_api::Consumer;
 use camel_component_api::ConsumerContext;
 use camel_component_api::Exchange;
 use camel_component_api::ExchangeEnvelope;
+use camel_component_api::Message;
 use camel_component_api::NetworkRetryPolicy;
 use camel_component_api::RuntimeObservability;
+use camel_component_api::StreamBody;
 use camel_component_api::test_support::NoopRuntimeObservability;
 use camel_component_api::test_support::RecordingRuntimeObservability;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,9 +40,15 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tower::Service;
 
 use crate::config::RedisEndpointConfig;
 use crate::consumer::RedisConsumer;
+use crate::producer::RedisProducer;
+use crate::streams::tests::capture_logs;
+use crate::streams::{DeliveryOutcome, RedisStreamIo, StreamEntry, stream_session};
+use crate::topology::FakeTopology;
+use crate::transport_error::is_transient_redis_error;
 
 /// RESP reply for a single stream entry `1-1` with `payload=hello`.
 const ONE_ENTRY_REPLY: &[u8] =
@@ -76,6 +85,11 @@ fn resp_int(value: i64) -> Vec<u8> {
 /// RESP nil bulk string (parsed as `redis::Value::Nil`).
 fn resp_nil() -> Vec<u8> {
     b"$-1\r\n".to_vec()
+}
+
+/// Encode a RESP error reply (`-<message>`).
+fn resp_error(message: &str) -> Vec<u8> {
+    format!("-{message}\r\n").into_bytes()
 }
 
 /// Aggregate `XPENDING <key> <group>` summary:
@@ -132,6 +146,20 @@ struct WireFrame {
     args: Vec<Vec<u8>>,
 }
 
+/// One event in the harness's ordered log: an application frame or the
+/// session's readiness mark, in the order the harness observed them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HarnessEvent {
+    /// One application frame with the connection that issued it.
+    Frame {
+        connection: usize,
+        name: String,
+        args: Vec<Vec<u8>>,
+    },
+    /// The session called `on_ready` (readiness / `mark_ready`).
+    MarkReady,
+}
+
 /// Programmed server behavior consumed in order per connection.
 ///
 /// Unqualified actions apply to any connection; `*On` actions target one
@@ -168,13 +196,19 @@ enum ScriptedAction {
     },
     /// Drop the connection immediately.
     Close,
+    /// Read the named command, record it, then drop the connection without
+    /// replying: the command reached the server, but the client never learns
+    /// whether it was applied.
+    CloseAfterFrame { matches_command: &'static str },
 }
 
 impl ScriptedAction {
     /// Whether this action may consume a frame from `connection`.
     fn applies_to(&self, connection: usize) -> bool {
         match self {
-            Self::Reply { .. } | Self::Withhold | Self::Close => true,
+            Self::Reply { .. } | Self::Withhold | Self::Close | Self::CloseAfterFrame { .. } => {
+                true
+            }
             Self::ReplyOn {
                 connection: target, ..
             }
@@ -222,6 +256,8 @@ struct StreamFakeServer {
     connections: Arc<AtomicUsize>,
     commands: watch::Receiver<Vec<WireFrame>>,
     closed: watch::Receiver<Vec<usize>>,
+    /// Ordered frame + readiness log, shared with the readiness callback.
+    events: Arc<Mutex<Vec<HarnessEvent>>>,
 }
 
 impl StreamFakeServer {
@@ -232,12 +268,14 @@ impl StreamFakeServer {
         let connections = Arc::new(AtomicUsize::new(0));
         let (commands_tx, commands) = watch::channel(Vec::new());
         let (closed_tx, closed) = watch::channel(Vec::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
         let close_on_exhaustion = actions.iter().any(ScriptedAction::is_close);
         let plan = Arc::new(Mutex::new(ScriptedPlan {
             actions: actions.into(),
             close_on_exhaustion,
         }));
         let accepted = Arc::clone(&connections);
+        let served_events = Arc::clone(&events);
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -247,13 +285,14 @@ impl StreamFakeServer {
                 let plan = Arc::clone(&plan);
                 let commands = commands_tx.clone();
                 let closed = closed_tx.clone();
+                let events = Arc::clone(&served_events);
                 if close_connection(&plan, connection) {
                     closed.send_modify(|ids| ids.push(connection));
                     drop(stream);
                     continue;
                 }
                 tokio::spawn(async move {
-                    serve_connection(stream, connection, plan, commands, closed).await;
+                    serve_connection(stream, connection, plan, commands, closed, events).await;
                 });
             }
         });
@@ -262,6 +301,7 @@ impl StreamFakeServer {
             connections,
             commands,
             closed,
+            events,
         })
     }
 
@@ -282,6 +322,25 @@ impl StreamFakeServer {
             .iter()
             .map(|frame| (frame.name.clone(), frame.args.clone()))
             .collect()
+    }
+
+    /// Ordered snapshot of the harness log: frames interleaved with the
+    /// session's readiness mark, in observation order.
+    fn events(&self) -> Vec<HarnessEvent> {
+        self.events.lock().expect("harness events mutex").clone()
+    }
+
+    /// Build the session's readiness callback: it records [`HarnessEvent::MarkReady`]
+    /// in the same ordered log as the frames, so create → ready → read is
+    /// assertable.
+    fn readiness_marker(&self) -> Box<dyn FnOnce() + Send> {
+        let events = Arc::clone(&self.events);
+        Box::new(move || {
+            events
+                .lock()
+                .expect("harness events mutex")
+                .push(HarnessEvent::MarkReady);
+        })
     }
 
     /// Snapshot of every recorded application command with its connection id.
@@ -457,7 +516,8 @@ fn next_step(plan: &Mutex<ScriptedPlan>, connection: usize, name: &str) -> Frame
         }
         | ScriptedAction::DeferredOn {
             matches_command, ..
-        } => *matches_command == name,
+        }
+        | ScriptedAction::CloseAfterFrame { matches_command } => *matches_command == name,
         ScriptedAction::Withhold | ScriptedAction::WithholdOn { .. } | ScriptedAction::Close => {
             true
         }
@@ -473,7 +533,9 @@ fn next_step(plan: &Mutex<ScriptedPlan>, connection: usize, name: &str) -> Frame
             FrameStep::Deferred { reply, release }
         }
         Some(ScriptedAction::Withhold | ScriptedAction::WithholdOn { .. }) => FrameStep::Skip,
-        Some(ScriptedAction::Close) | None => FrameStep::Close,
+        Some(ScriptedAction::Close | ScriptedAction::CloseAfterFrame { .. }) | None => {
+            FrameStep::Close
+        }
     }
 }
 
@@ -484,6 +546,7 @@ async fn serve_connection(
     plan: Arc<Mutex<ScriptedPlan>>,
     commands: watch::Sender<Vec<WireFrame>>,
     closed: watch::Sender<Vec<usize>>,
+    events: Arc<Mutex<Vec<HarnessEvent>>>,
 ) {
     let mut buf = Vec::with_capacity(256);
     loop {
@@ -507,6 +570,14 @@ async fn serve_connection(
                 args: arguments[1..].to_vec(),
             });
         });
+        events
+            .lock()
+            .expect("harness events mutex")
+            .push(HarnessEvent::Frame {
+                connection,
+                name: name.clone(),
+                args: arguments[1..].to_vec(),
+            });
         match next_step(&plan, connection, &name) {
             FrameStep::Write(reply) => {
                 if stream.write_all(&reply).await.is_err() {
@@ -629,11 +700,48 @@ fn stream_config(port: u16, extra: &str) -> RedisEndpointConfig {
     .expect("stream endpoint URI must parse")
 }
 
+/// Stream producer config pointed at `port`, with `command` and `extra`
+/// query parameters.
+fn producer_config(port: u16, command: &str, extra: &str) -> RedisEndpointConfig {
+    RedisEndpointConfig::from_uri(&format!(
+        "redis://127.0.0.1:{port}?command={command}{extra}"
+    ))
+    .expect("producer endpoint URI must parse")
+}
+
+/// Run one exchange through a real producer against `server`.
+async fn call_producer(
+    server: &StreamFakeServer,
+    command: &str,
+    extra: &str,
+    exchange: Exchange,
+) -> Result<Exchange, CamelError> {
+    let config = producer_config(server.port(), command, extra);
+    let mut producer = RedisProducer::new(config, Arc::new(NoopRuntimeObservability))
+        .expect("producer must construct");
+    producer.call(exchange).await
+}
+
+/// RESP reply for one `XREADGROUP` stream entry with the given fields.
+fn stream_entry_reply(stream: &str, id: &str, fields: &[(&str, &str)]) -> Vec<u8> {
+    let flat: Vec<Vec<u8>> = fields
+        .iter()
+        .flat_map(|(field, value)| [resp_bulk(field), resp_bulk(value)])
+        .collect();
+    let entry = resp_array(&[resp_bulk(id), resp_array(&flat)]);
+    resp_array(&[resp_array(&[resp_bulk(stream), resp_array(&[entry])])])
+}
+
 /// Render a recorded argument vector as UTF-8 strings for assertions.
 fn args_as_strings(args: &[Vec<u8>]) -> Vec<String> {
     args.iter()
         .map(|arg| String::from_utf8_lossy(arg).into_owned())
         .collect()
+}
+
+/// Encode static argument strings as recorded RESP argument bytes.
+fn args_as_bytes(args: &[&str]) -> Vec<Vec<u8>> {
+    args.iter().map(|arg| arg.as_bytes().to_vec()).collect()
 }
 
 /// Bounded receive of one delivered envelope.
@@ -1566,6 +1674,622 @@ async fn fake_server_recovery_disabled_no_frames() {
         "recovery disabled must not open a recovery connection"
     );
 
+    cancel.cancel();
+    let joined = join_consumer(&mut consumer).await;
+    assert!(
+        joined.is_ok(),
+        "cancelled stream session must end Ok: {joined:?}"
+    );
+}
+
+// ── Group-creation wire tests ───────────────────────────────────────────────
+
+/// Drive the real [`stream_session`] through the real stream I/O halves
+/// against `server`, so the wire frames and the readiness mark share one
+/// ordered harness log.
+///
+/// The URI (and therefore `createGroup`/`groupStart`) is parsed by
+/// [`RedisConsumer::new`]; readiness is recorded through
+/// [`StreamFakeServer::readiness_marker`].
+async fn spawn_wire_session(
+    server: &StreamFakeServer,
+    extra: &str,
+) -> (
+    tokio::task::JoinHandle<Result<(), CamelError>>,
+    CancellationToken,
+) {
+    let config = stream_config(server.port(), extra);
+    let parsed = RedisConsumer::new(config.clone(), Arc::new(NoopRuntimeObservability))
+        .expect("XREADGROUP consumer must construct");
+    let params = parsed
+        .stream_params()
+        .expect("XREADGROUP consumer must carry stream params")
+        .clone();
+    let (read, recovery) = RedisStreamIo::new(config.connection_timeout_secs).halves();
+    let topology = Arc::new(FakeTopology::addrs(vec![format!(
+        "redis://127.0.0.1:{}",
+        server.port()
+    )]));
+    let cancel = CancellationToken::new();
+    let on_ready = Some(server.readiness_marker());
+    let deliver = |_entry: StreamEntry| async { DeliveryOutcome::Completed };
+    let handle = tokio::spawn(stream_session(
+        read,
+        recovery,
+        topology,
+        params,
+        config.reconnect,
+        cancel.clone(),
+        on_ready,
+        deliver,
+    ));
+    (handle, cancel)
+}
+
+/// Join a wire-driven session under a deadline.
+async fn join_session(
+    handle: tokio::task::JoinHandle<Result<(), CamelError>>,
+) -> Result<(), CamelError> {
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("stream session must finish within 5s")
+        .expect("stream session task must not panic")
+}
+
+/// First index in the harness log whose frame is named `name`.
+fn first_frame_at(events: &[HarnessEvent], name: &str) -> Option<usize> {
+    events.iter().position(
+        |event| matches!(event, HarnessEvent::Frame { name: frame, .. } if frame.as_str() == name),
+    )
+}
+
+#[tokio::test]
+async fn create_group_sends_mkstream_before_first_read_and_readies_first() {
+    let mut server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "XGROUP",
+            reply: b"+OK\r\n".to_vec(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "XREADGROUP",
+            reply: resp_nil(),
+        },
+        ScriptedAction::Withhold,
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let (handle, cancel) =
+        spawn_wire_session(&server, "&createGroup=true&groupStart=earliest").await;
+
+    server.wait_for_command("XREADGROUP", 1).await;
+    let events = server.events();
+    assert_eq!(
+        events.first(),
+        Some(&HarnessEvent::Frame {
+            connection: 0,
+            name: "XGROUP".to_string(),
+            args: args_as_bytes(&["CREATE", "s1", "g", "0", "MKSTREAM"]),
+        }),
+        "the first frame after connect must be XGROUP CREATE with MKSTREAM: {events:?}"
+    );
+    assert_eq!(
+        events.get(1),
+        Some(&HarnessEvent::MarkReady),
+        "readiness must fire after the create reply, before any read: {events:?}"
+    );
+    let first_read = first_frame_at(&events, "XREADGROUP")
+        .unwrap_or_else(|| panic!("the first XREADGROUP must be recorded: {events:?}"));
+    assert_eq!(
+        first_read, 2,
+        "the first XREADGROUP must follow create and readiness: {events:?}"
+    );
+
+    let creates = server.args_of("XGROUP");
+    assert_eq!(
+        creates.len(),
+        1,
+        "exactly one XGROUP CREATE frame per session: {creates:?}"
+    );
+
+    cancel.cancel();
+    let joined = join_session(handle).await;
+    assert!(
+        joined.is_ok(),
+        "cancelled stream session must end Ok: {joined:?}"
+    );
+}
+
+#[tokio::test]
+async fn busygroup_is_success_with_info_log_no_setid() {
+    let (capture, _guard) = capture_logs();
+    let mut server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "XGROUP",
+            reply: resp_error("BUSYGROUP Consumer Group name already exists"),
+        },
+        ScriptedAction::Reply {
+            matches_command: "XREADGROUP",
+            reply: resp_nil(),
+        },
+        ScriptedAction::Withhold,
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let (handle, cancel) = spawn_wire_session(&server, "&createGroup=true&groupStart=latest").await;
+
+    server.wait_for_command("XREADGROUP", 1).await;
+    let events = server.events();
+    let ready_at = events
+        .iter()
+        .position(|event| *event == HarnessEvent::MarkReady)
+        .unwrap_or_else(|| panic!("BUSYGROUP must still signal readiness: {events:?}"));
+    let first_read = first_frame_at(&events, "XREADGROUP")
+        .unwrap_or_else(|| panic!("BUSYGROUP must let the session read: {events:?}"));
+    assert!(
+        ready_at < first_read,
+        "readiness must precede the first read after BUSYGROUP: {events:?}"
+    );
+
+    let creates = server.args_of("XGROUP");
+    assert_eq!(
+        creates.len(),
+        1,
+        "BUSYGROUP must not resend or follow up XGROUP: {creates:?}"
+    );
+    assert_eq!(
+        args_as_strings(&creates[0]),
+        vec!["CREATE", "s1", "g", "$", "MKSTREAM"],
+        "the create frame must carry the latest start position"
+    );
+    assert!(
+        creates
+            .iter()
+            .all(|args| !args_as_strings(args).iter().any(|arg| arg == "SETID")),
+        "XGROUP SETID must never be sent: {creates:?}"
+    );
+
+    let logs = capture.events();
+    assert!(
+        logs.iter().any(|event| {
+            event.level == "INFO"
+                && event.message.to_lowercase().contains("already exists")
+                && event.field("group") == Some("g")
+                && event.field("stream") == Some("s1")
+        }),
+        "BUSYGROUP must log at info! naming the group and key: {logs:?}"
+    );
+
+    cancel.cancel();
+    let joined = join_session(handle).await;
+    assert!(
+        joined.is_ok(),
+        "cancelled stream session must end Ok: {joined:?}"
+    );
+}
+
+#[tokio::test]
+async fn noperm_on_create_returns_err_non_transient() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XGROUP",
+        reply: resp_error("NOPERM this user has no permissions to run the 'xgroup' command"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let (handle, _cancel) =
+        spawn_wire_session(&server, "&createGroup=true&groupStart=earliest").await;
+
+    let err = join_session(handle)
+        .await
+        .expect_err("a NOPERM group creation must fail the session");
+    assert!(
+        !is_transient_redis_error(&err),
+        "NOPERM must classify non-transient for supervision: {err}"
+    );
+
+    let creates = server.args_of("XGROUP");
+    assert_eq!(
+        creates.len(),
+        1,
+        "group creation must never be retried: {creates:?}"
+    );
+    assert!(
+        server.args_of("XREADGROUP").is_empty(),
+        "no read may be issued after a failed create: {:?}",
+        server.args_of("XREADGROUP")
+    );
+}
+
+#[tokio::test]
+async fn default_path_nogroup_supervision_no_create_frame() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XREADGROUP",
+        reply: resp_error(
+            "NOGROUP No such key 's1' or consumer group 'g' in XREADGROUP with GROUP option",
+        ),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let (handle, _cancel) = spawn_wire_session(&server, "").await;
+
+    let err = join_session(handle)
+        .await
+        .expect_err("a NOGROUP read must fail the session");
+    assert!(
+        !is_transient_redis_error(&err),
+        "NOGROUP must classify non-transient for supervision: {err}"
+    );
+    assert!(
+        server.args_of("XGROUP").is_empty(),
+        "the default path must never send XGROUP CREATE: {:?}",
+        server.args_of("XGROUP")
+    );
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "NOGROUP must fail closed without a reconnect"
+    );
+}
+
+// ── Producer XADD / XLEN wire tests ─────────────────────────────────────────
+
+/// Exchange carrying `body`.
+fn body_exchange(body: Body) -> Exchange {
+    Exchange::new(Message::new(body))
+}
+
+/// Exchange carrying `body` and the `CamelRedis.Key` header.
+fn keyed_exchange(body: Body, key: &str) -> Exchange {
+    let mut exchange = body_exchange(body);
+    exchange.input.set_header("CamelRedis.Key", key);
+    exchange
+}
+
+#[tokio::test]
+async fn xlen_returns_count_as_body() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XLEN",
+        reply: resp_int(7),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    // No URI `key=`: the header is the only key source, pinning the
+    // `CamelRedis.Key` path.
+    let outcome = call_producer(&server, "XLEN", "", keyed_exchange(Body::Empty, "s1"))
+        .await
+        .expect("XLEN must succeed");
+
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(7)),
+        "XLEN must replace the body with the entry count"
+    );
+    let frames = server.args_of("XLEN");
+    assert_eq!(frames.len(), 1, "exactly one XLEN must reach the wire");
+    assert_eq!(args_as_strings(&frames[0]), vec!["s1"]);
+}
+
+#[tokio::test]
+async fn xadd_wire_frame_and_postconditions() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XADD",
+        reply: resp_bulk("5-0"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Text("hello".to_string())),
+    )
+    .await
+    .expect("XADD must succeed");
+
+    let frames = server.args_of("XADD");
+    assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", "hello"],
+        "XADD must append one `body` field with a server-assigned id"
+    );
+    assert_eq!(
+        outcome.input.body.as_text(),
+        Some("hello"),
+        "the exchange body must stay unchanged"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.StreamId"),
+        Some(&serde_json::json!("5-0")),
+        "CamelRedis.StreamId must carry the returned entry id"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.Stream"),
+        Some(&serde_json::json!("s1")),
+        "CamelRedis.Stream must carry the resolved key"
+    );
+}
+
+#[tokio::test]
+async fn xadd_transient_reply_sends_exactly_once() {
+    // The first XADD is answered with a transient (retry-classified) error and
+    // a second scripted action would answer a re-send successfully. A producer
+    // that retried would reconnect, re-send, and return Ok with two frames.
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "XADD",
+            reply: resp_error("connection lost"),
+        },
+        ScriptedAction::Reply {
+            matches_command: "XADD",
+            reply: resp_bulk("5-0"),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Text("hello".to_string())),
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "a failed XADD must return Err, never a retried success"
+    );
+
+    let frames = server.args_of("XADD");
+    assert_eq!(
+        frames.len(),
+        1,
+        "a non-idempotent XADD must reach the wire exactly once: {frames:?}"
+    );
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", "hello"]
+    );
+}
+
+#[tokio::test]
+async fn xadd_disconnected_after_write_names_unknown_outcome() {
+    // The server records the XADD frame, then drops the connection without
+    // replying, so the client cannot know whether the entry was appended.
+    let server = StreamFakeServer::start(vec![ScriptedAction::CloseAfterFrame {
+        matches_command: "XADD",
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Text("hello".to_string())),
+    )
+    .await;
+    let err = match outcome {
+        Ok(_) => panic!("a dropped XADD attempt must return Err"),
+        Err(err) => err,
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("XADD outcome unknown"),
+        "the error must name the unknown outcome: {text}"
+    );
+    assert!(
+        text.contains("may or may not exist"),
+        "the error must state that the entry may or may not exist: {text}"
+    );
+    assert!(
+        !text.contains("sent"),
+        "the error must not claim the request was sent: {text}"
+    );
+
+    let frames = server.args_of("XADD");
+    assert_eq!(
+        frames.len(),
+        1,
+        "the ambiguous attempt must be the only XADD frame: {frames:?}"
+    );
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", "hello"]
+    );
+}
+
+#[tokio::test]
+async fn xadd_server_coded_reply_names_definite_no_apply() {
+    // The server receives the XADD and answers with a coded business error, so
+    // the rejection is definitive: the entry was not appended. The text must
+    // not fall back to the ambiguous transport wording.
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XADD",
+        reply: resp_error("WRONGTYPE Operation against a key holding the wrong kind of value"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Text("hello".to_string())),
+    )
+    .await;
+    let err = match outcome {
+        Ok(_) => panic!("a server-rejected XADD must return Err"),
+        Err(err) => err,
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("the entry was not appended"),
+        "a coded reply must state the entry was not appended: {text}"
+    );
+    assert!(
+        !text.contains("outcome unknown"),
+        "a coded reply must not report an unknown outcome: {text}"
+    );
+
+    let frames = server.args_of("XADD");
+    assert_eq!(
+        frames.len(),
+        1,
+        "the rejected attempt must be the only XADD frame: {frames:?}"
+    );
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", "hello"]
+    );
+}
+
+#[tokio::test]
+async fn xadd_header_key_overrides_uri_key() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XADD",
+        reply: resp_bulk("5-0"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        keyed_exchange(Body::Text("hello".to_string()), "s2"),
+    )
+    .await
+    .expect("XADD must succeed");
+
+    let frames = server.args_of("XADD");
+    assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s2", "*", "body", "hello"],
+        "the CamelRedis.Key header must win over the URI key fallback"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.Stream"),
+        Some(&serde_json::json!("s2")),
+        "CamelRedis.Stream must carry the header-resolved key"
+    );
+}
+
+#[tokio::test]
+async fn xadd_prohibited_body_forms_fail_before_send() {
+    let server = StreamFakeServer::start(Vec::new())
+        .await
+        .expect("fake server must bind");
+
+    // Body::Stream carrying valid UTF-8 content: `try_into_text` rejects the
+    // stream variant itself, before any materialization attempt.
+    let stream_bytes = Body::Text("valid UTF-8 content".to_string())
+        .into_bytes(1024)
+        .await
+        .expect("in-memory body must convert");
+    let stream_body = Body::Stream(StreamBody {
+        stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(
+            futures_util::stream::iter(vec![Ok::<_, CamelError>(stream_bytes)]),
+        )))),
+        metadata: Default::default(),
+    });
+
+    let cases = [
+        ("Body::Empty", Body::Empty),
+        ("Body::Stream", stream_body),
+        ("non-UTF-8 bytes", Body::from(vec![0xff, 0xfe])),
+    ];
+    for (label, body) in cases {
+        let err = match call_producer(&server, "XADD", "&key=s1", body_exchange(body)).await {
+            Err(err) => err,
+            Ok(_) => panic!("{label} must be rejected before sending XADD"),
+        };
+        assert!(
+            matches!(err, CamelError::ProcessorError(_)),
+            "{label} must fail with a processor error: {err}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("XADD") && text.contains("body"),
+            "{label} error must name the XADD body requirement: {text}"
+        );
+    }
+
+    assert!(
+        server.recorded().is_empty(),
+        "no XADD frame may reach the wire for a rejected body: {:?}",
+        server.recorded()
+    );
+}
+
+#[tokio::test]
+async fn xadd_text_roundtrip_byte_for_byte() {
+    const TEXT: &str = "María & café ☕";
+    let mut server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "XADD",
+            reply: resp_bulk("1-1"),
+        },
+        ScriptedAction::Reply {
+            matches_command: "XREADGROUP",
+            reply: stream_entry_reply("s1", "1-1", &[("body", TEXT)]),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let written = call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Text(TEXT.to_string())),
+    )
+    .await
+    .expect("XADD must succeed");
+    assert_eq!(
+        written.input.body.as_text(),
+        Some(TEXT),
+        "XADD must keep the written text unchanged"
+    );
+    let frames = server.args_of("XADD");
+    assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", TEXT],
+        "the wire must carry the exact UTF-8 text"
+    );
+
+    let mut consumer = RedisConsumer::new(
+        stream_config(server.port(), ""),
+        Arc::new(NoopRuntimeObservability),
+    )
+    .expect("consumer must construct");
+    let (tx, mut rx) = mpsc::channel::<ExchangeEnvelope>(16);
+    let cancel = CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, cancel.clone(), "stream-roundtrip-route".to_string());
+    consumer.start(ctx).await.expect("consumer must start");
+
+    let (exchange, reply_tx) = split_envelope(recv_envelope(&mut rx).await);
+    assert!(
+        matches!(exchange.input.body, Body::Text(_)),
+        "single-field stream entries must be delivered as Text"
+    );
+    assert_eq!(
+        exchange.input.body.as_text().map(str::as_bytes),
+        Some(TEXT.as_bytes()),
+        "the delivered text must match byte for byte"
+    );
+    reply_tx
+        .send(Ok(exchange))
+        .expect("pipeline must accept the reply");
+
+    server.wait_for_command("XACK", 1).await;
     cancel.cancel();
     let joined = join_consumer(&mut consumer).await;
     assert!(

@@ -35,10 +35,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::config::GroupStart;
 use crate::retry::transient_retry_step;
 use crate::topology::{RedisTopology, ServerKind};
 use crate::transport_error::{
-    TransientByProse, TransportTimeout, is_retry_budget_exhausted, marker_camel, redis_error_raw,
+    TransientByProse, TransportTimeout, is_retry_budget_exhausted, marker_camel, redis_error_code,
+    redis_error_raw,
 };
 
 /// Parameters for one `XREADGROUP` call.
@@ -60,6 +62,10 @@ pub struct StreamConsumerParams {
     pub(crate) recover_min_idle_ms: u64,
     /// Maximum pending entries claimed per recovery batch.
     pub(crate) recover_batch: u64,
+    /// Whether the session creates the consumer group before the first read.
+    pub(crate) create_group: bool,
+    /// Start position for group creation; required when `create_group` is true.
+    pub(crate) group_start: Option<GroupStart>,
 }
 
 /// One stream entry returned by `XREADGROUP`.
@@ -214,6 +220,18 @@ pub(crate) struct RecoveryBatch {
 pub(crate) trait StreamReadIo: Send {
     /// Establish a multiplexed connection to `client`.
     async fn connect(&mut self, client: &redis::Client) -> Result<(), CamelError>;
+    /// Create the consumer group at the `start` position, creating the stream
+    /// key if it does not exist (`XGROUP CREATE <key> <group> <start>
+    /// MKSTREAM`).
+    ///
+    /// A `BUSYGROUP` reply is success: the existing group wins and no
+    /// `XGROUP SETID` is ever issued.
+    async fn create_group(
+        &mut self,
+        key: &str,
+        group: &str,
+        start: GroupStart,
+    ) -> Result<(), CamelError>;
     /// Read one batch from a consumer group.
     ///
     /// `Ok(None)` means the `BLOCK` timeout elapsed with no entries; the
@@ -346,6 +364,40 @@ impl StreamReadIo for RedisStreamReadIo {
         let conn = connect_with_timeout(client, self.connection_timeout_secs).await?;
         self.conn = Some(conn);
         Ok(())
+    }
+
+    async fn create_group(
+        &mut self,
+        key: &str,
+        group: &str,
+        start: GroupStart,
+    ) -> Result<(), CamelError> {
+        let conn = self
+            .conn
+            .as_mut()
+            .ok_or_else(|| missing_connection("stream group create guard"))?;
+
+        let mut cmd = redis::cmd("XGROUP");
+        cmd.arg("CREATE")
+            .arg(key)
+            .arg(group)
+            .arg(start.as_group_id())
+            .arg("MKSTREAM");
+        // `BUSYGROUP` is matched by code, never by message text: the group
+        // already exists, so the existing group wins and `XGROUP SETID` is
+        // never sent.
+        match cmd.query_async::<()>(conn).await.map_err(redis_error_raw) {
+            Ok(()) => Ok(()),
+            Err(err) if redis_error_code(&err) == Some("BUSYGROUP") => {
+                info!(
+                    stream = %key,
+                    group = %group,
+                    "Consumer group already exists; using the existing group"
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     async fn read_group(
@@ -1072,12 +1124,14 @@ async fn send_read_failed(msg_tx: &mpsc::Sender<ReadTaskMsg>, err: CamelError) {
 
 /// Owns the read half and services the session's control commands.
 ///
-/// Start handshake: after the first successful connect the task sends
-/// [`ReadTaskMsg::Connected`] and waits for one [`ReadTaskCmd::BatchDone`]
-/// before its first read. Afterwards it issues exactly one `XREADGROUP` read at
-/// a time, sends the outcome, and settles every queued command up to the next
-/// `BatchDone` before reading again. That ordering guarantees an `XACK` can
-/// never queue behind the next blocked read.
+/// Start handshake: after the first successful connect the task creates the
+/// consumer group (only when `create_group` is set) and then sends
+/// [`ReadTaskMsg::Connected`], which is what fires readiness in the session.
+/// It waits for one [`ReadTaskCmd::BatchDone`] before its first read.
+/// Afterwards it issues exactly one `XREADGROUP` read at a time, sends the
+/// outcome, and settles every queued command up to the next `BatchDone`
+/// before reading again. That ordering guarantees an `XACK` can never queue
+/// behind the next blocked read.
 async fn read_task_loop(
     mut read: Box<dyn StreamReadIo>,
     mut cmd_rx: mpsc::Receiver<ReadTaskCmd>,
@@ -1129,6 +1183,31 @@ async fn read_task_loop(
 
         if !started {
             started = true;
+            // Group creation is a session-level prologue: exactly one
+            // `XGROUP CREATE` per session, on the read connection, before
+            // readiness and before the first `XREADGROUP`. A failure (NOPERM,
+            // WRONGTYPE, …) is terminal for this session — creation is never
+            // retried — so supervision restarts the route instead.
+            if params.create_group {
+                let Some(start) = params.group_start else {
+                    send_read_failed(
+                        &msg_tx,
+                        CamelError::Config(
+                            "createGroup=true requires a groupStart position".to_string(),
+                        ),
+                    )
+                    .await;
+                    return;
+                };
+                let created = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    result = read.create_group(&key, &group, start) => result,
+                };
+                if let Err(e) = created {
+                    send_read_failed(&msg_tx, e).await;
+                    return;
+                }
+            }
             if msg_tx.send(ReadTaskMsg::Connected).await.is_err() {
                 return;
             }
@@ -1238,7 +1317,9 @@ async fn await_in_flight<F: Future>(slot: Option<&mut (StreamEntry, Pin<Box<F>>)
 /// budget exhaustion, ends the session with `Err` so Route supervision fires
 /// (ADR-0007).
 ///
-/// `on_ready` fires exactly once, after the first successful read connect.
+/// `on_ready` fires exactly once, after the first successful read connect and
+/// — when `create_group` is set — after `XGROUP CREATE` succeeds or reports
+/// `BUSYGROUP`. The first `XREADGROUP` always follows readiness.
 ///
 /// The recovery half owns an independent connection and retry state. When
 /// recovery is enabled, the session runs one pass immediately after `on_ready`
@@ -1628,7 +1709,9 @@ where
 ///
 /// Test-facing seam: the caller supplies both channel ends, so unit tests can
 /// drive the session without spawning the real read task. `on_ready` fires
-/// exactly once, when [`ReadTaskMsg::Connected`] arrives. When recovery is
+/// exactly once, when [`ReadTaskMsg::Connected`] arrives; the read task sends
+/// it only after the optional `XGROUP CREATE` prologue, so readiness always
+/// precedes the first `XREADGROUP`. When recovery is
 /// enabled, the first recovery pass runs (and its claimed entries are
 /// delivered and acknowledged) before the start [`ReadTaskCmd::BatchDone`] is
 /// sent, so the first `XREADGROUP` always happens after the initial pass.
@@ -1925,4 +2008,4 @@ where
 
 #[cfg(test)]
 #[path = "stream_session_tests.rs"]
-mod tests;
+pub(crate) mod tests;

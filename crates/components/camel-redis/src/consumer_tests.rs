@@ -23,6 +23,8 @@ fn create_test_config(command: RedisCommand) -> RedisEndpointConfig {
         stream_recover_enabled: false,
         stream_recover_min_idle_ms: 60000,
         stream_recover_batch: 10,
+        create_group: false,
+        group_start: None,
         username: None,
         password: None,
         db: 0,

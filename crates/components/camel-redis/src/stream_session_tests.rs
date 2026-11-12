@@ -204,6 +204,19 @@ impl StreamReadIo for FakeStreamIo {
         }
     }
 
+    async fn create_group(
+        &mut self,
+        key: &str,
+        group: &str,
+        start: GroupStart,
+    ) -> Result<(), CamelError> {
+        self.events.lock().expect("events mutex").push(format!(
+            "create_group:{key}:{group}:{}",
+            start.as_group_id()
+        ));
+        Ok(())
+    }
+
     async fn read_group(
         &mut self,
         _params: &StreamConsumerParams,
@@ -521,6 +534,8 @@ fn stream_params() -> StreamConsumerParams {
         recover_enabled: false,
         recover_min_idle_ms: 60000,
         recover_batch: 10,
+        create_group: false,
+        group_start: None,
     }
 }
 
@@ -615,13 +630,15 @@ async fn wait_for_recovery_acks(handles: &RecoveryHandles, target: usize) {
 
 /// One captured tracing event.
 #[derive(Clone, Debug, Default)]
-struct CapturedEvent {
-    message: String,
-    fields: Vec<(String, String)>,
+pub(crate) struct CapturedEvent {
+    /// `INFO`, `WARN`, … of the recorded event.
+    pub(crate) level: String,
+    pub(crate) message: String,
+    pub(crate) fields: Vec<(String, String)>,
 }
 
 impl CapturedEvent {
-    fn field(&self, name: &str) -> Option<&str> {
+    pub(crate) fn field(&self, name: &str) -> Option<&str> {
         self.fields
             .iter()
             .find(|(field, _)| field == name)
@@ -657,12 +674,12 @@ impl tracing::field::Visit for EventVisitor {
 
 /// Capturing `tracing` layer for pass-summary and skip-warning assertions.
 #[derive(Clone, Default)]
-struct LogCapture {
+pub(crate) struct LogCapture {
     events: Arc<Mutex<Vec<CapturedEvent>>>,
 }
 
 impl LogCapture {
-    fn events(&self) -> Vec<CapturedEvent> {
+    pub(crate) fn events(&self) -> Vec<CapturedEvent> {
         self.events.lock().expect("events mutex").clone()
     }
 }
@@ -679,6 +696,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
             .lock()
             .expect("events mutex")
             .push(CapturedEvent {
+                level: event.metadata().level().to_string(),
                 message: visitor.message,
                 fields: visitor.fields,
             });
@@ -686,7 +704,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for LogCapture {
 }
 
 /// Install a capturing subscriber for the current test thread.
-fn capture_logs() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+pub(crate) fn capture_logs() -> (LogCapture, tracing::subscriber::DefaultGuard) {
     let capture = LogCapture::default();
     let subscriber = tracing_subscriber::registry().with(capture.clone());
     let dispatch = tracing::Dispatch::new(subscriber);
