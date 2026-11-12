@@ -31,7 +31,7 @@ branches. The owner reviewed the first park (e_opus recommendations Q1-Q8,
 
 `CamelError` gains one variant:
 
-```rust
+```rust,ignore
 Business {
     code: String,
     kind: String,
