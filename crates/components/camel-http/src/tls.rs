@@ -145,6 +145,19 @@ fn client_builder(
     builder
 }
 
+/// The crypto provider for every fallback-path rustls config (rc-jr2g8):
+/// resolve the way reqwest does (async_impl/client.rs) — process-default
+/// provider when the host installed one (camel-cli installs ring), else
+/// the aws-lc-rs default reqwest's `rustls` feature falls back to. Both
+/// rustls crypto features are enabled in this crate, so stock builders
+/// that rely on feature-derived auto-detection cannot resolve one —
+/// every builder goes through this explicit resolution.
+fn fallback_crypto_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+}
+
 /// Shared start for the fallback client configs (rc-jr2g8): resolve the
 /// crypto provider the way reqwest does (async_impl/client.rs) —
 /// process-default provider when the host installed one (camel-cli
@@ -155,10 +168,7 @@ fn client_builder(
 /// platform-dependent.
 fn fallback_client_config_builder()
 -> rustls::ConfigBuilder<rustls::ClientConfig, rustls::WantsVerifier> {
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()));
-    rustls::ClientConfig::builder_with_provider(provider)
+    rustls::ClientConfig::builder_with_provider(fallback_crypto_provider())
         .with_safe_default_protocol_versions()
         .expect("stock rustls provider supports the safe default protocol versions") // allow-unwrap
 }
@@ -348,13 +358,15 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifyServerCertVerifier {
 /// Full rustls `ClientConfig` for the CA-less-platform fallback when the
 /// configured TLS material must be honored: custom CA union store
 /// (fallback_root_store), optional no-verify mode (insecure /
-/// verify_peer=false), and mTLS client auth. Returns `Ok(None)` when the
-/// plain `webpki_root_client_config()` suffices (TLS on, no material,
-/// verification on) — callers resolve `config.tls` presence before
-/// calling. Strict mode fails closed on every material failure;
-/// non-strict warns and degrades per item.
+/// verify_peer=false), the expired-certificate allowlist wrapper (bd
+/// rc-ishar), and mTLS client auth. Returns `Ok(None)` when the plain
+/// `webpki_root_client_config()` suffices (TLS on, no material,
+/// verification on, no allowlist) — callers resolve `config.tls`
+/// presence before calling. Strict mode fails closed on every material
+/// failure; non-strict warns and degrades per item.
 fn fallback_client_config(
     tls: &crate::config::TlsConfig,
+    allowlist: Option<&std::sync::Arc<crate::tls_allowlist::ExpiredCertAllowlist>>,
 ) -> Result<Option<rustls::ClientConfig>, CamelError> {
     if !tls.enabled {
         return Ok(None);
@@ -363,7 +375,10 @@ fn fallback_client_config(
         || tls.client_cert_path.is_some()
         || tls.client_key_path.is_some();
     let verification_disabled = tls.insecure || !tls.verify_peer;
-    if !material && !verification_disabled {
+    // An allowlist that must be installed counts as material too: the
+    // `Ok(None)` early-return would silently drop the wrapper verifier
+    // (bd rc-ishar).
+    if !material && !verification_disabled && allowlist.is_none() {
         return Ok(None);
     }
     let builder = fallback_client_config_builder();
@@ -372,9 +387,34 @@ fn fallback_client_config(
     // under strict by construction of `fallback_root_store`.
     let store = fallback_root_store(tls.ca_cert_path.as_deref(), tls.strict)?;
     let builder = if verification_disabled {
+        // Priority: the danger verifier wins even when an allowlist is
+        // present (cannot happen post-validate — validate_expired_
+        // allowlist rejects insecure/verify_peer=false — but this branch
+        // keeps priority by construction).
         builder
             .dangerous()
             .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifyServerCertVerifier))
+    } else if let Some(allowlist) = allowlist {
+        // Expired-certificate allowlist (bd rc-ishar): full webpki
+        // validation underneath, with the wrapper tolerating only
+        // expiry errors for pinned host+fingerprint pairs. The warn
+        // limiter is constructed per config build — once per client
+        // lifetime (60s default window).
+        let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            std::sync::Arc::new(store),
+            fallback_crypto_provider(),
+        )
+        .build()
+        .expect("webpki server verifier builds from a valid root store"); // allow-unwrap: valid store
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(
+                crate::tls_allowlist::ExpiredCertAllowVerifier::new(
+                    inner,
+                    std::sync::Arc::clone(allowlist),
+                    crate::tls_allowlist::WarnRateLimiter::default(),
+                ),
+            ))
     } else {
         builder.with_root_certificates(store)
     };
@@ -487,6 +527,65 @@ fn fallback_client_config(
     Ok(Some(config))
 }
 
+/// Parses the configured expired-certificate allowlist for the build
+/// path (bd rc-ishar). `Ok(None)` when no entries are configured. Any
+/// malformed entry is a typed fail-closed error — `HttpConfig::validate()`
+/// already rejects it at endpoint creation, so reaching a client build
+/// with a malformed entry means validation was bypassed, and no code
+/// path may silently fall back to a wrapper-free client.
+fn parsed_allowlist(
+    tls: &crate::config::TlsConfig,
+) -> Result<Option<std::sync::Arc<crate::tls_allowlist::ExpiredCertAllowlist>>, CamelError> {
+    if tls.expired_allowlist.is_empty() {
+        return Ok(None);
+    }
+    crate::tls_allowlist::ExpiredCertAllowlist::parse(&tls.expired_allowlist)
+        .map(|list| Some(std::sync::Arc::new(list)))
+        .map_err(|e| {
+            CamelError::EndpointCreationFailed(format!(
+                "tls.expired_allowlist failed to parse at client build (fail-closed; \
+                 HttpConfig::validate() must reject malformed entries first): {e}"
+            ))
+        })
+}
+
+/// Client built on the expired-certificate allowlist path (bd rc-ishar):
+/// bundled/custom roots under the full webpki verifier, wrapped so that
+/// ONLY expired-certificate errors for pinned host+fingerprint entries
+/// are tolerated. The platform verifier is bypassed entirely — native
+/// trust settings could accept certificates outside the pinned set's
+/// semantics. A build error routes through [`fallback_rebuild_failed`]
+/// (strict → typed Err; non-strict → the wrapper-free emergency client,
+/// where expired certificates fail — fails safe).
+pub(crate) fn allowlist_client(
+    config: &HttpConfig,
+    resolve_override: Option<(&str, &[std::net::SocketAddr])>,
+) -> Result<reqwest::Client, CamelError> {
+    let Some(tls) = config.tls.as_ref() else {
+        // allowlist_active() gates every caller; unreachable in practice.
+        return Err(CamelError::EndpointCreationFailed(
+            "expired-certificate allowlist requires a tls config".to_string(),
+        ));
+    };
+    let allowlist =
+        parsed_allowlist(tls)?.expect("allowlist_active() guarantees configured entries"); // allow-unwrap: gated
+    let pinned = tls.expired_allowlist.len();
+    // log-policy: handler-owned
+    tracing::info!(
+        "expired-certificate allowlist active ({pinned} pinned entries) — using \
+         bundled-root verifier (platform verifier bypassed)"
+    );
+    let rustls_config = fallback_client_config(tls, Some(&allowlist))?
+        .expect("an allowlist-bearing config always installs a backend"); // allow-unwrap: gated
+    match client_builder(config, resolve_override)
+        .tls_backend_preconfigured(rustls_config)
+        .build()
+    {
+        Ok(client) => Ok(client),
+        Err(err) => fallback_rebuild_failed(config, &err),
+    }
+}
+
 /// Last-resort client for the (unreachable-on-reqwest-0.13.4) second
 /// build error inside [`webpki_fallback_client`]: no proxy, no
 /// redirects, webpki roots. Reaching the `expect` means the TLS stack
@@ -499,6 +598,18 @@ fn emergency_webpki_client() -> reqwest::Client {
         .tls_backend_preconfigured(webpki_root_client_config())
         .build()
         .expect("preconfigured webpki-rooted client build has no fallible stage") // allow-unwrap
+}
+
+/// Whether the configured TLS state routes the client build through the
+/// expired-certificate allowlist wrapper (bd rc-ishar): TLS enabled,
+/// verification still on (`tls.insecure` / `verify_peer=false` reject
+/// the whole allowlist at validate()), and at least one pinned entry.
+/// Conflicts are already rejected at `HttpConfig::validate()`; this
+/// predicate is the build-path gate.
+pub(crate) fn allowlist_active(config: &HttpConfig) -> bool {
+    config.tls.as_ref().is_some_and(|tls| {
+        tls.enabled && !tls.insecure && tls.verify_peer && !tls.expired_allowlist.is_empty()
+    })
 }
 
 /// Why the webpki fallback was entered: a real platform-verifier
@@ -622,7 +733,22 @@ pub(crate) fn webpki_fallback_client(
             || tls.client_key_path.is_some()
     });
 
-    match config.tls.as_ref().map(fallback_client_config) {
+    // Expired-certificate allowlist (bd rc-ishar): parse the configured
+    // entries once, fail-closed on any malformed one, and pass the
+    // parsed list through so a CA-less-platform fallback re-enters the
+    // same wrapper (no allowlist config can build a wrapper-free
+    // client).
+    let allowlist = match config.tls.as_ref().map(parsed_allowlist) {
+        None => None,
+        Some(Ok(list)) => list,
+        Some(Err(e)) => return Err(e),
+    };
+
+    match config
+        .tls
+        .as_ref()
+        .map(|tls| fallback_client_config(tls, allowlist.as_ref()))
+    {
         // No TLS config, TLS off, or verification-on with no material:
         // the plain webpki-rooted backend is the parity configuration.
         None | Some(Ok(None)) => build_with_backend(webpki_root_client_config()),
@@ -666,6 +792,15 @@ pub(crate) fn build_client(
     #[cfg(test)]
     if FORCE_WEBPKI_FALLBACK.with(std::cell::Cell::get) {
         return webpki_fallback_client(config, resolve_override, FallbackTrigger::Forced);
+    }
+
+    // Expired-certificate allowlist (bd rc-ishar): a pinned-expiry
+    // config bypasses the platform verifier entirely and builds on the
+    // bundled-root wrapper instead. The seam above wins (forced-fallback
+    // semantics intact); this gate sits before the platform-verifier
+    // attempt.
+    if allowlist_active(config) {
+        return allowlist_client(config, resolve_override);
     }
 
     match client_builder(config, resolve_override).build() {

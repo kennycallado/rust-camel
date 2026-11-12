@@ -76,6 +76,43 @@ The component validates each outbound URL and each redirect hop. `allow_internal
 
 `TlsConfig` verifies peer certificates by default. An operator can opt out with `insecure=true` or `verify_peer=false`. The opt-out emits a warning. The component forbids cleartext HTTP to public addresses even with `allow_internal=true`.
 
+### Expired-certificate allowlist (per-host pinned)
+
+`TlsConfig` carries an opt-in allowlist that tolerates one expired certificate per pinned host + fingerprint. `tls.expired_allowlist` lists `{host, port, fingerprint}` entries. The default rejects expired certificates. The allowlist is the scoped alternative to `insecure=true` and `verify_peer=false`.
+
+```yaml
+components:
+  http:
+    tls:
+      enabled: true
+      expired_allowlist:
+        - host: backend.internal.example
+          port: 8443
+          fingerprint: "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+```
+
+Each entry pins one `host`, one `port`, and one end-entity certificate fingerprint. The `fingerprint` is `sha256:` followed by exactly 64 hex characters of the DER-encoded certificate. Hex case is normalized. The `host` is an exact DNS name or IP literal: no wildcard, no subdomain pattern, no whitespace. Host case is normalized. Duplicate entries (same normalized host, port, and fingerprint) are rejected. The list has no URI parameter form: component YAML only, and never read from exchange headers.
+
+Enforcement is narrow. Only certificate-expiry errors are tolerated. The hostname is independently re-verified against the presented end-entity certificate. Every other verification error still fails on a listed host: unknown issuer, hostname mismatch, wrong fingerprint. An expired certificate with a fingerprint not on the list fails like an unlisted host. The `port` is declarative: it feeds validation and duplicate detection only. The TLS verifier layer carries no port, so enforcement matches host + fingerprint.
+
+The allowlist path builds trust on the bundled Mozilla roots plus `tls.ca_cert_path`. It does not consult the OS trust store. Operators whose chain issues from an OS-store CA must add that CA with `tls.ca_cert_path`.
+
+Expiry anywhere on the presented chain is tolerated while the pinned end-entity certificate is the leaf. An expired intermediate therefore does not fail the handshake when the pinned leaf is presented.
+
+Each accepted expired certificate emits one WARN that names the redacted host and the fingerprint. The WARN repeats at most once per 60 s window per host + fingerprint pair.
+
+Prefer the allowlist over `insecure=true` and `verify_peer=false` when one backend has an expired certificate. The allowlist scopes the risk to one host and one certificate. `insecure` disables all verification for every host the endpoint talks to. The allowlist has its own risk: it pins trust to that specific certificate. Pin only certificates the operator controls or has verified.
+
+A non-empty allowlist combined with any of the following fails endpoint creation:
+
+| Conflict | Effect |
+| --- | --- |
+| `insecure=true` | Endpoint creation fails. |
+| `verify_peer=false` | Endpoint creation fails. |
+| `enabled=false` | Endpoint creation fails. |
+| Malformed entry: missing `sha256:` prefix, non-64-hex fingerprint, wildcard, whitespace, or empty host, `port` 0 | Endpoint creation fails. |
+| Duplicate entry (same normalized host, port, fingerprint) | Endpoint creation fails. |
+
 ### Redirects
 
 The Producer does not follow redirects by default. A 3xx response is returned as-is, and the exchange fails when `throwExceptionOnFailure=true`.

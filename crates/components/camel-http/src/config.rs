@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::Deserialize;
 
 use camel_component_api::CamelError;
@@ -36,6 +38,30 @@ pub struct HttpConfig {
     pub proxy_url: Option<String>,
 }
 
+/// One pinned-expiry allowlist entry: an exact DNS name or IP literal, a
+/// declarative port, and the SHA-256 hex of the pinned end-entity DER (bd
+/// rc-ishar). Host and fingerprint are public certificate material, so the
+/// manual `Debug` prints them verbatim.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+pub struct ExpiredCertAllowEntry {
+    /// Exact DNS name or IP literal the pin applies to (no wildcards).
+    pub host: String,
+    /// Declarative port (1-65535).
+    pub port: u16,
+    /// `sha256:` followed by exactly 64 hex chars of the end-entity DER.
+    pub fingerprint: String,
+}
+
+impl std::fmt::Debug for ExpiredCertAllowEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpiredCertAllowEntry")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
+}
+
 /// TLS configuration for HTTP/HTTPS client connections.
 #[derive(Clone, PartialEq, Deserialize)]
 pub struct TlsConfig {
@@ -69,6 +95,12 @@ pub struct TlsConfig {
     /// bundles); mTLS requires BOTH cert and key paths.
     #[serde(default)]
     pub strict: bool,
+    /// Pinned-expiry allowlist: exact host+port entries whose end-entity
+    /// certificate may stay trusted past its NotAfter while verification
+    /// remains on (bd rc-ishar). Kept last so existing serde structs stay
+    /// append-compatible; validated fail-closed by `validate_expired_allowlist`.
+    #[serde(default)]
+    pub expired_allowlist: Vec<ExpiredCertAllowEntry>,
 }
 
 fn default_verify_peer() -> bool {
@@ -85,6 +117,7 @@ impl Default for TlsConfig {
             client_key_path: None,
             insecure: false,
             strict: false,
+            expired_allowlist: Vec::new(),
         }
     }
 }
@@ -102,6 +135,7 @@ impl std::fmt::Debug for TlsConfig {
             .field("client_key_path", &"[REDACTED]")
             .field("insecure", &self.insecure)
             .field("strict", &self.strict)
+            .field("expired_allowlist", &self.expired_allowlist)
             .finish()
     }
 }
@@ -201,6 +235,10 @@ impl HttpConfig {
             ));
         }
 
+        if let Some(tls) = &self.tls {
+            validate_expired_allowlist(tls)?;
+        }
+
         Ok(())
     }
 
@@ -260,6 +298,93 @@ impl HttpConfig {
         self.tls = tls;
         self
     }
+}
+
+/// Fail-closed validation for `tls.expired_allowlist` (bd rc-ishar).
+///
+/// An empty list short-circuits with no checks beyond iteration. A non-empty
+/// list rejects any malformed entry, duplicate, or conflict with weaker TLS
+/// settings, so `HttpComponent::create_endpoint` (which calls
+/// `HttpConfig::validate()`) fails instead of silently downgrading
+/// verification. Entry errors are 0-based indexed.
+pub(crate) fn validate_expired_allowlist(tls: &TlsConfig) -> Result<(), CamelError> {
+    if tls.expired_allowlist.is_empty() {
+        return Ok(());
+    }
+
+    if tls.insecure {
+        return Err(CamelError::Config(
+            "tls.expired_allowlist conflicts with tls.insecure: certificate verification must stay enabled to pin expired certificates".to_string(),
+        ));
+    }
+    if !tls.verify_peer {
+        return Err(CamelError::Config(
+            "tls.expired_allowlist conflicts with tls.verify_peer = false: certificate verification must stay enabled to pin expired certificates".to_string(),
+        ));
+    }
+    if !tls.enabled {
+        return Err(CamelError::Config(
+            "tls.expired_allowlist requires tls.enabled = true".to_string(),
+        ));
+    }
+
+    let mut seen = HashSet::new();
+    for (index, entry) in tls.expired_allowlist.iter().enumerate() {
+        let host = entry.host.trim();
+        if host.is_empty() {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].host must not be empty"
+            )));
+        }
+        if host.chars().any(char::is_whitespace) {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].host must not contain whitespace"
+            )));
+        }
+        if host.contains('*') {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].host must not contain wildcard '*': exact names and IP literals only"
+            )));
+        }
+        if host.contains('/') {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].host must not contain '/'"
+            )));
+        }
+        if host.starts_with('.') {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].host must not start with '.'"
+            )));
+        }
+
+        if entry.port == 0 {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].port must be non-zero (1-65535)"
+            )));
+        }
+
+        let Some(hex) = entry.fingerprint.strip_prefix("sha256:") else {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].fingerprint must start with \"sha256:\""
+            )));
+        };
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}].fingerprint must be \"sha256:\" followed by exactly 64 hex characters"
+            )));
+        }
+
+        // Normalization is textual here (comparison only); the allowlist
+        // module owns the parsed DNS/IP + fingerprint forms.
+        let key = (host.to_lowercase(), entry.port, hex.to_lowercase());
+        if !seen.insert(key) {
+            return Err(CamelError::Config(format!(
+                "tls.expired_allowlist[{index}] is a duplicate entry (same normalized host, port, and fingerprint)"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn parse_ok_status_code_range(range: &str) -> Result<(u16, u16), CamelError> {
@@ -444,6 +569,7 @@ mod tests {
             client_key_path: Some("/secret/key.pem".to_string()),
             insecure: false,
             strict: false,
+            expired_allowlist: Vec::new(),
         };
         let debug = format!("{:?}", cfg);
         assert!(
@@ -455,5 +581,279 @@ mod tests {
             debug.contains("enabled: true"),
             "non-sensitive fields must stay visible: {debug}"
         );
+    }
+
+    // -- tls.expired_allowlist (bd rc-ishar) --
+
+    /// 64 upper-case hex chars: a valid pinned SHA-256 fingerprint body.
+    const HEX64_UPPER: &str = "AABBCCDDAABBCCDDAABBCCDDAABBCCDDAABBCCDDAABBCCDDAABBCCDDAABBCCDD";
+
+    fn allow_entry(host: &str, port: u16, fingerprint: &str) -> super::ExpiredCertAllowEntry {
+        super::ExpiredCertAllowEntry {
+            host: host.to_string(),
+            port,
+            fingerprint: fingerprint.to_string(),
+        }
+    }
+
+    fn http_with_allow(tls: super::TlsConfig) -> HttpConfig {
+        HttpConfig {
+            tls: Some(tls),
+            ..HttpConfig::default()
+        }
+    }
+
+    fn valid_entry() -> super::ExpiredCertAllowEntry {
+        allow_entry("backend.internal", 8443, &format!("sha256:{HEX64_UPPER}"))
+    }
+
+    #[test]
+    fn expired_allowlist_parses_from_yaml() {
+        let toml_src = format!(
+            r#"
+[tls]
+enabled = true
+
+[[tls.expired_allowlist]]
+host = "Backend.Internal"
+port = 8443
+fingerprint = "sha256:{HEX64_UPPER}"
+"#
+        );
+        let cfg: HttpConfig = toml::from_str(&toml_src).expect("toml must deserialize");
+        let tls = cfg.tls.as_ref().expect("tls must be present");
+        assert_eq!(tls.expired_allowlist.len(), 1);
+        assert_eq!(tls.expired_allowlist[0].host, "Backend.Internal");
+        assert_eq!(tls.expired_allowlist[0].port, 8443);
+        assert_eq!(
+            tls.expired_allowlist[0].fingerprint,
+            format!("sha256:{HEX64_UPPER}")
+        );
+        assert!(
+            cfg.validate().is_ok(),
+            "upper-case fingerprint and mixed-case host are accepted"
+        );
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_missing_sha256_prefix() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry("backend.internal", 8443, HEX64_UPPER)],
+            ..super::TlsConfig::default()
+        });
+        let err = cfg
+            .validate()
+            .expect_err("missing sha256: prefix must be rejected");
+        assert!(err.to_string().contains("sha256:"), "got: {err}");
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_short_fingerprint() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry(
+                "backend.internal",
+                8443,
+                &format!("sha256:{}", &HEX64_UPPER[..63]),
+            )],
+            ..super::TlsConfig::default()
+        });
+        assert!(cfg.validate().is_err(), "63 hex chars must be rejected");
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_non_hex_fingerprint() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry(
+                "backend.internal",
+                8443,
+                &format!("sha256:G{}", &HEX64_UPPER[1..]),
+            )],
+            ..super::TlsConfig::default()
+        });
+        assert!(
+            cfg.validate().is_err(),
+            "non-hex characters must be rejected"
+        );
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_wildcard_host() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry(
+                "*.backend.internal",
+                8443,
+                &format!("sha256:{HEX64_UPPER}"),
+            )],
+            ..super::TlsConfig::default()
+        });
+        let err = cfg.validate().expect_err("wildcard host must be rejected");
+        assert!(err.to_string().contains("wildcard"), "got: {err}");
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_empty_host() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry("", 8443, &format!("sha256:{HEX64_UPPER}"))],
+            ..super::TlsConfig::default()
+        });
+        assert!(cfg.validate().is_err(), "empty host must be rejected");
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_host_with_whitespace() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry(
+                "backend .internal",
+                8443,
+                &format!("sha256:{HEX64_UPPER}"),
+            )],
+            ..super::TlsConfig::default()
+        });
+        assert!(
+            cfg.validate().is_err(),
+            "whitespace in host must be rejected"
+        );
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_out_of_range_port_at_deserialization() {
+        let toml_src = format!(
+            r#"
+[tls]
+enabled = true
+
+[[tls.expired_allowlist]]
+host = "backend.internal"
+port = 70000
+fingerprint = "sha256:{HEX64_UPPER}"
+"#
+        );
+        assert!(
+            toml::from_str::<HttpConfig>(&toml_src).is_err(),
+            "port 70000 must fail at deserialization (u16), not in validate()"
+        );
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_zero_port() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![allow_entry(
+                "backend.internal",
+                0,
+                &format!("sha256:{HEX64_UPPER}"),
+            )],
+            ..super::TlsConfig::default()
+        });
+        assert!(
+            cfg.validate().is_err(),
+            "port 0 must be rejected by validate()"
+        );
+    }
+
+    #[test]
+    fn expired_allowlist_rejects_duplicate_entries() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            expired_allowlist: vec![
+                allow_entry("Backend.internal", 8443, &format!("sha256:{HEX64_UPPER}")),
+                allow_entry(
+                    "backend.INTERNAL",
+                    8443,
+                    &format!("sha256:{}", HEX64_UPPER.to_lowercase()),
+                ),
+            ],
+            ..super::TlsConfig::default()
+        });
+        let err = cfg
+            .validate()
+            .expect_err("entries identical after normalization must be rejected");
+        assert!(err.to_string().contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn expired_allowlist_conflicts_with_insecure() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            insecure: true,
+            expired_allowlist: vec![valid_entry()],
+            ..super::TlsConfig::default()
+        });
+        let err = cfg
+            .validate()
+            .expect_err("allowlist must conflict with insecure");
+        let msg = err.to_string();
+        assert!(msg.contains("expired_allowlist"), "got: {msg}");
+        assert!(msg.contains("insecure"), "got: {msg}");
+    }
+
+    #[test]
+    fn expired_allowlist_conflicts_with_verify_peer_false() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            verify_peer: false,
+            expired_allowlist: vec![valid_entry()],
+            ..super::TlsConfig::default()
+        });
+        assert!(
+            cfg.validate().is_err(),
+            "allowlist must conflict with verify_peer = false"
+        );
+    }
+
+    #[test]
+    fn expired_allowlist_conflicts_with_tls_disabled() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: false,
+            expired_allowlist: vec![valid_entry()],
+            ..super::TlsConfig::default()
+        });
+        assert!(
+            cfg.validate().is_err(),
+            "allowlist must conflict with tls disabled"
+        );
+    }
+
+    #[test]
+    fn empty_expired_allowlist_is_valid_and_conflict_free() {
+        let cfg = http_with_allow(super::TlsConfig {
+            enabled: true,
+            insecure: true,
+            expired_allowlist: Vec::new(),
+            ..super::TlsConfig::default()
+        });
+        assert!(
+            cfg.validate().is_ok(),
+            "empty allowlist short-circuits; insecure alone remains legal"
+        );
+    }
+
+    #[test]
+    fn tls_config_debug_shows_allowlist() {
+        let cfg = super::TlsConfig {
+            client_key_path: Some("/secret/key.pem".to_string()),
+            expired_allowlist: vec![valid_entry()],
+            ..super::TlsConfig::default()
+        };
+        let debug = format!("{cfg:?}");
+        assert!(
+            debug.contains("backend.internal"),
+            "host is public material and must stay visible: {debug}"
+        );
+        assert!(
+            debug.contains(&format!("sha256:{HEX64_UPPER}")),
+            "fingerprint is public material and must stay visible: {debug}"
+        );
+        assert!(
+            !debug.contains("/secret"),
+            "client key path must stay redacted: {debug}"
+        );
+        assert!(debug.contains("REDACTED"), "must show REDACTED: {debug}");
     }
 }

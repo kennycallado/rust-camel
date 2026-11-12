@@ -109,6 +109,58 @@ pub(crate) fn gen_self_signed_server_cert() -> (String, String) {
     (server_cert.pem(), server_key.serialize_pem())
 }
 
+/// Expired CA-signed leaf plus its PEM forms. `cert` keeps the rcgen
+/// handle alive so a test can fingerprint `der()` from the SAME leaf it
+/// hands to the server (the pin must match what is actually served).
+pub(crate) struct ExpiredLeaf {
+    pub(crate) cert: rcgen::Certificate,
+    pub(crate) cert_pem: String,
+    pub(crate) key_pem: String,
+}
+
+/// CA-signed leaf that is ALREADY EXPIRED regardless of the wall clock:
+/// validity 2024-01-01 through 2024-01-02 (always in the past), SAN
+/// `san`, signed by `ca`'s issuer. Unexpired counterpart of
+/// [`gen_leaf_signed_by_ca`]; same `(cert, cert_pem, key_pem)` shape as
+/// the mTLS-capable harness helpers.
+pub(crate) fn gen_expired_leaf_signed_by_ca(ca: &TestCa, san: rcgen::SanType) -> ExpiredLeaf {
+    let leaf_key = rcgen::KeyPair::generate().expect("leaf keygen"); // allow-unwrap(test)
+    let mut leaf_params = rcgen::CertificateParams::default();
+    leaf_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    leaf_params.not_after = rcgen::date_time_ymd(2024, 1, 2);
+    leaf_params.subject_alt_names = vec![san];
+    let issuer = rcgen::Issuer::from_params(&ca.ca_params, &ca.ca_key);
+    let leaf_cert = leaf_params
+        .signed_by(&leaf_key, &issuer)
+        .expect("leaf sign"); // allow-unwrap(test)
+    ExpiredLeaf {
+        cert_pem: leaf_cert.pem(),
+        key_pem: leaf_key.serialize_pem(),
+        cert: leaf_cert,
+    }
+}
+
+/// UNEXPIRED server leaf signed by `ca` with an arbitrary SAN — the
+/// generic-SAN counterpart to [`gen_leaf_signed_by_ca`] (which is
+/// IP-typed). Returns `(cert_pem, key_pem)`.
+pub(crate) fn gen_leaf_signed_by_ca_san(ca: &TestCa, san: rcgen::SanType) -> (String, String) {
+    let leaf_key = rcgen::KeyPair::generate().expect("leaf keygen"); // allow-unwrap(test)
+    let mut leaf_params = rcgen::CertificateParams::default();
+    leaf_params.subject_alt_names = vec![san];
+    let issuer = rcgen::Issuer::from_params(&ca.ca_params, &ca.ca_key);
+    let leaf_cert = leaf_params
+        .signed_by(&leaf_key, &issuer)
+        .expect("leaf sign"); // allow-unwrap(test)
+    (leaf_cert.pem(), leaf_key.serialize_pem())
+}
+
+/// Lowercase `sha256:`-prefixed hex fingerprint over raw certificate DER
+/// — the exact form `ExpiredCertAllowEntry::fingerprint` carries.
+pub(crate) fn sha256_fingerprint_hex(der: &[u8]) -> String {
+    use sha2::Digest;
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(der)))
+}
+
 /// Loopback TLS server on 127.0.0.1:0. With `client_ca_pem: Some(_)`
 /// the server REQUIRES client certificates verified against that CA
 /// (mTLS scenarios); otherwise `with_no_client_auth()`. Serves at most

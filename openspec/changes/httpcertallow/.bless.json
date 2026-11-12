@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:f8da3524bda12ea1a3d0c5bb28dbe0b7b7c17b081709ec31b3e5a5fb9a1b95e2",
+  "expert": "@experts/e_gpt",
+  "session": "ses_e2f61501bffe0kKXOfYDsbyHPk",
+  "notes": "Plan bless r2: r1 BLESS-WITH-FIXES (3 fixes: rustls::error::CertificateError path; tls_tests.rs arity call sites; redact_host in WARN + 4 minors: HashMap literal, Ia5String try_from, seam ordering, fail-closed parse in fallback path). All applied; re-bless VERDICT: BLESS. Reviews: r_gpt plan r1 ses_e2f6f94c7ffe6d4Ga0Wj7G06Ca (APPROVE-WITH-FINDINGS, 1 important + 5 minor, all fixed), r2 ses_e2f6bbc17ffe8s2gsTmz9HdaNX (APPROVE-WITH-FINDINGS, port-0 minor fixed + pre-approved reword).",
+  "blessed_at": "2026-11-12"
+}

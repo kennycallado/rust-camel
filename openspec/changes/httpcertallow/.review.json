@@ -1,0 +1,21 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS-RESOLVED",
+  "reviewer": "@reviewers/r_gpt",
+  "session": "ses_e2f355b41ffe3TUNojhg6ldh9U",
+  "findings_initial": [
+    "minor: WARN fingerprint bare hex vs blessed sha256:<hex> form — fixed 47bb6a957, re-review APPROVE (ses_e2f2baeb1ffeAqpyeZa2Ix3SBI)"
+  ],
+  "stage4_expert_pass": {
+    "expert": "@experts/e_glm",
+    "session": "ses_e2f0ea1daffedGNHf10FzT784O",
+    "verdict": "APPROVE-WITH-FINDINGS",
+    "findings": [
+      "important: rate limiter gated acceptance, not just the warn — intermittent rejection of tolerated certs within the 60s window — fixed fba9d1edc (acceptance unconditional; limiter gates warn only), re-review APPROVE (ses_e2f05ae36ffe12TtPWpExCbv5S)",
+      "important: rate-limit integration test premise vacuous (session resumption skips verification on second connection) — fixed fba9d1edc (new direct 3-call unit test pins acceptance; integration test comment now honest upper-bound semantics)"
+    ]
+  },
+  "impl_hash": "git:fba9d1edc1b22cfd23d52eead6fb69e89eb57c67",
+  "spec_hash_at_bless": "sha256:f8da3524bda12ea1a3d0c5bb28dbe0b7b7c17b081709ec31b3e5a5fb9a1b95e2",
+  "reviewed_at": "2026-11-12"
+}

@@ -13,6 +13,7 @@ pub mod static_config;
 pub mod static_dispatch;
 pub mod static_endpoint;
 pub(crate) mod tls;
+pub(crate) mod tls_allowlist;
 #[cfg(test)]
 mod tls_harness;
 pub(crate) mod tls_reload;
@@ -4070,3 +4071,6 @@ fn constructed_header<'a>(
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "tls_allowlist_tests.rs"]
+mod tls_allowlist_tests;

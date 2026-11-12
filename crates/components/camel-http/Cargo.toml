@@ -44,6 +44,10 @@ rustls.workspace = true
 # Bundled Mozilla roots for the CA-less-platform client fallback (rc-3j4mq).
 # Precedent: camel-cli redis-tls pure-rust webpki roots (rc-ayy11).
 webpki-roots = "1"
+# Expired-cert allowlist (bd rc-ishar): SHA-256 pinning of end-entity DERs.
+sha2.workspace = true
+hex.workspace = true
+rustls-webpki = "0.103"
 
 [features]
 otel = ["dep:camel-otel"]

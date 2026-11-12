@@ -234,7 +234,7 @@ fn test_fallback_client_config_disabled_tls_returns_none() {
         ..Default::default()
     };
     assert!(
-        fallback_client_config(&tls)
+        fallback_client_config(&tls, None)
             .expect("disabled TLS is infallible") // allow-unwrap(test)
             .is_none()
     );
@@ -247,7 +247,7 @@ fn test_fallback_client_config_no_material_verifying_returns_none() {
         ..Default::default()
     };
     assert!(
-        fallback_client_config(&tls)
+        fallback_client_config(&tls, None)
             .expect("plain verifying TLS is infallible") // allow-unwrap(test)
             .is_none()
     );
@@ -272,7 +272,7 @@ fn test_fallback_client_config_strict_identity_garbage_key_fails_closed() {
         client_key_path: Some(key_path.display().to_string()),
         ..Default::default()
     };
-    let err = match fallback_client_config(&tls) {
+    let err = match fallback_client_config(&tls, None) {
         Err(e) => e,
         Ok(_) => panic!("strict mode must fail closed on a garbage client key"),
     };
@@ -302,7 +302,7 @@ fn test_fallback_client_config_strict_rustls_rejected_key_fails_closed() {
         client_key_path: Some(key_path.display().to_string()),
         ..Default::default()
     };
-    let err = match fallback_client_config(&tls) {
+    let err = match fallback_client_config(&tls, None) {
         Err(e) => e,
         Ok(_) => panic!("strict mode must fail closed when rustls rejects the identity"),
     };
@@ -320,7 +320,7 @@ fn test_fallback_client_config_half_mtls_pair_strict_fails_nonstrict_no_auth() {
         client_cert_path: Some(cert_path.display().to_string()),
         ..Default::default()
     };
-    let err = match fallback_client_config(&tls_strict) {
+    let err = match fallback_client_config(&tls_strict, None) {
         Err(e) => e,
         Ok(_) => panic!("strict mode must fail closed on a half-configured mTLS pair"),
     };
@@ -331,7 +331,7 @@ fn test_fallback_client_config_half_mtls_pair_strict_fails_nonstrict_no_auth() {
         ..Default::default()
     };
     assert!(
-        fallback_client_config(&tls_permissive)
+        fallback_client_config(&tls_permissive, None)
             .expect("non-strict half pair degrades to no-auth") // allow-unwrap(test)
             .is_some()
     );
