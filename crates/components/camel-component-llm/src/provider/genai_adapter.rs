@@ -510,10 +510,10 @@ impl LlmProvider for GenaiProvider {
 
     fn supports_embed(&self) -> bool {
         #[cfg(any(feature = "generic-providers", feature = "all-providers"))]
-        if matches!(&self.config, GenaiConfig::Generic { .. }) {
-            return false;
-        }
-        true
+        let generic = matches!(&self.config, GenaiConfig::Generic { .. });
+        #[cfg(not(any(feature = "generic-providers", feature = "all-providers")))]
+        let generic = false;
+        !generic
     }
 
     fn chat_stream(&self, req: ChatRequest) -> BoxStream<'static, Result<ChatEvent, LlmError>> {
