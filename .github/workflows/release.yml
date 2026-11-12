@@ -100,7 +100,10 @@ jobs:
   publish:
     name: Publish crates to crates.io
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # A full 69-crate publish took 62 min on 0.66.0 (run 42498773963); a
+    # 30-min bound cancelled 0.67.0 at 51/69 crates (rc-mj3tl). Keep this
+    # at 2x the observed worst case.
+    timeout-minutes: 120
     needs: call-release-matrix
     # Prerelease smoke tags (v*-rc.*) exercise matrix/assets/docker but must
     # not publish crates; skip cleanly rather than fail.
