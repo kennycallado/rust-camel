@@ -10,7 +10,9 @@
 //! The `RouteDsl*` AST types are **not a stable SDK contract**. SDKs and external
 //! consumers should target [`CanonicalRouteSpec`] for forward compatibility.
 
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::path::PathBuf;
 
 use camel_api::{CamelError, CanonicalRouteSpec};
 use camel_core::route::RouteDefinition;
@@ -21,17 +23,34 @@ use crate::compile::{
 };
 use crate::input_format::{InputFormat, annotate_format};
 use crate::model::SecurityCompileContext;
-use crate::yaml::{RouteDslRoutes, route_dsl_to_declarative_route};
+use crate::yaml::{RouteDslRoutes, ScriptLoadContext, route_dsl_to_declarative_route};
 
 /// Parse a JSON string into declarative route models.
 pub fn parse_json_to_declarative(
     json: &str,
 ) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
-    annotate_format(InputFormat::Json, parse_json_to_declarative_inner(json))
+    annotate_format(
+        InputFormat::Json,
+        parse_json_to_declarative_inner(json, &ScriptLoadContext::new(None)),
+    )
+}
+
+/// Context-aware twin of [`parse_json_to_declarative`] for the template
+/// materializer: materialized route JSON lowers `source_file` against the
+/// TEMPLATE document's directory instead of CWD.
+pub(crate) fn parse_json_to_declarative_with_script_ctx(
+    json: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
+    annotate_format(
+        InputFormat::Json,
+        parse_json_to_declarative_inner(json, script_ctx),
+    )
 }
 
 fn parse_json_to_declarative_inner(
     json: &str,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
     let mut dsl: RouteDslRoutes = serde_json::from_str(json)
         .map_err(|e| CamelError::RouteError(format!("JSON parse error: {e}")))?;
@@ -46,17 +65,23 @@ fn parse_json_to_declarative_inner(
 
     dsl.routes
         .into_iter()
-        .map(route_dsl_to_declarative_route)
+        .map(|route| route_dsl_to_declarative_route(route, script_ctx))
         .collect()
 }
 
 /// Parse a JSON string into compiled [`RouteDefinition`]s.
 pub fn parse_json(json: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    annotate_format(InputFormat::Json, parse_json_inner(json))
+    annotate_format(
+        InputFormat::Json,
+        parse_json_inner(json, &ScriptLoadContext::new(None)),
+    )
 }
 
-fn parse_json_inner(json: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_json_to_declarative_inner(json)?
+fn parse_json_inner(
+    json: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_to_declarative_inner(json, script_ctx)?
         .into_iter()
         .map(compile_declarative_route)
         .collect()
@@ -69,18 +94,24 @@ pub fn parse_json_with_threshold(
 ) -> Result<Vec<RouteDefinition>, CamelError> {
     annotate_format(
         InputFormat::Json,
-        parse_json_with_threshold_inner(json, stream_cache_threshold),
+        parse_json_with_threshold_inner(
+            json,
+            stream_cache_threshold,
+            &ScriptLoadContext::new(None),
+        ),
     )
 }
 
 fn parse_json_with_threshold_inner(
     json: &str,
     stream_cache_threshold: usize,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_json_with_threshold_and_security_inner(
         json,
         stream_cache_threshold,
         SecurityCompileContext::default(),
+        script_ctx,
     )
 }
 
@@ -89,9 +120,32 @@ pub fn parse_json_with_threshold_and_security(
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_json_with_threshold_and_security_with_script_ctx(
+        json,
+        stream_cache_threshold,
+        security_ctx,
+        &ScriptLoadContext::new(None),
+    )
+}
+
+/// Context-aware twin of [`parse_json_with_threshold_and_security`] for
+/// discovery, which owns the [`ScriptLoadContext`] whose recorded scripts it
+/// folds into the document source hash. The public wrapper parses with CWD
+/// semantics.
+pub(crate) fn parse_json_with_threshold_and_security_with_script_ctx(
+    json: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
     annotate_format(
         InputFormat::Json,
-        parse_json_with_threshold_and_security_inner(json, stream_cache_threshold, security_ctx),
+        parse_json_with_threshold_and_security_inner(
+            json,
+            stream_cache_threshold,
+            security_ctx,
+            script_ctx,
+        ),
     )
 }
 
@@ -99,8 +153,9 @@ fn parse_json_with_threshold_and_security_inner(
     json: &str,
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_json_to_declarative_inner(json)?
+    parse_json_to_declarative_inner(json, script_ctx)?
         .into_iter()
         .map(|route| {
             compile_declarative_route_with_stream_cache_threshold(
@@ -114,11 +169,17 @@ fn parse_json_with_threshold_and_security_inner(
 
 /// Parse a JSON string into canonical route specs.
 pub fn parse_json_to_canonical(json: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
-    annotate_format(InputFormat::Json, parse_json_to_canonical_inner(json))
+    annotate_format(
+        InputFormat::Json,
+        parse_json_to_canonical_inner(json, &ScriptLoadContext::new(None)),
+    )
 }
 
-fn parse_json_to_canonical_inner(json: &str) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
-    let routes = parse_json_to_declarative_inner(json)?;
+fn parse_json_to_canonical_inner(
+    json: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<CanonicalRouteSpec>, CamelError> {
+    let routes = parse_json_to_declarative_inner(json, script_ctx)?;
     for route in &routes {
         if route.security_policy.is_some() {
             return Err(CamelError::RouteError(
@@ -137,15 +198,27 @@ use crate::util::read_route_file_capped;
 /// Load a JSON route definition from a file.
 ///
 /// Reads the file contents and parses them as JSON. No environment variable interpolation is performed.
+/// Script `source_file` references resolve against the file's directory.
 pub fn load_json_from_file(path: &Path) -> Result<Vec<RouteDefinition>, CamelError> {
     let content = read_route_file_capped(path)?;
-    let annotated = annotate_format(InputFormat::Json, parse_json_inner(&content));
-    annotated.map_err(|e| match e {
+    // Script `source_file` references resolve against the route file's
+    // directory (string-based parse entry points keep CWD semantics).
+    let script_ctx = ScriptLoadContext::new(path.parent().map(Path::to_path_buf));
+    let annotated = annotate_format(InputFormat::Json, parse_json_inner(&content, &script_ctx));
+    let routes = annotated.map_err(|e| match e {
         CamelError::RouteError(msg) => {
             CamelError::RouteError(format!("{msg} (in {})", path.display()))
         }
         other => other,
-    })
+    })?;
+    // File-backed loads have no discovery/reload pass to publish later, so
+    // their script dependencies are committed directly.
+    let script_paths: BTreeSet<PathBuf> = script_ctx.into_scripts().into_keys().collect();
+    let registry = crate::script_watch::ScriptWatchRegistry::global();
+    for route in &routes {
+        registry.register_direct(route.route_id(), script_paths.clone());
+    }
+    Ok(routes)
 }
 
 #[cfg(test)]

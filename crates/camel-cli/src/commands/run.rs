@@ -20,6 +20,9 @@
 
 #[cfg(feature = "wasm")]
 use camel_bean::BeanProcessor;
+use camel_core::reload_watcher::DevSourceKind;
+use camel_dsl::ScriptWatchRegistry;
+use std::collections::BTreeMap;
 #[cfg(feature = "wasm")]
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -546,6 +549,7 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
     // routes added by hot-reload mid-run keep the reload watcher's existing
     // error handling — a failed reload logs and leaves the RUNNING context
     // untouched. Only initial startup is fail-closed.
+    let mut deployed_route_ids: Vec<String> = Vec::with_capacity(defs.len());
     for def in defs {
         let id = def.route_id().to_string();
         if let Err(e) = ctx.add_route_definition(def).await {
@@ -555,6 +559,7 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                 format!("Failed to add route '{id}': {e}"),
             )));
         }
+        deployed_route_ids.push(id);
     }
 
     // 6. Start context
@@ -575,6 +580,12 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
     //     only; compiled artifacts disable it unconditionally).
     let watcher_shutdown = CancellationToken::new();
     if let Some(watch) = spec.watch {
+        // Startup script-dependency publication: the initial load above is
+        // fail-closed, so every script path staged by discovery belongs to a
+        // running route. Publish before the watcher derives its first target
+        // map; otherwise script edits never reload until a later pass.
+        publish_startup_script_sources(&deployed_route_ids);
+
         let ctrl = ctx.runtime_execution_handle();
         let watch_routes_override = watch.routes_override.clone();
         let watch_config_routes = watch.config_routes.clone();
@@ -594,6 +605,7 @@ pub(crate) async fn drive_lifecycle(spec: LifecycleSpec) -> Result<(), Lifecycle
                 let asset_parents: Vec<std::path::PathBuf> = dev_target_sources()
                     .into_iter()
                     .flat_map(|(_, sources)| sources)
+                    .map(|(source, _kind)| source)
                     .filter_map(|source| source.parent().map(std::path::Path::to_path_buf))
                     .collect();
                 tracing::debug!(
@@ -880,14 +892,54 @@ fn resolve_route_patterns_with(
     }
 }
 
-/// Snapshot of committed template reload targets as `(route_id, sources)`.
+/// Snapshot of committed dev targets as `(route_id, [(path, kind)])`.
 ///
 /// `camel run --watch` consults this on every reload pass to watch template
-/// and proto asset parents. It reads only the registry: route definitions are
-/// never parsed here, so a gRPC `protoFile=` reference creates no target and
-/// contributes no asset parent.
-fn dev_target_sources() -> Vec<(String, Vec<std::path::PathBuf>)> {
-    camel_component_api::template_reload::TemplateReloadRegistry::global().route_watch_sources()
+/// and proto asset parents plus resolved script sources. It reads only the
+/// registries: route definitions are never parsed here, so a gRPC
+/// `protoFile=` reference creates no target and contributes no asset parent.
+/// Template targets are tagged [`DevSourceKind::Template`]; script sources
+/// published by [`ScriptWatchRegistry`] are tagged [`DevSourceKind::Script`]
+/// and trigger a full reload pass instead of a per-route template dispatch.
+fn dev_target_sources() -> Vec<(String, Vec<(std::path::PathBuf, DevSourceKind)>)> {
+    let mut merged: BTreeMap<String, Vec<(std::path::PathBuf, DevSourceKind)>> = BTreeMap::new();
+    for (route_id, sources) in
+        camel_component_api::template_reload::TemplateReloadRegistry::global().route_watch_sources()
+    {
+        merged.entry(route_id).or_default().extend(
+            sources
+                .into_iter()
+                .map(|path| (path, DevSourceKind::Template)),
+        );
+    }
+    for (route_id, sources) in ScriptWatchRegistry::global().route_watch_sources() {
+        merged.entry(route_id).or_default().extend(
+            sources
+                .into_iter()
+                .map(|path| (path, DevSourceKind::Script)),
+        );
+    }
+    merged.into_iter().collect()
+}
+
+/// Production script publication hook.
+///
+/// The watcher invokes this once per non-aborted reload pass with the route
+/// ids it rebuilt and removed; the script watch registry promotes the
+/// rebuilt routes' staged dependencies and drops the removed ones.
+fn publish_script_sources(rebuilt: &[String], removed: &[String]) {
+    ScriptWatchRegistry::global().publish_commit(rebuilt, removed);
+}
+
+/// Publish the script dependencies of every route deployed at startup.
+///
+/// Startup route loading is fail-closed ([`drive_lifecycle`] returns before
+/// the watcher starts when any route fails to add), so every dependency
+/// staged by the initial discovery belongs to a running route and is promoted
+/// unconditionally. Without this the published set stays empty until a later
+/// pass and script edits never reload.
+fn publish_startup_script_sources(deployed_route_ids: &[String]) {
+    ScriptWatchRegistry::global().publish_commit(deployed_route_ids, &[]);
 }
 
 /// Production `--watch` entry, generic over the watch implementation so tests
@@ -920,7 +972,8 @@ where
         Vec<std::path::PathBuf>,
         camel_core::context::RuntimeExecutionHandle,
         WatchDiscoverFn,
-        fn() -> Vec<(String, Vec<std::path::PathBuf>)>,
+        fn() -> Vec<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>,
+        fn(&[String], &[String]),
         Option<CancellationToken>,
         std::time::Duration,
         std::time::Duration,
@@ -932,6 +985,7 @@ where
         controller,
         discover_fn,
         dev_target_sources,
+        publish_script_sources,
         shutdown,
         drain_timeout,
         debounce,

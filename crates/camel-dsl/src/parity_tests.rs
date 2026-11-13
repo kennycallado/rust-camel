@@ -24,6 +24,8 @@
 //!
 //! See: docs/superpowers/specs/2026-06-24-json-canonical-route-format.md §4 Slice B1.
 
+use std::path::Path;
+
 use crate::route_ast::{RouteDslRoutes, RouteDslStep};
 use camel_api::CanonicalRouteSpec;
 use camel_api::runtime::CanonicalStepSpec;
@@ -36,6 +38,39 @@ struct ParityCase {
     name: &'static str,
     yaml: &'static str,
     json: &'static str,
+    /// Files written into the case tempdir before parsing, as
+    /// `(relative path, contents)`. `{scripts_dir}` in `yaml`/`json` expands
+    /// to that tempdir's absolute path, so a route can reference a fixture
+    /// identically from both formats. Empty when the case has no file sources.
+    fixtures: &'static [(&'static str, &'static str)],
+}
+
+/// Placeholder in a case's `yaml`/`json` for the case tempdir's absolute path.
+const SCRIPTS_DIR_PLACEHOLDER: &str = "{scripts_dir}";
+
+/// Fixture body shared by the `source_file` cases — valid Rhai that mutates
+/// the script scope, so a fixture accidentally read at load time still parses.
+const SCRIPT_FIXTURE_RHAI: &str = "// parity fixture\nheaders[\"enriched\"] = \"yes\";";
+
+/// Materialize a case: write its fixtures into `dir`, then return the
+/// YAML/JSON documents with `{scripts_dir}` expanded to `dir`'s absolute path.
+fn materialize_case(case: &ParityCase, dir: &Path) -> (String, String) {
+    for (name, contents) in case.fixtures {
+        let path = dir.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|e| panic!("fixture directory for {} failed: {}", case.name, e));
+        }
+        std::fs::write(&path, contents)
+            .unwrap_or_else(|e| panic!("fixture {} for {} failed: {}", name, case.name, e));
+    }
+    // Forward slashes keep the absolute path valid as a JSON string and as a
+    // YAML scalar on every platform.
+    let dir = dir.display().to_string().replace('\\', "/");
+    (
+        case.yaml.replace(SCRIPTS_DIR_PLACEHOLDER, &dir),
+        case.json.replace(SCRIPTS_DIR_PLACEHOLDER, &dir),
+    )
 }
 
 /// Exhaustive match over `RouteDslStep` with no wildcard arm.
@@ -120,6 +155,7 @@ routes:
       - to: direct:end
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"to":"direct:end"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "SetHeader",
@@ -133,6 +169,7 @@ routes:
           value: "abc-123"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"set_header":{"key":"X-Trace-Id","value":"abc-123"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "SetProperty",
@@ -146,6 +183,7 @@ routes:
           value: "my-value"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"set_property":{"name":"myProp","value":"my-value"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "SetBody",
@@ -157,6 +195,7 @@ routes:
       - set_body: "hello"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"set_body":"hello"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Bean",
@@ -170,6 +209,7 @@ routes:
           method: process
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"bean":{"name":"myBean","method":"process"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Log",
@@ -181,6 +221,7 @@ routes:
       - log: "Processing exchange"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"log":"Processing exchange"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Stop",
@@ -192,6 +233,7 @@ routes:
       - stop: true
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"stop":true}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "ConvertBodyTo",
@@ -203,6 +245,7 @@ routes:
       - convert_body_to: json
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"convert_body_to":"json"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Delay",
@@ -214,6 +257,7 @@ routes:
       - delay: 500
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"delay":500}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "StreamCache",
@@ -225,6 +269,7 @@ routes:
       - stream_cache: true
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"stream_cache":true}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Filter",
@@ -239,6 +284,7 @@ routes:
             - to: direct:yes
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"filter":{"simple":"${body} == 'yes'","steps":[{"to":"direct:yes"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Choice",
@@ -256,6 +302,7 @@ routes:
             - to: direct:no
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"choice":{"when":[{"simple":"${body} == 'yes'","steps":[{"to":"direct:yes"}]}],"otherwise":[{"to":"direct:no"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "DynamicRouter",
@@ -268,6 +315,7 @@ routes:
           simple: "${body}"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"dynamic_router":{"simple":"${body}"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Validate",
@@ -279,6 +327,7 @@ routes:
       - validate: "schemas/order.xsd"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"validate":"schemas/order.xsd"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Transform",
@@ -290,6 +339,7 @@ routes:
       - transform: "hello"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"transform":"hello"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Script",
@@ -303,6 +353,7 @@ routes:
           source: "body = \"ok\";"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"script":{"language":"rhai","source":"body = \"ok\";"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Multicast",
@@ -316,6 +367,7 @@ routes:
             - to: direct:end
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"multicast":{"steps":[{"to":"direct:end"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "WireTap",
@@ -327,6 +379,7 @@ routes:
       - wire_tap: direct:end
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"wire_tap":"direct:end"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "LoadBalance",
@@ -340,6 +393,7 @@ routes:
             - to: direct:end
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"load_balance":{"steps":[{"to":"direct:end"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "RoutingSlip",
@@ -352,6 +406,7 @@ routes:
           simple: "${body}"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"routing_slip":{"simple":"${body}"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "RecipientList",
@@ -364,6 +419,7 @@ routes:
           simple: "${body}"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"recipient_list":{"simple":"${body}"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Split",
@@ -378,6 +434,7 @@ routes:
             - to: direct:end
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"split":{"expression":"body_lines","steps":[{"to":"direct:end"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Aggregate",
@@ -390,6 +447,7 @@ routes:
           header: MyCorrelationHeader
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"aggregate":{"header":"MyCorrelationHeader"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Marshal",
@@ -401,6 +459,7 @@ routes:
       - marshal: json
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"marshal":"json"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Unmarshal",
@@ -412,6 +471,7 @@ routes:
       - unmarshal: json
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"unmarshal":"json"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Function",
@@ -425,6 +485,7 @@ routes:
           source: my_func
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"function":{"runtime":"wasm","source":"my_func"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Enrich",
@@ -436,6 +497,7 @@ routes:
       - enrich: direct:enrichSource
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"enrich":"direct:enrichSource"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "PollEnrich",
@@ -447,6 +509,7 @@ routes:
       - poll_enrich: direct:pollEnrichSource
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"poll_enrich":"direct:pollEnrichSource"}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Throttle",
@@ -459,6 +522,7 @@ routes:
           max_requests: 5
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"throttle":{"max_requests":5}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Loop",
@@ -473,6 +537,7 @@ routes:
             - to: direct:body
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"loop":{"count":3,"steps":[{"to":"direct:body"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "DoTry",
@@ -490,6 +555,7 @@ routes:
                 - to: direct:handle
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"do_try":{"steps":[{"to":"direct:risky"}],"catch":[{"exception":["MyError"],"steps":[{"to":"direct:handle"}]}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Sampling",
@@ -501,6 +567,7 @@ routes:
       - sampling: 5
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"sampling":5}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Sort",
@@ -514,6 +581,7 @@ routes:
           reverse: true
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"sort":{"expression":"${body.field}","reverse":true}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "ClaimCheck",
@@ -528,6 +596,7 @@ routes:
           key: "${header.claimKey}"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"claim_check":{"repository":"memory","operation":"set","key":"${header.claimKey}"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Resequence",
@@ -544,6 +613,7 @@ routes:
               size: 100
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"resequence":{"batch":{"correlation":"${header.region}","sort":"${header.sequence}","completion":{"size":100}}}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "ResequenceStream",
@@ -562,6 +632,7 @@ routes:
             dedup: false
 "#,
             json: r#"{"routes":[{"id":"r2","from":"direct:start","steps":[{"resequence":{"stream":{"sequence":"${header.seqNum}","capacity":1000,"gap_timeout":5000,"on_gap":"emit_partial","on_capacity_exceeded":"log_and_drop","dedup":false}}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "ScatterGather",
@@ -578,6 +649,7 @@ routes:
           aggregation: collect_all
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"scatter_gather":{"endpoints":["direct:a","direct:b","direct:c"],"aggregation":"collect_all"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "Cache",
@@ -592,6 +664,7 @@ routes:
             - log: "miss"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache":{"key":"${header.k}","on_miss":[{"log":"miss"}]}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "CacheInvalidate",
@@ -604,6 +677,7 @@ routes:
           key: "${header.k}"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_invalidate":{"key":"${header.k}"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "CachePeekStale",
@@ -616,6 +690,7 @@ routes:
           key: "${header.k}"
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_peek_stale":{"key":"${header.k}"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "CacheClear",
@@ -628,6 +703,7 @@ routes:
           repository: memory
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_clear":{"repository":"memory"}}]}]}"#,
+            fixtures: &[],
         },
         ParityCase {
             name: "CacheStats",
@@ -639,6 +715,41 @@ routes:
       - cache_stats: {}
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"cache_stats":{}}]}]}"#,
+            fixtures: &[],
+        },
+        // Script `source_file` with the language inferred from the fixture's
+        // extension: the absolute path is identical in both formats.
+        ParityCase {
+            name: "ScriptSourceFile",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - script:
+          source_file: "{scripts_dir}/enrich.rhai"
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"script":{"source_file":"{scripts_dir}/enrich.rhai"}}]}]}"#,
+            fixtures: &[("enrich.rhai", SCRIPT_FIXTURE_RHAI)],
+        },
+        // Predicate `source_file` with an explicit `language`: covers the
+        // filter path, which resolves script sources through the same
+        // value-source struct as `script:` steps.
+        ParityCase {
+            name: "ScriptSourceFileFilter",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - filter:
+          source_file: "{scripts_dir}/allow.rhai"
+          language: rhai
+          steps:
+            - to: direct:yes
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"filter":{"source_file":"{scripts_dir}/allow.rhai","language":"rhai","steps":[{"to":"direct:yes"}]}}]}]}"#,
+            fixtures: &[("allow.rhai", SCRIPT_FIXTURE_RHAI)],
         },
     ]
 }
@@ -646,9 +757,11 @@ routes:
 #[test]
 fn test_yaml_json_parity_all_variants() {
     for case in parity_cases() {
-        let yaml_ast: RouteDslRoutes = serde_yml::from_str(case.yaml)
+        let dir = tempfile::tempdir().unwrap();
+        let (yaml, json) = materialize_case(&case, dir.path());
+        let yaml_ast: RouteDslRoutes = serde_yml::from_str(&yaml)
             .unwrap_or_else(|e| panic!("YAML deserialize failed for {}: {}", case.name, e));
-        let json_ast: RouteDslRoutes = serde_json::from_str(case.json)
+        let json_ast: RouteDslRoutes = serde_json::from_str(&json)
             .unwrap_or_else(|e| panic!("JSON deserialize failed for {}: {}", case.name, e));
 
         // Flatten to Vec<&RouteDslStep> to avoid the Debug-derive cascade
@@ -678,6 +791,61 @@ fn test_yaml_json_parity_all_variants() {
     }
     // Touch the helper so it's not dead-code eliminated.
     let _ = _assert_all_variants_covered;
+}
+
+/// Focused check for the two `source_file` forms: both documents must
+/// materialize their fixture, expand `{scripts_dir}`, and deserialize to the
+/// same step list with the fixture path preserved in the AST.
+#[test]
+fn script_source_file_parity() {
+    for case_name in ["ScriptSourceFile", "ScriptSourceFileFilter"] {
+        let case = parity_cases()
+            .into_iter()
+            .find(|case| case.name == case_name)
+            .unwrap_or_else(|| panic!("parity matrix is missing case {case_name}"));
+        assert!(
+            !case.fixtures.is_empty(),
+            "case {case_name} must declare at least one script fixture"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let (yaml, json) = materialize_case(&case, dir.path());
+        for (file, _) in case.fixtures {
+            let path = dir.path().join(file);
+            assert!(
+                path.is_file(),
+                "case {case_name}: fixture {file} was not written"
+            );
+        }
+        for document in [&yaml, &json] {
+            assert!(
+                !document.contains(SCRIPTS_DIR_PLACEHOLDER),
+                "case {case_name}: {SCRIPTS_DIR_PLACEHOLDER} left unexpanded\n{document}"
+            );
+        }
+
+        let yaml_ast: RouteDslRoutes = serde_yml::from_str(&yaml)
+            .unwrap_or_else(|e| panic!("YAML deserialize failed for {case_name}: {e}"));
+        let json_ast: RouteDslRoutes = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("JSON deserialize failed for {case_name}: {e}"));
+        let yaml_debug = format!("{:#?}", yaml_ast.routes[0].steps);
+        let json_debug = format!("{:#?}", json_ast.routes[0].steps);
+        assert_eq!(
+            yaml_debug, json_debug,
+            "case {case_name}: YAML and JSON deserialize to different step lists"
+        );
+
+        let expected_path = dir
+            .path()
+            .join(case.fixtures[0].0)
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        assert!(
+            yaml_debug.contains(&expected_path),
+            "case {case_name}: parsed AST lost source_file path {expected_path}\n{yaml_debug}"
+        );
+    }
 }
 
 #[test]

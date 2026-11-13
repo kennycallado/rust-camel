@@ -531,8 +531,10 @@ pub struct LoopStep {
 pub enum LoopData {
     /// Shorthand: `loop: 3`
     Count(usize),
-    /// Full form with config block.
-    Full(LoopFullConfig),
+    /// Full form with config block. Boxed so the one-shot config block does
+    /// not bloat the enum beside the `Count` shorthand
+    /// (clippy::large_enum_variant); the AST is parse-time only.
+    Full(Box<LoopFullConfig>),
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -552,13 +554,17 @@ pub struct LoopFullConfig {
 
 /// Expression-only predicate for loop while condition.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LoopWhileExpr {
     #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -744,6 +750,10 @@ pub struct SetHeaderData {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -765,6 +775,10 @@ pub struct SetPropertyData {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -835,6 +849,10 @@ pub struct SetBodyConfig {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -885,6 +903,10 @@ pub struct LogMessageExpr {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -910,13 +932,17 @@ pub struct FilterStep {
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PredicateBlock {
     #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -1063,6 +1089,10 @@ pub struct SplitExpressionConfig {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default)]
     pub simple: Option<String>,
     #[serde(default)]
@@ -1531,12 +1561,21 @@ pub struct EnrichConfig {
     pub parameters: BTreeMap<String, String>,
 }
 
+/// `script:` step payload. Exactly one source form: `language`+`source`, or
+/// `source_file` (with optional `language`) which resolves to inline source
+/// at load time.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ScriptData {
-    pub language: String,
-    pub source: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
@@ -2075,8 +2114,8 @@ routes:
         let parsed: RouteDslRoutes = serde_yml::from_str(yaml).unwrap();
         match &parsed.routes[0].steps[0] {
             RouteDslStep::Script(s) => {
-                assert_eq!(s.script.language, "rhai");
-                assert_eq!(s.script.source, "1 + 1");
+                assert_eq!(s.script.language.as_deref(), Some("rhai"));
+                assert_eq!(s.script.source.as_deref(), Some("1 + 1"));
             }
             _ => panic!("expected script"),
         }
@@ -2696,6 +2735,10 @@ pub struct DynamicRouterData {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default = "default_uri_delimiter")]
     pub uri_delimiter: String,
     #[serde(default = "default_cache_size")]
@@ -2737,6 +2780,10 @@ pub struct RoutingSlipData {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default = "default_uri_delimiter")]
     pub uri_delimiter: String,
     #[serde(default = "default_cache_size")]
@@ -2764,6 +2811,10 @@ pub struct RecipientListData {
     pub language: Option<String>,
     #[serde(default)]
     pub source: Option<String>,
+    /// Path to a script file, resolved relative to the route file and read at
+    /// load time; the extension picks the language unless `language` is set.
+    #[serde(default)]
+    pub source_file: Option<String>,
     #[serde(default = "default_uri_delimiter")]
     pub delimiter: String,
     #[serde(default)]

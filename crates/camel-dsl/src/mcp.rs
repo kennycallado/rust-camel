@@ -1322,6 +1322,7 @@ mcp:
                     value: Some(serde_json::json!("mcp")),
                     language: None,
                     source: None,
+                    source_file: None,
                     simple: None,
                     rhai: None,
                     jsonpath: None,

@@ -53,6 +53,7 @@ pub mod reserved_suffix;
 pub mod route_controller;
 pub mod routing_slip;
 pub mod runtime;
+mod script_source;
 pub mod security_policy;
 pub mod span_kind;
 pub mod splitter;
@@ -150,6 +151,7 @@ pub use runtime::{
     RuntimeCommandResult, RuntimeEvent, RuntimeHandle, RuntimeQuery, RuntimeQueryBus,
     RuntimeQueryResult, canonical_contract_rejection_reason, canonical_contract_supports_step,
 };
+pub use script_source::{infer_script_language, read_script_source};
 pub use security_policy::{
     AccessMode, AudienceBinding, AuthContext, AuthPrincipal, AuthorizationDecision,
     PRINCIPAL_AUDIENCE_KEY, PRINCIPAL_CLAIMS_KEY, PRINCIPAL_ISSUER_KEY, PRINCIPAL_KEY,

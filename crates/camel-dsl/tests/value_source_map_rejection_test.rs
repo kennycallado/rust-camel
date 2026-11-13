@@ -14,7 +14,8 @@ use camel_dsl::{
 };
 use serde_json::json;
 
-const ALTERNATIVES: &str = "`value`, `language`+`source`, `simple`, `rhai`, `jsonpath`, `xpath`";
+const ALTERNATIVES: &str =
+    "`value`, `language`+`source`, `source_file`, `simple`, `rhai`, `jsonpath`, `xpath`";
 
 fn yaml_doc(steps: &str) -> String {
     format!("routes:\n  - id: \"r\"\n    from: \"direct:start\"\n    steps:\n{steps}")

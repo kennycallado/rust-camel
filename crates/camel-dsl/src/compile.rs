@@ -7378,6 +7378,7 @@ rest:
     #[test]
     fn cache_step_compiles_route_to_declarative() {
         use crate::route_ast::{CacheBody, CacheConfig, CacheStep as RouteCacheStep};
+        use crate::yaml::ScriptLoadContext;
         use crate::yaml::route_step_to_declarative_step;
         use crate::yaml::{RouteDslStep, StopStep};
 
@@ -7392,7 +7393,8 @@ rest:
             }),
         });
 
-        let decl = route_step_to_declarative_step(route_step).unwrap();
+        let decl =
+            route_step_to_declarative_step(route_step, &ScriptLoadContext::new(None)).unwrap();
         match decl {
             DeclarativeStep::Cache(def) => {
                 assert_eq!(def.repository.as_deref(), Some("redis"));

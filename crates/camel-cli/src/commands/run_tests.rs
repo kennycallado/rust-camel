@@ -4,6 +4,15 @@
 use super::*;
 
 use camel_component_api::test_support::EnvGuard;
+use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
+
+/// Serializes tests that drive the process-global [`ScriptWatchRegistry`]
+/// staged set. A discovery pass clears that set unconditionally, so a
+/// discovery in one test landing between another test's discovery and its
+/// startup publication would silently drop the staged paths that publication
+/// is meant to promote — the security-gated shared-wiring boot below runs its
+/// own discovery in this same binary.
+static SCRIPT_REGISTRY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The run function must emit exactly one startup note about the CWD trust
 /// model (INFO: a trust-model disclosure, not a misconfiguration warning).
@@ -378,12 +387,22 @@ async fn boot_via_shared_wiring(
     ctx.register_component(mock.clone());
 
     let routes_yaml = project_dir.join("routes.yaml");
-    let defs = camel_dsl::discover_routes_with_threshold_and_security(
-        &[routes_yaml.display().to_string()],
-        config.stream_caching.threshold,
-        sec,
-    )
-    .expect("route discovery must succeed"); // allow-unwrap
+    let defs = {
+        // The discovery pass clears the process-global staged set, so it must
+        // not interleave with another test's discovery→publish window.
+        let _registry_guard = acquire_deadline(
+            &SCRIPT_REGISTRY_LOCK,
+            "SCRIPT_REGISTRY_LOCK (camel-cli shared wiring discovery)",
+            TEST_LOCK_DEADLINE,
+        )
+        .await;
+        camel_dsl::discover_routes_with_threshold_and_security(
+            &[routes_yaml.display().to_string()],
+            config.stream_caching.threshold,
+            sec,
+        )
+        .expect("route discovery must succeed") // allow-unwrap
+    };
 
     camel_bundles::security_boot::install_sql_startup_checks(&mut ctx, &defs);
 
@@ -669,9 +688,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use camel_component_api::template_reload::TemplateReloadRegistry;
 use camel_component_api::template_reload::TemplateReloadStaged;
 use camel_component_api::template_reload::TemplateReloadTarget;
+use camel_core::reload_watcher::DevSourceKind;
 
-/// Route-id → watch-source snapshot produced by the dev-source provider.
-type DevSources = Vec<(String, Vec<std::path::PathBuf>)>;
+/// Route-id → kind-tagged watch-source snapshot produced by the dev-source
+/// provider.
+type DevSources = Vec<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>;
 
 /// Staged marker for the fake dev target (coerces to `Box<dyn Any>`).
 struct FakeDevStaged;
@@ -753,7 +774,7 @@ async fn run_watch_passes_dev_provider() {
     let sink = std::sync::Arc::clone(&captured);
 
     watch_reload_with_dev_sources(
-        |_watch_dirs, _controller, _discover, provider, _shutdown, _drain, _debounce| {
+        |_watch_dirs, _controller, _discover, provider, _publish, _shutdown, _drain, _debounce| {
             let sink = std::sync::Arc::clone(&sink);
             async move {
                 *sink.lock().expect("capture lock") = Some(provider());
@@ -783,9 +804,18 @@ async fn run_watch_passes_dev_provider() {
         .iter()
         .find(|(id, _)| id == route)
         .expect("registered fake target must appear in the provider snapshot"); // allow-unwrap
+    let provided_paths: Vec<std::path::PathBuf> =
+        entry.1.iter().map(|(path, _kind)| path.clone()).collect();
     assert_eq!(
-        entry.1, sources,
+        provided_paths, sources,
         "production watch entry must pass through the target's watch sources"
+    );
+    assert!(
+        entry
+            .1
+            .iter()
+            .all(|(_, kind)| *kind == DevSourceKind::Template),
+        "template reload targets must be tagged as template sources"
     );
 
     drop(guard);
@@ -819,13 +849,13 @@ async fn dev_provider_ignores_route_definitions() {
         .build()
         .await
         .expect("test context must build"); // allow-unwrap
-    type Captured = (Vec<String>, Vec<(String, Vec<std::path::PathBuf>)>);
+    type Captured = (Vec<String>, DevSources);
     let captured: std::sync::Arc<std::sync::Mutex<Option<Captured>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let sink = std::sync::Arc::clone(&captured);
 
     watch_reload_with_dev_sources(
-        |_watch_dirs, _controller, discover, provider, _shutdown, _drain, _debounce| {
+        |_watch_dirs, _controller, discover, provider, _publish, _shutdown, _drain, _debounce| {
             let sink = std::sync::Arc::clone(&sink);
             async move {
                 let defs = discover()?;
@@ -867,8 +897,10 @@ async fn dev_provider_ignores_route_definitions() {
         .iter()
         .find(|(id, _)| id == route)
         .expect("registered fake target must appear in the provider snapshot"); // allow-unwrap
+    let provided_paths: Vec<std::path::PathBuf> =
+        entry.1.iter().map(|(path, _kind)| path.clone()).collect();
     assert_eq!(
-        entry.1, sources,
+        provided_paths, sources,
         "provider must track exactly the fake target's sources"
     );
     let proto = std::path::PathBuf::from("protos/helloworld.proto");
@@ -876,9 +908,60 @@ async fn dev_provider_ignores_route_definitions() {
         provided
             .iter()
             .flat_map(|(_, target_sources)| target_sources)
-            .all(|source| source != &proto),
+            .all(|(source, _kind)| source != &proto),
         "gRPC protoFile references must never be parsed into watch sources"
     );
 
     drop(guard);
+}
+
+/// Startup publication promotes the script dependencies staged by the initial
+/// discovery, so the watcher's very first target map already contains the
+/// resolved script path. Without it, script edits never reload until some
+/// later route-file change triggers a pass.
+#[tokio::test]
+async fn startup_publish_seeds_watch_sources() {
+    let route = "cli-startup-publish-script-seeded";
+    let project = tempfile::tempdir().expect("project tempdir"); // allow-unwrap
+    let routes_dir = project.path().join("routes");
+    let scripts_dir = project.path().join("scripts");
+    std::fs::create_dir_all(&routes_dir).expect("create routes dir"); // allow-unwrap
+    std::fs::create_dir_all(&scripts_dir).expect("create scripts dir"); // allow-unwrap
+    let script = scripts_dir.join("enrich.rhai");
+    std::fs::write(&script, "headers[\"enriched\"] = \"yes\";").expect("write script"); // allow-unwrap
+    std::fs::write(
+        routes_dir.join("doc.yaml"),
+        format!(
+            "routes:\n  - id: {route}\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"../scripts/enrich.rhai\"\n"
+        ),
+    )
+    .expect("write route document"); // allow-unwrap
+
+    let pattern = format!("{}/routes/*.yaml", project.path().display());
+    // Discovery stages the route's script dependencies in the process-global
+    // registry and the startup publication below promotes them: hold one lock
+    // acquisition across both so no concurrent discovery pass (which clears
+    // the staged set) can land in between.
+    let _registry_guard = acquire_deadline(
+        &SCRIPT_REGISTRY_LOCK,
+        "SCRIPT_REGISTRY_LOCK (camel-cli startup publication)",
+        TEST_LOCK_DEADLINE,
+    )
+    .await;
+    let defs = camel_dsl::discover_routes(std::slice::from_ref(&pattern))
+        .expect("initial discovery must succeed"); // allow-unwrap
+    let ids: Vec<String> = defs.iter().map(|def| def.route_id().to_string()).collect();
+    assert_eq!(ids, vec![route.to_string()], "fixture declares one route");
+
+    publish_startup_script_sources(&ids);
+
+    let sources = ScriptWatchRegistry::global().route_watch_sources();
+    let published = sources
+        .get(route)
+        .expect("startup publication must publish the route's script dependency"); // allow-unwrap
+    let canonical = std::fs::canonicalize(&script).expect("canonicalize script"); // allow-unwrap
+    assert!(
+        published.contains(&canonical),
+        "startup publication must seed {canonical:?}, got {published:?}"
+    );
 }

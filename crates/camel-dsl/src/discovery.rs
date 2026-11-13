@@ -4,21 +4,23 @@ use camel_api::template::{RouteTemplateSpec, TemplateError, TemplatedRouteSpec};
 use camel_core::route::RouteDefinition;
 use glob::glob;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::embedded_store::{STORE_SCHEMA, StoreEntryKind, StoreError, VirtualDocumentStore};
 use crate::env_interpolation::{
     ProvenancePath, interpolate_env_with, interpolate_yaml_source_with_provenance,
 };
-use crate::json::parse_json_with_threshold_and_security;
+use crate::json::parse_json_with_threshold_and_security_with_script_ctx;
 use crate::model::SecurityCompileContext;
-use crate::template::materializer::materialize_and_compile;
+use crate::script_watch::ScriptWatchRegistry;
+use crate::template::materializer::materialize_and_compile_with_script_ctx;
 use crate::virtual_config::build_virtual_config;
-use crate::yaml::parse_yaml_with_threshold_and_security;
+use crate::yaml::parse_yaml_with_threshold_and_security_with_script_ctx;
 
 // Re-export of the ADR-0062 reserved-suffix predicates. The single
 // definition lives in `camel_api::reserved_suffix` (below the lint/runtime
@@ -230,7 +232,7 @@ fn file_extension(path: &Path) -> Option<String> {
 /// let routes = discover_routes(&["routes/*.yaml".to_string(), "routes/*.json".to_string()])?;
 /// ```
 pub fn discover_routes(patterns: &[String]) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, None, None, None)
+    discover_routes_inner(patterns, None, None, None, ScriptWatchRegistry::global())
 }
 
 /// Discovers routes with a custom stream-cache threshold.
@@ -241,7 +243,13 @@ pub fn discover_routes_with_threshold(
     patterns: &[String],
     stream_cache_threshold: usize,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
-    discover_routes_inner(patterns, Some(stream_cache_threshold), None, None)
+    discover_routes_inner(
+        patterns,
+        Some(stream_cache_threshold),
+        None,
+        None,
+        ScriptWatchRegistry::global(),
+    )
 }
 
 /// Discovers routes with a custom stream-cache threshold and security compile context.
@@ -260,6 +268,7 @@ pub fn discover_routes_with_threshold_and_security(
         Some(stream_cache_threshold),
         Some(security_ctx),
         None,
+        ScriptWatchRegistry::global(),
     )
 }
 
@@ -282,6 +291,7 @@ pub fn discover_routes_with_threshold_security_and_env(
         Some(stream_cache_threshold),
         Some(security_ctx),
         Some(env_lookup),
+        ScriptWatchRegistry::global(),
     )
 }
 
@@ -374,19 +384,32 @@ pub fn discover_embedded_text(
 
     let mut routes = Vec::new();
     let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
+    let mut template_origins: HashMap<String, PathBuf> = HashMap::new();
     let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
     parse_document_routes(
         text,
         &path_str,
         Some(ext.as_str()),
+        // `compiled://` documents: CWD semantics for `source_file`.
+        None,
         None,
         None,
         env_lookup,
         &mut routes,
         &mut templates,
+        &mut template_origins,
         &mut templated_specs,
+        ScriptWatchRegistry::global(),
     )?;
-    materialize_templated_routes(&mut routes, &templates, &templated_specs, None, None)?;
+    materialize_templated_routes(
+        &mut routes,
+        &templates,
+        &template_origins,
+        &templated_specs,
+        None,
+        None,
+        ScriptWatchRegistry::global(),
+    )?;
     Ok(routes)
 }
 
@@ -470,6 +493,7 @@ pub fn discover_virtual_store(
     // and materialize once at the end, exactly like the filesystem pass.
     let mut routes = Vec::new();
     let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
+    let mut template_origins: HashMap<String, PathBuf> = HashMap::new();
     let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
     for path in &store.index.source_plan.references {
         let entry = store
@@ -497,15 +521,27 @@ pub fn discover_virtual_store(
             text,
             &identity,
             Some(ext.as_str()),
+            // `compiled://` documents: CWD semantics for `source_file`.
+            None,
             None,
             None,
             env_lookup,
             &mut routes,
             &mut templates,
+            &mut template_origins,
             &mut templated_specs,
+            ScriptWatchRegistry::global(),
         )?;
     }
-    materialize_templated_routes(&mut routes, &templates, &templated_specs, None, None)?;
+    materialize_templated_routes(
+        &mut routes,
+        &templates,
+        &template_origins,
+        &templated_specs,
+        None,
+        None,
+        ScriptWatchRegistry::global(),
+    )?;
 
     Ok(VirtualStoreDiscovery { config, routes })
 }
@@ -559,9 +595,16 @@ fn discover_routes_inner(
     stream_cache_threshold: Option<usize>,
     security_ctx: Option<SecurityCompileContext>,
     env_lookup: Option<EnvLookup<'_>>,
+    registry: &ScriptWatchRegistry,
 ) -> Result<Vec<RouteDefinition>, DiscoveryError> {
+    // Staging for this discovery run starts empty; a failed pass leaves at
+    // most stale staged entries, which the next pass clears, and never
+    // touches the published watch set.
+    registry.begin_discovery_pass();
+
     let mut routes = Vec::new();
     let mut templates: HashMap<String, RouteTemplateSpec> = HashMap::new();
+    let mut template_origins: HashMap<String, PathBuf> = HashMap::new();
     // (path_str, templated_spec) — materialized after all files scanned
     let mut templated_specs: Vec<(String, TemplatedRouteSpec)> = Vec::new();
 
@@ -627,12 +670,15 @@ fn discover_routes_inner(
                 &raw_content,
                 &path_str,
                 ext.as_deref(),
+                path.parent(),
                 stream_cache_threshold,
                 security_ctx.as_ref(),
                 lookup,
                 &mut routes,
                 &mut templates,
+                &mut template_origins,
                 &mut templated_specs,
+                registry,
             )?;
         }
     }
@@ -640,16 +686,74 @@ fn discover_routes_inner(
     materialize_templated_routes(
         &mut routes,
         &templates,
+        &template_origins,
         &templated_specs,
         stream_cache_threshold,
         security_ctx.as_ref(),
+        registry,
     )?;
 
     Ok(routes)
 }
 
+/// Fold the raw document content and every referenced script's contents into
+/// the document source hash. Script contents hash in deterministic path
+/// order (`BTreeMap`), so the probe-then-retry double parse dedups to one
+/// entry per file and identical rewrites keep the hash stable.
+fn fold_source_hash(raw_content: &str, scripts: &BTreeMap<PathBuf, String>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    raw_content.hash(&mut hasher);
+    for contents in scripts.values() {
+        contents.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Fold resolved script contents into a materialized instance's source hash.
+///
+/// The instance hash from [`materialize_and_compile_with_script_ctx`] covers
+/// the template body, resolved params, and effective route id; the scripts a
+/// materialized route reads are a separate input, so a script-only edit must
+/// change the instance hash too. Contents hash in deterministic `BTreeMap`
+/// path order, exactly like [`fold_source_hash`].
+fn fold_instance_script_hash(instance_hash: u64, scripts: &BTreeMap<PathBuf, String>) -> u64 {
+    // Script-free templates keep the exact hash the materializer computed
+    // (hot-reload parity with `compute_instance_source_hash` callers).
+    if scripts.is_empty() {
+        return instance_hash;
+    }
+    let mut hasher = DefaultHasher::new();
+    instance_hash.hash(&mut hasher);
+    for contents in scripts.values() {
+        contents.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Attach one document's parse result to the accumulator.
+///
+/// Every route built from the document gets the document source hash (raw
+/// text plus every referenced script's contents) and is STAGED in the script
+/// watch registry under its route id with the document's resolved script
+/// paths. Staging is what a later committed rebuild promotes; it never
+/// touches the published watch set on its own.
+fn attach_document_routes(
+    file_routes: Vec<RouteDefinition>,
+    raw_content: &str,
+    scripts: BTreeMap<PathBuf, String>,
+    routes: &mut Vec<RouteDefinition>,
+    registry: &ScriptWatchRegistry,
+) {
+    let source_hash = fold_source_hash(raw_content, &scripts);
+    let script_paths: BTreeSet<PathBuf> = scripts.keys().cloned().collect();
+    for route in file_routes {
+        registry.stage(route.route_id(), script_paths.clone());
+        routes.push(route.with_source_hash(source_hash));
+    }
+}
+
 /// Shared per-document parse pass (filesystem discovery and the embedded
-/// text seam): hash the raw content, interpolate `${env:NAME}` through
+/// text seam): interpolate `${env:NAME}` through
 /// `lookup` (with YAML provenance for the typed probe), then parse routes,
 /// templates, and templated route specs into the caller's accumulators so
 /// both entry points keep identical discovery semantics.
@@ -658,17 +762,19 @@ fn parse_document_routes(
     raw_content: &str,
     path_str: &str,
     ext: Option<&str>,
+    base_dir: Option<&Path>,
     stream_cache_threshold: Option<usize>,
     security_ctx: Option<&SecurityCompileContext>,
     lookup: EnvLookup<'_>,
     routes: &mut Vec<RouteDefinition>,
     templates: &mut HashMap<String, RouteTemplateSpec>,
+    template_origins: &mut HashMap<String, PathBuf>,
     templated_specs: &mut Vec<(String, TemplatedRouteSpec)>,
+    registry: &ScriptWatchRegistry,
 ) -> Result<(), DiscoveryError> {
-    // Source hash is based on raw content before env interpolation
-    let mut hasher = DefaultHasher::new();
-    raw_content.hash(&mut hasher);
-    let source_hash = hasher.finish();
+    // Script `source_file` references resolve against the document's
+    // directory; the embedded seams pass `None` for CWD semantics.
+    let script_ctx = crate::yaml::ScriptLoadContext::new(base_dir.map(Path::to_path_buf));
 
     // Env interpolation happens before parsing for both YAML and JSON.
     let (content, provenance) =
@@ -696,6 +802,7 @@ fn parse_document_routes(
                     text,
                     threshold,
                     security_ctx.cloned().unwrap_or_default(),
+                    &script_ctx,
                 )
             };
             let file_routes = crate::env_int_probe::parse_with_probe(
@@ -704,19 +811,27 @@ fn parse_document_routes(
                 quiet_probe_parse,
             )
             .or_else(|_| {
-                parse_yaml_with_threshold_and_security(
+                parse_yaml_with_threshold_and_security_with_script_ctx(
                     &content,
                     threshold,
                     security_ctx.cloned().unwrap_or_default(),
+                    &script_ctx,
                 )
             })
             .map_err(|e| DiscoveryError::Yaml {
                 path: path_str.to_string(),
                 error: e.to_string(),
             })?;
-            for route in file_routes {
-                routes.push(route.with_source_hash(source_hash));
-            }
+            // Source hash finalization is post-parse: raw content plus every
+            // referenced script's contents (the sink dedups the probe-then-
+            // retry double parse; `BTreeMap` order keeps the fold stable).
+            attach_document_routes(
+                file_routes,
+                raw_content,
+                script_ctx.into_scripts(),
+                routes,
+                registry,
+            );
 
             // Parse templates
             let tpls = crate::template::yaml::parse_yaml_templates(&content).map_err(|e| {
@@ -726,13 +841,17 @@ fn parse_document_routes(
                 }
             })?;
             for tpl in tpls {
-                if templates.contains_key(&tpl.id) {
+                let template_id = tpl.id.clone();
+                if templates.contains_key(&template_id) {
                     return Err(DiscoveryError::TemplateSpec {
                         path: path_str.to_string(),
-                        error: format!("duplicate template id '{}'", tpl.id),
+                        error: format!("duplicate template id '{template_id}'"),
                     });
                 }
-                templates.insert(tpl.id.clone(), tpl);
+                if let Some(dir) = base_dir {
+                    template_origins.insert(template_id.clone(), dir.to_path_buf());
+                }
+                templates.insert(template_id, tpl);
             }
 
             // Parse templated route specs for later materialization
@@ -749,19 +868,26 @@ fn parse_document_routes(
         }
         Some("json") => {
             // Parse regular routes
-            let file_routes = parse_json_with_threshold_and_security(
+            let file_routes = parse_json_with_threshold_and_security_with_script_ctx(
                 &content,
                 stream_cache_threshold
                     .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
                 security_ctx.cloned().unwrap_or_default(),
+                &script_ctx,
             )
             .map_err(|e| DiscoveryError::Json {
                 path: path_str.to_string(),
                 error: e.to_string(),
             })?;
-            for route in file_routes {
-                routes.push(route.with_source_hash(source_hash));
-            }
+            // Source hash finalization is post-parse: raw content plus every
+            // referenced script's contents (deterministic `BTreeMap` order).
+            attach_document_routes(
+                file_routes,
+                raw_content,
+                script_ctx.into_scripts(),
+                routes,
+                registry,
+            );
 
             // Parse templates
             let tpls = crate::template::json::parse_json_templates(&content).map_err(|e| {
@@ -771,13 +897,17 @@ fn parse_document_routes(
                 }
             })?;
             for tpl in tpls {
-                if templates.contains_key(&tpl.id) {
+                let template_id = tpl.id.clone();
+                if templates.contains_key(&template_id) {
                     return Err(DiscoveryError::TemplateSpec {
                         path: path_str.to_string(),
-                        error: format!("duplicate template id '{}'", tpl.id),
+                        error: format!("duplicate template id '{template_id}'"),
                     });
                 }
-                templates.insert(tpl.id.clone(), tpl);
+                if let Some(dir) = base_dir {
+                    template_origins.insert(template_id.clone(), dir.to_path_buf());
+                }
+                templates.insert(template_id, tpl);
             }
 
             // Parse templated route specs for later materialization
@@ -808,12 +938,21 @@ fn parse_document_routes(
 /// templates, deduplicate route ids, and attach source hashes. Failures are
 /// aggregated — every spec is attempted so the caller sees the full set of
 /// broken templates, not just the first one.
+///
+/// Each template instantiates with a [`ScriptLoadContext`] anchored at the
+/// TEMPLATE document's directory (`template_origins`), so a materialized
+/// `source_file` — including a `{{param}}`-substituted path — resolves
+/// against the file that declared the template, not the instance document.
+/// The scripts read that way are staged as the instance's watch dependencies
+/// and folded into its source hash.
 fn materialize_templated_routes(
     routes: &mut Vec<RouteDefinition>,
     templates: &HashMap<String, RouteTemplateSpec>,
+    template_origins: &HashMap<String, PathBuf>,
     templated_specs: &[(String, TemplatedRouteSpec)],
     stream_cache_threshold: Option<usize>,
     security_ctx: Option<&SecurityCompileContext>,
+    registry: &ScriptWatchRegistry,
 ) -> Result<(), DiscoveryError> {
     let mut seen_route_ids: HashSet<String> =
         routes.iter().map(|r| r.route_id().to_string()).collect();
@@ -830,9 +969,16 @@ fn materialize_templated_routes(
             continue;
         };
 
-        let compiled = match materialize_and_compile(
+        // Template document origin: `None` keeps CWD semantics for embedded
+        // documents and string-based callers.
+        let script_ctx = crate::yaml::ScriptLoadContext::new(
+            template_origins.get(&spec.route_template_ref).cloned(),
+        );
+
+        let compiled = match materialize_and_compile_with_script_ctx(
             template,
             spec,
+            &script_ctx,
             stream_cache_threshold
                 .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
             security_ctx.cloned().unwrap_or_default(),
@@ -876,6 +1022,11 @@ fn materialize_templated_routes(
             }
         };
 
+        // Consume the context after a successful compile: the recorded
+        // scripts are this instance's dependencies and hash inputs.
+        let scripts = script_ctx.into_scripts();
+        let script_paths: BTreeSet<PathBuf> = scripts.keys().cloned().collect();
+
         for result in compiled {
             let rid = result.route_def.route_id().to_string();
             if !seen_route_ids.insert(rid.clone()) {
@@ -888,8 +1039,14 @@ fn materialize_templated_routes(
                     route_id: rid,
                 });
             }
+            // Stage unconditionally: an instance that dropped its scripts
+            // stages the empty set, which a committed rebuild promotes into
+            // an empty published entry (dropping the stale watch paths).
+            registry.stage(&rid, script_paths.clone());
             let route_def = match result.source_hash {
-                Some(h) => result.route_def.with_source_hash(h),
+                Some(h) => result
+                    .route_def
+                    .with_source_hash(fold_instance_script_hash(h, &scripts)),
                 None => result.route_def,
             };
             routes.push(route_def);
@@ -1788,13 +1945,25 @@ routes:
         let ctx = SecurityCompileContext::new(Some(auth), None);
 
         // (None-threshold, Some-ctx) — only reachable through the private fn.
-        let routes =
-            discover_routes_inner(std::slice::from_ref(&pattern), None, Some(ctx), None).unwrap();
+        let routes = discover_routes_inner(
+            std::slice::from_ref(&pattern),
+            None,
+            Some(ctx),
+            None,
+            ScriptWatchRegistry::global(),
+        )
+        .unwrap();
         assert_eq!(routes.len(), 1);
         assert!(routes[0].security_authenticator().is_some());
 
         // Fail-closed pin: public path (None ctx) must reject the secured route.
-        let err = match discover_routes_inner(&[pattern], None, None, None) {
+        let err = match discover_routes_inner(
+            &[pattern],
+            None,
+            None,
+            None,
+            ScriptWatchRegistry::global(),
+        ) {
             Ok(_) => panic!("expected error for secured route without authenticator"),
             Err(e) => e,
         };
@@ -1834,7 +2003,13 @@ templated_routes:
 
         // Fail-closed: default security ctx (no authenticator) must classify
         // the failure as SecurityRequired, not InvalidBody.
-        let err = match discover_routes_inner(&[pattern], None, None, None) {
+        let err = match discover_routes_inner(
+            &[pattern],
+            None,
+            None,
+            None,
+            ScriptWatchRegistry::global(),
+        ) {
             Ok(_) => panic!("expected secured templated route to fail closed"),
             Err(e) => e,
         };
@@ -2950,5 +3125,181 @@ timeout_ms = 1000
             "assembly must leave env placeholders raw"
         );
         lock_toml_golden("case_08.toml", &merged);
+    }
+
+    /// Route source hash folds referenced script contents: a script-only edit
+    /// changes the hash, an identical rewrite keeps it.
+    fn script_hash_fixture() -> (tempfile::TempDir, String, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("routes/scripts")).unwrap();
+        let script = dir.path().join("routes/scripts/x.rhai");
+        fs::write(&script, "1 + 1").unwrap();
+        let doc = dir.path().join("routes/doc.yaml");
+        fs::write(
+            &doc,
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"scripts/x.rhai\"\n",
+        )
+        .unwrap();
+        let pattern = doc.to_string_lossy().to_string();
+        (dir, pattern, script)
+    }
+
+    #[test]
+    fn route_source_hash_changes_on_script_only_edit() {
+        let (_dir, pattern, script) = script_hash_fixture();
+        let routes = discover_routes(std::slice::from_ref(&pattern)).unwrap();
+        let first = routes[0]
+            .source_hash()
+            .expect("route should have source_hash");
+
+        fs::write(&script, "2 + 2").unwrap();
+        let routes = discover_routes(std::slice::from_ref(&pattern)).unwrap();
+        let second = routes[0]
+            .source_hash()
+            .expect("route should have source_hash");
+
+        assert_ne!(first, second, "script-only edit must change source_hash");
+    }
+
+    #[test]
+    fn route_source_hash_stable_when_script_content_identical() {
+        let (_dir, pattern, script) = script_hash_fixture();
+        let routes = discover_routes(std::slice::from_ref(&pattern)).unwrap();
+        let first = routes[0]
+            .source_hash()
+            .expect("route should have source_hash");
+
+        fs::write(&script, "1 + 1").unwrap();
+        let routes = discover_routes(std::slice::from_ref(&pattern)).unwrap();
+        let second = routes[0]
+            .source_hash()
+            .expect("route should have source_hash");
+
+        assert_eq!(first, second, "identical script rewrite keeps source_hash");
+    }
+
+    /// Template materialization fixture: the template document lives in
+    /// `templates/`, instantiates `source_file` from a `{{param}}` placeholder,
+    /// and only the TEMPLATE directory holds the script. The instance document
+    /// lives in `routes/`, so resolving against the instance directory cannot
+    /// find the script.
+    fn template_script_fixture() -> (tempfile::TempDir, String, String, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let templates_dir = dir.path().join("templates");
+        let routes_dir = dir.path().join("routes");
+        fs::create_dir_all(&templates_dir).unwrap();
+        fs::create_dir_all(&routes_dir).unwrap();
+
+        let script = templates_dir.join("fraud-check.rhai");
+        fs::write(&script, "headers[\"fraud_checked\"] = \"yes\";").unwrap();
+
+        let template_doc = templates_dir.join("payment.yaml");
+        fs::write(
+            &template_doc,
+            r#"
+templates:
+  - id: payment-tpl
+    parameters:
+      - name: script_name
+    routes:
+      - id: payment-instance-t51
+        from: "direct:start"
+        steps:
+          - script:
+              source_file: "{{script_name}}"
+"#,
+        )
+        .unwrap();
+
+        let instance_doc = routes_dir.join("orders.yaml");
+        fs::write(
+            &instance_doc,
+            r#"
+templated_routes:
+  - route_template_ref: payment-tpl
+    parameters:
+      script_name: fraud-check.rhai
+"#,
+        )
+        .unwrap();
+
+        (
+            dir,
+            template_doc.to_string_lossy().to_string(),
+            instance_doc.to_string_lossy().to_string(),
+            script,
+        )
+    }
+
+    /// A fresh, leaked registry so watch assertions never race the global
+    /// singleton (a concurrent discovery pass clears the global staged set).
+    fn fresh_registry() -> &'static ScriptWatchRegistry {
+        Box::leak(Box::new(ScriptWatchRegistry::new()))
+    }
+
+    #[test]
+    fn template_source_file_resolves_against_template_dir_after_substitution() {
+        let (_dir, template_doc, instance_doc, script) = template_script_fixture();
+        let registry = fresh_registry();
+
+        let routes =
+            discover_routes_inner(&[template_doc, instance_doc], None, None, None, registry)
+                .unwrap();
+        let instance = routes
+            .iter()
+            .find(|route| route.route_id() == "payment-instance-t51")
+            .expect("materialized instance route");
+        match &instance.steps()[0] {
+            camel_core::route::BuilderStep::DeclarativeScript { expression } => {
+                assert_eq!(
+                    expression.language, "rhai",
+                    "language must be inferred from the .rhai extension"
+                );
+                assert_eq!(
+                    expression.source, "headers[\"fraud_checked\"] = \"yes\";",
+                    "script contents must come from the TEMPLATE directory after {{param}} substitution"
+                );
+            }
+            other => panic!("expected declarative script step, got: {other:?}"),
+        }
+
+        registry.publish_commit(&["payment-instance-t51".to_string()], &[]);
+        let published = registry.route_watch_sources();
+        let paths = published
+            .get("payment-instance-t51")
+            .expect("instance script dependency must be staged under the instance route id");
+        let canonical = std::fs::canonicalize(&script).expect("canonicalize script");
+        assert!(
+            paths.contains(&canonical),
+            "resolved script path {canonical:?} must be staged, got {paths:?}"
+        );
+    }
+
+    #[test]
+    fn instance_hash_changes_on_script_only_edit() {
+        let (_dir, template_doc, instance_doc, script) = template_script_fixture();
+        let patterns = [template_doc, instance_doc];
+        let registry = fresh_registry();
+
+        let first = discover_routes_inner(&patterns, None, None, None, registry)
+            .unwrap()
+            .into_iter()
+            .find(|route| route.route_id() == "payment-instance-t51")
+            .and_then(|route| route.source_hash())
+            .expect("instance route carries a source hash");
+
+        fs::write(&script, "headers[\"fraud_checked\"] = \"edited\";").unwrap();
+
+        let second = discover_routes_inner(&patterns, None, None, None, registry)
+            .unwrap()
+            .into_iter()
+            .find(|route| route.route_id() == "payment-instance-t51")
+            .and_then(|route| route.source_hash())
+            .expect("instance route carries a source hash");
+
+        assert_ne!(
+            first, second,
+            "a script-only edit must change the instance source hash"
+        );
     }
 }

@@ -26,8 +26,12 @@ use camel_component_container::{ContainerComponent, cleanup_tracked_containers};
 use camel_component_log::LogComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
+use camel_core::reload_watcher::DevSourceKind;
 use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
 use tokio_util::sync::CancellationToken;
+
+/// No-op script publication hook: these examples declare no script sources.
+fn ignore_script_publish(_rebuilt: &[String], _removed: &[String]) {}
 
 #[tokio::main]
 async fn main() -> Result<(), CamelError> {
@@ -95,8 +99,9 @@ async fn main() -> Result<(), CamelError> {
                 camel_dsl::discover_routes(&watch_patterns)
                     .map_err(|e| CamelError::RouteError(e.to_string()))
             },
-            // no template/proto reload targets in this example
-            Vec::<(String, Vec<std::path::PathBuf>)>::new,
+            // no template/proto/script reload targets in this example
+            Vec::<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>::new,
+            ignore_script_publish,
             Some(shutdown_watcher),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(300),

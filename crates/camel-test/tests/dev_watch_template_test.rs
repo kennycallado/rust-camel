@@ -21,6 +21,7 @@ use camel_builder::{RouteBuilder, StepAccumulator};
 use camel_component_api::template_reload::TemplateReloadRegistry;
 use camel_component_api::{NoOpComponentContext, RuntimeObservability};
 use camel_component_direct::DirectComponent;
+use camel_core::reload_watcher::DevSourceKind;
 use camel_core::reload_watcher::watch_and_reload_with_barriers;
 use camel_core::{CamelContext, InMemoryRuntimeStore, RuntimeEvent};
 use camel_template::{AutoescapeMode, TemplateComponent};
@@ -28,6 +29,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
+
+/// No-op script publication hook: this scenario watches template assets only.
+fn ignore_script_publish(_rebuilt: &[String], _removed: &[String]) {}
 
 /// Upper bound for a single condition wait. Real notify delivery plus the
 /// debounce window fits comfortably; a miss is a failed reload.
@@ -159,7 +163,16 @@ async fn start_harness(route_id: &str, page: &str, head: &str) -> Harness {
             .route_watch_sources()
             .into_iter()
             .filter(|(id, _)| id == &provider_route)
-            .collect::<Vec<(String, Vec<PathBuf>)>>()
+            .map(|(id, paths)| {
+                (
+                    id,
+                    paths
+                        .into_iter()
+                        .map(|path| (path, DevSourceKind::Template))
+                        .collect::<Vec<(PathBuf, DevSourceKind)>>(),
+                )
+            })
+            .collect::<Vec<(String, Vec<(PathBuf, DevSourceKind)>)>>()
     };
     let watch_dirs = vec![routes_dir.path().to_path_buf()];
     let watcher = tokio::spawn(watch_and_reload_with_barriers(
@@ -167,6 +180,7 @@ async fn start_harness(route_id: &str, page: &str, head: &str) -> Harness {
         ctx.runtime_execution_handle(),
         || Ok(Vec::new()),
         provider,
+        ignore_script_publish,
         Some(shutdown.clone()),
         Duration::from_secs(5),
         DEBOUNCE,

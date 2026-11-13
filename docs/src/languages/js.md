@@ -29,6 +29,17 @@ The route above uses a `.script("js", ...)` step, which runs as a `MutatingExpre
 
 Evaluations reuse one persistent worker Boa `Context`. Each evaluation reinstalls and verifies the `camel` and `console` bindings. On integrity drift the worker recycles the realm. There is no realm isolation. Global properties and intrinsic state may survive across exchanges and routes until realm recycling. Boa receives no filesystem, network, environment, stdio, or WASI capability. The only host bindings are the exchange snapshot under `camel` and a tracing-backed `console`. Script source is trusted operator configuration. Exchange data is untrusted under ADR-0032. The implementation converts exchange data to JavaScript values. It never concatenates exchange data into script source or evaluates it as code. Untrusted JavaScript must run out-of-process through the `function:` path from ADR-0005.
 
+## Scripts from files
+
+A `source_file` field loads the JavaScript source from a file. A `.js` extension infers the language, so `language:` is optional:
+
+```yaml
+- script:
+    source_file: scripts/enrich.js
+```
+
+The path resolves against the directory of the route file. The loader reads the contents verbatim, with no interpolation or templating. A real extension gives the editor highlighting, lint, format, and go-to-definition. See [Scripts from files](../eip/script.md) for the inference table and the error cases.
+
 ## Body values
 
 `camel.body` exposes the native body value:

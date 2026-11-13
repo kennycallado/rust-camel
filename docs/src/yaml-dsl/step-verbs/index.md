@@ -5,8 +5,8 @@ Every YAML step verb and field, derived from the authoritative source
 [Route structure](../route-structure.md).
 
 Where a verb takes a predicate or value expression, the standard language fields
-apply: `simple`, `rhai`, `jsonpath`, `xpath`, or `language` paired with
-`source`. Each family page lists the fields of every verb in full.
+apply: `simple`, `rhai`, `jsonpath`, `xpath`, `source_file`, or `language`
+paired with `source`. Each family page lists the fields of every verb in full.
 
 ## Families
 

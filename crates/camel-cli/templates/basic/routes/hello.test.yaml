@@ -15,3 +15,4 @@ expects:
     bodies: ["hello"]
     headers:
       source: "hello"
+      greeting: "hello from rhai"

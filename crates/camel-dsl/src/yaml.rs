@@ -4,8 +4,11 @@
 // Module alias preserves call-site paths byte-for-byte.
 use noyalib::compat::serde_yaml as serde_yml;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
+use std::path::PathBuf;
 
 use tracing::{debug, error, info};
 
@@ -105,7 +108,10 @@ const YAML_IMPLEMENTED_MANDATORY_STEPS: [DeclarativeStepKind; 42] = [
 const _: () = assert_contract_coverage(&YAML_IMPLEMENTED_MANDATORY_STEPS);
 
 pub fn parse_yaml_to_declarative(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    annotate_format(InputFormat::Yaml, parse_yaml_to_declarative_inner(yaml))
+    annotate_format(
+        InputFormat::Yaml,
+        parse_yaml_to_declarative_inner(yaml, &ScriptLoadContext::new(None)),
+    )
 }
 
 /// Staged error for the route-document parse chain: the `serde_yml::from_str`
@@ -140,6 +146,7 @@ fn stage_error_to_camel_error(e: DeserializeStageError) -> CamelError {
 /// stage via [`DeserializeStageError`].
 pub(crate) fn deserialize_route_doc(
     yaml: &str,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<DeclarativeRoute>, DeserializeStageError> {
     let mut dsl: RouteDslRoutes =
         serde_yml::from_str(yaml).map_err(DeserializeStageError::FromStr)?;
@@ -166,13 +173,16 @@ pub(crate) fn deserialize_route_doc(
 
     dsl.routes
         .into_iter()
-        .map(route_dsl_to_declarative_route)
+        .map(|route| route_dsl_to_declarative_route(route, script_ctx))
         .collect::<Result<Vec<_>, _>>()
         .map_err(DeserializeStageError::Shape)
 }
 
-fn parse_yaml_to_declarative_inner(yaml: &str) -> Result<Vec<DeclarativeRoute>, CamelError> {
-    match deserialize_route_doc(yaml) {
+fn parse_yaml_to_declarative_inner(
+    yaml: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<DeclarativeRoute>, CamelError> {
+    match deserialize_route_doc(yaml, script_ctx) {
         Ok(routes) => Ok(routes),
         Err(DeserializeStageError::FromStr(e)) => {
             // log-policy: system-broken
@@ -201,11 +211,17 @@ pub fn extract_rest_blocks(yaml: &str) -> Result<Vec<RouteDslRest>, CamelError> 
 }
 
 pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    annotate_format(InputFormat::Yaml, parse_yaml_inner(yaml))
+    annotate_format(
+        InputFormat::Yaml,
+        parse_yaml_inner(yaml, &ScriptLoadContext::new(None)),
+    )
 }
 
-fn parse_yaml_inner(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_yaml_to_declarative_inner(yaml)?
+fn parse_yaml_inner(
+    yaml: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_to_declarative_inner(yaml, script_ctx)?
         .into_iter()
         .map(compile_declarative_route)
         .collect()
@@ -225,8 +241,11 @@ pub(crate) fn lower_declarative_to_routes(
 /// with ZERO failure-path logging: speculative probe attempts are expected
 /// failures and must not emit `error!`/`warn!`. The CALLER replays the final
 /// failure through the logging parser exactly once.
-pub(crate) fn parse_yaml_for_probe(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
-    let result = deserialize_route_doc(yaml)
+pub(crate) fn parse_yaml_for_probe(
+    yaml: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
+    let result = deserialize_route_doc(yaml, script_ctx)
         .map_err(stage_error_to_camel_error)
         .and_then(lower_declarative_to_routes);
     annotate_format(InputFormat::Yaml, result)
@@ -238,18 +257,24 @@ pub fn parse_yaml_with_threshold(
 ) -> Result<Vec<RouteDefinition>, CamelError> {
     annotate_format(
         InputFormat::Yaml,
-        parse_yaml_with_threshold_inner(yaml, stream_cache_threshold),
+        parse_yaml_with_threshold_inner(
+            yaml,
+            stream_cache_threshold,
+            &ScriptLoadContext::new(None),
+        ),
     )
 }
 
 fn parse_yaml_with_threshold_inner(
     yaml: &str,
     stream_cache_threshold: usize,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
     parse_yaml_with_threshold_and_security_inner(
         yaml,
         stream_cache_threshold,
         SecurityCompileContext::default(),
+        script_ctx,
     )
 }
 
@@ -258,9 +283,32 @@ pub fn parse_yaml_with_threshold_and_security(
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
+    parse_yaml_with_threshold_and_security_with_script_ctx(
+        yaml,
+        stream_cache_threshold,
+        security_ctx,
+        &ScriptLoadContext::new(None),
+    )
+}
+
+/// Context-aware twin of [`parse_yaml_with_threshold_and_security`] for
+/// discovery, which owns the [`ScriptLoadContext`] whose recorded scripts it
+/// folds into the document source hash. The public wrapper parses with CWD
+/// semantics.
+pub(crate) fn parse_yaml_with_threshold_and_security_with_script_ctx(
+    yaml: &str,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<RouteDefinition>, CamelError> {
     annotate_format(
         InputFormat::Yaml,
-        parse_yaml_with_threshold_and_security_inner(yaml, stream_cache_threshold, security_ctx),
+        parse_yaml_with_threshold_and_security_inner(
+            yaml,
+            stream_cache_threshold,
+            security_ctx,
+            script_ctx,
+        ),
     )
 }
 
@@ -268,8 +316,9 @@ fn parse_yaml_with_threshold_and_security_inner(
     yaml: &str,
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    parse_yaml_to_declarative_inner(yaml)?
+    parse_yaml_to_declarative_inner(yaml, script_ctx)?
         .into_iter()
         .map(|route| {
             compile_declarative_route_with_stream_cache_threshold(
@@ -292,8 +341,9 @@ pub(crate) fn parse_yaml_with_threshold_and_security_quiet(
     yaml: &str,
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<RouteDefinition>, CamelError> {
-    let routes = deserialize_route_doc(yaml).map_err(stage_error_to_camel_error)?;
+    let routes = deserialize_route_doc(yaml, script_ctx).map_err(stage_error_to_camel_error)?;
     routes
         .into_iter()
         .map(|route| {
@@ -312,15 +362,16 @@ pub fn parse_yaml_to_canonical(
 ) -> Result<Vec<(CanonicalRouteSpec, Option<CanonicalLossReport>)>, CamelError> {
     annotate_format(
         InputFormat::Yaml,
-        parse_yaml_to_canonical_inner(yaml, allow_loss),
+        parse_yaml_to_canonical_inner(yaml, allow_loss, &ScriptLoadContext::new(None)),
     )
 }
 
 fn parse_yaml_to_canonical_inner(
     yaml: &str,
     allow_loss: bool,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<(CanonicalRouteSpec, Option<CanonicalLossReport>)>, CamelError> {
-    let routes = parse_yaml_to_declarative_inner(yaml)?;
+    let routes = parse_yaml_to_declarative_inner(yaml, script_ctx)?;
     for route in &routes {
         if route.security_policy.is_some() {
             return Err(CamelError::RouteError(
@@ -427,6 +478,7 @@ pub(crate) fn valid_header_token(name: &str) -> bool {
 
 pub(crate) fn route_dsl_to_declarative_route(
     route: RouteDslRoute,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<DeclarativeRoute, CamelError> {
     if route.id.is_empty() {
         return Err(CamelError::RouteError(
@@ -463,7 +515,7 @@ pub(crate) fn route_dsl_to_declarative_route(
                             let steps = clause
                                 .steps
                                 .into_iter()
-                                .map(route_step_to_declarative_step)
+                                .map(|step| route_step_to_declarative_step(step, script_ctx))
                                 .collect::<Result<Vec<_>, _>>()?;
                             Ok::<_, CamelError>(DeclarativeOnException {
                                 code: clause.code,
@@ -511,7 +563,7 @@ pub(crate) fn route_dsl_to_declarative_route(
             let fallback = cb
                 .fallback
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeCircuitBreaker {
                 failure_threshold: cb.failure_threshold,
@@ -705,7 +757,7 @@ pub(crate) fn route_dsl_to_declarative_route(
     let steps = route
         .steps
         .into_iter()
-        .map(route_step_to_declarative_step)
+        .map(|step| route_step_to_declarative_step(step, script_ctx))
         .collect::<Result<Vec<_>, _>>()?;
 
     let from = merge_endpoint_uri(&route.from, route.parameters)?;
@@ -824,6 +876,7 @@ fn combine_params(
 
 pub(crate) fn route_step_to_declarative_step(
     step: RouteDslStep,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<DeclarativeStep, CamelError> {
     match step {
         RouteDslStep::To(ToStep { to, parameters }) => {
@@ -902,13 +955,17 @@ pub(crate) fn route_step_to_declarative_step(
                 }
                 crate::route_ast::LogMessageData::Expr(expr) => parse_value_source(
                     expr.value.map(serde_json::Value::String),
-                    expr.language,
-                    expr.source,
-                    expr.simple,
-                    expr.rhai,
-                    expr.jsonpath,
-                    expr.xpath,
-                    "log.message",
+                    ExprSourceArgs {
+                        language: expr.language,
+                        source: expr.source,
+                        source_file: expr.source_file,
+                        simple: expr.simple,
+                        rhai: expr.rhai,
+                        jsonpath: expr.jsonpath,
+                        xpath: expr.xpath,
+                        context: "log.message",
+                    },
+                    script_ctx,
                 )?,
             };
             Ok(DeclarativeStep::Log(LogStepDef { message, level }))
@@ -921,13 +978,17 @@ pub(crate) fn route_step_to_declarative_step(
             }
             let value = parse_value_source(
                 set_header.value,
-                set_header.language,
-                set_header.source,
-                set_header.simple,
-                set_header.rhai,
-                set_header.jsonpath,
-                set_header.xpath,
-                "set_header",
+                ExprSourceArgs {
+                    language: set_header.language,
+                    source: set_header.source,
+                    source_file: set_header.source_file,
+                    simple: set_header.simple,
+                    rhai: set_header.rhai,
+                    jsonpath: set_header.jsonpath,
+                    xpath: set_header.xpath,
+                    context: "set_header",
+                },
+                script_ctx,
             )?;
             Ok(DeclarativeStep::SetHeader(SetHeaderStepDef {
                 key: set_header.key,
@@ -990,13 +1051,17 @@ pub(crate) fn route_step_to_declarative_step(
             }
             let value = parse_value_source(
                 set_property.value,
-                set_property.language,
-                set_property.source,
-                set_property.simple,
-                set_property.rhai,
-                set_property.jsonpath,
-                set_property.xpath,
-                "set_property",
+                ExprSourceArgs {
+                    language: set_property.language,
+                    source: set_property.source,
+                    source_file: set_property.source_file,
+                    simple: set_property.simple,
+                    rhai: set_property.rhai,
+                    jsonpath: set_property.jsonpath,
+                    xpath: set_property.xpath,
+                    context: "set_property",
+                },
+                script_ctx,
             )?;
             Ok(DeclarativeStep::SetProperty(SetPropertyStepDef {
                 key: set_property.name,
@@ -1010,12 +1075,24 @@ pub(crate) fn route_step_to_declarative_step(
                     value,
                     language,
                     source,
+                    source_file,
                     simple,
                     rhai,
                     jsonpath,
                     xpath,
                 }) => parse_value_source(
-                    value, language, source, simple, rhai, jsonpath, xpath, "set_body",
+                    value,
+                    ExprSourceArgs {
+                        language,
+                        source,
+                        source_file,
+                        simple,
+                        rhai,
+                        jsonpath,
+                        xpath,
+                        context: "set_body",
+                    },
+                    script_ctx,
                 )?,
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
@@ -1027,34 +1104,52 @@ pub(crate) fn route_step_to_declarative_step(
                     value,
                     language,
                     source,
+                    source_file,
                     simple,
                     rhai,
                     jsonpath,
                     xpath,
                 }) => parse_value_source(
                     value,
-                    language,
-                    source,
-                    simple,
-                    rhai,
-                    jsonpath,
-                    xpath,
-                    "transform",
+                    ExprSourceArgs {
+                        language,
+                        source,
+                        source_file,
+                        simple,
+                        rhai,
+                        jsonpath,
+                        xpath,
+                        context: "transform",
+                    },
+                    script_ctx,
                 )?,
             };
             Ok(DeclarativeStep::SetBody(SetBodyStepDef { value }))
         }
-        RouteDslStep::Script(ScriptStep {
-            script: ScriptData { language, source },
-        }) => Ok(DeclarativeStep::Script(ScriptStepDef {
-            expression: LanguageExpressionDef { language, source },
-        })),
+        RouteDslStep::Script(ScriptStep { script }) => {
+            // `ScriptData` is built by serde, so the script step never flows
+            // through `parse_language_expression` — resolve it here.
+            let expression = resolve_script_expression(
+                ExprSourceArgs {
+                    language: script.language,
+                    source: script.source,
+                    source_file: script.source_file,
+                    simple: None,
+                    rhai: None,
+                    jsonpath: None,
+                    xpath: None,
+                    context: "script",
+                },
+                script_ctx,
+            )?;
+            Ok(DeclarativeStep::Script(ScriptStepDef { expression }))
+        }
         RouteDslStep::Filter(FilterStep { filter }) => {
-            let predicate = parse_predicate_block(&filter, "filter")?;
+            let predicate = parse_predicate_block(&filter, "filter", script_ctx)?;
             let steps = filter
                 .steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::Filter(crate::model::FilterStepDef {
                 predicate,
@@ -1097,11 +1192,11 @@ pub(crate) fn route_step_to_declarative_step(
             let whens = when
                 .into_iter()
                 .map(|block| {
-                    let predicate = parse_predicate_block(&block, "choice.when")?;
+                    let predicate = parse_predicate_block(&block, "choice.when", script_ctx)?;
                     let steps = block
                         .steps
                         .into_iter()
-                        .map(route_step_to_declarative_step)
+                        .map(|step| route_step_to_declarative_step(step, script_ctx))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(WhenStepDef { predicate, steps })
                 })
@@ -1111,7 +1206,7 @@ pub(crate) fn route_step_to_declarative_step(
                 Some(steps) => Some(
                     steps
                         .into_iter()
-                        .map(route_step_to_declarative_step)
+                        .map(|step| route_step_to_declarative_step(step, script_ctx))
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
                 None => None,
@@ -1163,19 +1258,24 @@ pub(crate) fn route_step_to_declarative_step(
                     Some(SplitExpressionYaml::Config(SplitExpressionConfig {
                         language,
                         source,
+                        source_file,
                         simple,
                         rhai,
                         jsonpath,
                         xpath,
                     })) => {
                         let expr = parse_language_expression(
-                            language,
-                            source,
-                            simple,
-                            rhai,
-                            jsonpath,
-                            xpath,
-                            "split.expression",
+                            ExprSourceArgs {
+                                language,
+                                source,
+                                source_file,
+                                simple,
+                                rhai,
+                                jsonpath,
+                                xpath,
+                                context: "split.expression",
+                            },
+                            script_ctx,
                         )?;
                         SplitExpressionDef::Language(expr)
                     }
@@ -1196,7 +1296,7 @@ pub(crate) fn route_step_to_declarative_step(
             let steps = split
                 .steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok(DeclarativeStep::Split(SplitStepDef {
@@ -1221,7 +1321,9 @@ pub(crate) fn route_step_to_declarative_step(
 
             let completion_predicate = aggregate
                 .completion_predicate
-                .map(|block| parse_predicate_block(&block, "aggregate.completion_predicate"))
+                .map(|block| {
+                    parse_predicate_block(&block, "aggregate.completion_predicate", script_ctx)
+                })
                 .transpose()?;
 
             Ok(DeclarativeStep::Aggregate(AggregateStepDef {
@@ -1244,7 +1346,7 @@ pub(crate) fn route_step_to_declarative_step(
             let steps = multicast
                 .steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
 
             Ok(DeclarativeStep::Multicast(MulticastStepDef {
@@ -1366,6 +1468,7 @@ pub(crate) fn route_step_to_declarative_step(
                 DynamicRouterData {
                     language,
                     source,
+                    source_file,
                     simple,
                     rhai,
                     uri_delimiter,
@@ -1375,13 +1478,17 @@ pub(crate) fn route_step_to_declarative_step(
                 },
         }) => {
             let expression = parse_language_expression(
-                language,
-                source,
-                simple,
-                rhai,
-                None,
-                None,
-                "dynamic_router",
+                ExprSourceArgs {
+                    language,
+                    source,
+                    source_file,
+                    simple,
+                    rhai,
+                    jsonpath: None,
+                    xpath: None,
+                    context: "dynamic_router",
+                },
+                script_ctx,
             )?;
             Ok(DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
                 expression,
@@ -1421,7 +1528,7 @@ pub(crate) fn route_step_to_declarative_step(
             };
             let steps = steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::LoadBalance(LoadBalanceStepDef {
                 strategy,
@@ -1433,6 +1540,7 @@ pub(crate) fn route_step_to_declarative_step(
                 RoutingSlipData {
                     language,
                     source,
+                    source_file,
                     simple,
                     rhai,
                     uri_delimiter,
@@ -1441,13 +1549,17 @@ pub(crate) fn route_step_to_declarative_step(
                 },
         }) => {
             let expression = parse_language_expression(
-                language,
-                source,
-                simple,
-                rhai,
-                None,
-                None,
-                "routing_slip",
+                ExprSourceArgs {
+                    language,
+                    source,
+                    source_file,
+                    simple,
+                    rhai,
+                    jsonpath: None,
+                    xpath: None,
+                    context: "routing_slip",
+                },
+                script_ctx,
             )?;
             Ok(DeclarativeStep::RoutingSlip(RoutingSlipStepDef {
                 expression,
@@ -1461,6 +1573,7 @@ pub(crate) fn route_step_to_declarative_step(
                 RecipientListData {
                     language,
                     source,
+                    source_file,
                     simple,
                     rhai,
                     delimiter,
@@ -1471,13 +1584,17 @@ pub(crate) fn route_step_to_declarative_step(
                 },
         }) => {
             let expression = parse_language_expression(
-                language,
-                source,
-                simple,
-                rhai,
-                None,
-                None,
-                "recipient_list",
+                ExprSourceArgs {
+                    language,
+                    source,
+                    source_file,
+                    simple,
+                    rhai,
+                    jsonpath: None,
+                    xpath: None,
+                    context: "recipient_list",
+                },
+                script_ctx,
             )?;
             let aggregation = match strategy.as_deref() {
                 None => MulticastAggregationDef::LastWins,
@@ -1513,7 +1630,7 @@ pub(crate) fn route_step_to_declarative_step(
             };
             let steps = steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             if max_requests == 0 {
                 return Err(CamelError::RouteError(
@@ -1545,13 +1662,13 @@ pub(crate) fn route_step_to_declarative_step(
                 LoopData::Count(n) => (Some(n), None, vec![], None),
                 LoopData::Full(cfg) => {
                     let predicate = match &cfg.while_expr {
-                        Some(expr) => Some(parse_loop_while_expr(expr, "loop.while")?),
+                        Some(expr) => Some(parse_loop_while_expr(expr, "loop.while", script_ctx)?),
                         None => None,
                     };
                     let sub_steps = cfg
                         .steps
                         .into_iter()
-                        .map(route_step_to_declarative_step)
+                        .map(|step| route_step_to_declarative_step(step, script_ctx))
                         .collect::<Result<Vec<_>, _>>()?;
                     (cfg.count, predicate, sub_steps, cfg.max_iterations)
                 }
@@ -1611,7 +1728,7 @@ pub(crate) fn route_step_to_declarative_step(
             let steps = body
                 .steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::IdempotentConsumer(
                 IdempotentConsumerStepDef {
@@ -1646,7 +1763,7 @@ pub(crate) fn route_step_to_declarative_step(
             }
             let on_miss = on_miss_steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(DeclarativeStep::Cache(CacheStepDef {
                 repository,
@@ -1833,13 +1950,17 @@ pub(crate) fn route_step_to_declarative_step(
             }
             let value = parse_value_source(
                 set_header.value,
-                set_header.language,
-                set_header.source,
-                set_header.simple,
-                set_header.rhai,
-                set_header.jsonpath,
-                set_header.xpath,
-                "set_header_if_absent",
+                ExprSourceArgs {
+                    language: set_header.language,
+                    source: set_header.source,
+                    source_file: set_header.source_file,
+                    simple: set_header.simple,
+                    rhai: set_header.rhai,
+                    jsonpath: set_header.jsonpath,
+                    xpath: set_header.xpath,
+                    context: "set_header_if_absent",
+                },
+                script_ctx,
             )?;
             Ok(DeclarativeStep::SetHeaderIfAbsent(SetHeaderStepDef {
                 key: set_header.key,
@@ -1862,7 +1983,7 @@ pub(crate) fn route_step_to_declarative_step(
             let steps = data
                 .steps
                 .into_iter()
-                .map(route_step_to_declarative_step)
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             let catch = data
                 .catch
@@ -1946,7 +2067,7 @@ pub(crate) fn route_step_to_declarative_step(
                     let clause_steps = c
                         .steps
                         .into_iter()
-                        .map(route_step_to_declarative_step)
+                        .map(|step| route_step_to_declarative_step(step, script_ctx))
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(DoTryCatchClauseDef {
                         exception,
@@ -1973,7 +2094,7 @@ pub(crate) fn route_step_to_declarative_step(
                 let fsteps = f
                     .steps
                     .into_iter()
-                    .map(route_step_to_declarative_step)
+                    .map(|step| route_step_to_declarative_step(step, script_ctx))
                     .collect::<Result<Vec<_>, _>>()?;
                 Some(DoTryFinallyDef {
                     on_when,
@@ -2049,95 +2170,79 @@ fn unpack_poll_enrich_body(body: EnrichBody) -> Result<PollEnrichParts, CamelErr
     }
 }
 
+/// Lower a `filter`/`when` predicate block to a language expression through
+/// the shared script-file resolution rules.
 fn parse_predicate_block(
     block: &PredicateBlock,
     context: &str,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<LanguageExpressionDef, CamelError> {
-    let mut selected = Vec::new();
-
-    if let (Some(language), Some(source)) = (block.language.as_ref(), block.source.as_ref()) {
-        selected.push((language.clone(), source.clone()));
-    } else if block.language.is_some() || block.source.is_some() {
-        return Err(CamelError::RouteError(format!(
-            "{context}: `language` and `source` must be set together"
-        )));
-    }
-
-    if let Some(source) = block.simple.as_ref() {
-        selected.push(("simple".to_string(), source.clone()));
-    }
-    if let Some(source) = block.rhai.as_ref() {
-        selected.push(("rhai".to_string(), source.clone()));
-    }
-    if let Some(source) = block.jsonpath.as_ref() {
-        selected.push(("jsonpath".to_string(), source.clone()));
-    }
-    if let Some(source) = block.xpath.as_ref() {
-        selected.push(("xpath".to_string(), source.clone()));
-    }
-
-    if selected.len() != 1 {
-        return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one predicate source: `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
-        )));
-    }
-
-    let (language, source) = selected.remove(0);
-    Ok(LanguageExpressionDef { language, source })
+    resolve_script_expression(
+        ExprSourceArgs {
+            language: block.language.clone(),
+            source: block.source.clone(),
+            source_file: block.source_file.clone(),
+            simple: block.simple.clone(),
+            rhai: block.rhai.clone(),
+            jsonpath: block.jsonpath.clone(),
+            xpath: block.xpath.clone(),
+            context,
+        },
+        script_ctx,
+    )
 }
 
+/// Lower a `loop.while` expression through the shared script-file resolution
+/// rules.
 fn parse_loop_while_expr(
     expr: &LoopWhileExpr,
     context: &str,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<LanguageExpressionDef, CamelError> {
-    let mut selected = Vec::new();
-
-    if let (Some(language), Some(source)) = (expr.language.as_ref(), expr.source.as_ref()) {
-        selected.push((language.clone(), source.clone()));
-    } else if expr.language.is_some() || expr.source.is_some() {
-        return Err(CamelError::RouteError(format!(
-            "{context}: `language` and `source` must be set together"
-        )));
-    }
-
-    if let Some(source) = expr.simple.as_ref() {
-        selected.push(("simple".to_string(), source.clone()));
-    }
-    if let Some(source) = expr.rhai.as_ref() {
-        selected.push(("rhai".to_string(), source.clone()));
-    }
-    if let Some(source) = expr.jsonpath.as_ref() {
-        selected.push(("jsonpath".to_string(), source.clone()));
-    }
-    if let Some(source) = expr.xpath.as_ref() {
-        selected.push(("xpath".to_string(), source.clone()));
-    }
-
-    if selected.len() != 1 {
-        return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one predicate source: `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
-        )));
-    }
-
-    let (language, source) = selected.remove(0);
-    Ok(LanguageExpressionDef { language, source })
+    resolve_script_expression(
+        ExprSourceArgs {
+            language: expr.language.clone(),
+            source: expr.source.clone(),
+            source_file: expr.source_file.clone(),
+            simple: expr.simple.clone(),
+            rhai: expr.rhai.clone(),
+            jsonpath: expr.jsonpath.clone(),
+            xpath: expr.xpath.clone(),
+            context,
+        },
+        script_ctx,
+    )
 }
 
 /// The valid value-source alternatives, in the order the error messages list
 /// them. Shared by every rejection message so the wording cannot drift.
 const VALUE_SOURCE_ALTERNATIVES: &str =
-    "`value`, `language`+`source`, `simple`, `rhai`, `jsonpath`, `xpath`";
+    "`value`, `language`+`source`, `source_file`, `simple`, `rhai`, `jsonpath`, `xpath`";
 
 /// The keys a value-source mapping accepts. Any other key makes the mapping an
 /// unknown-key rejection instead of an implicit literal object.
-const VALUE_SOURCE_CONFIG_KEYS: [&str; 7] = [
-    "value", "language", "source", "simple", "rhai", "jsonpath", "xpath",
+const VALUE_SOURCE_CONFIG_KEYS: [&str; 8] = [
+    "value",
+    "language",
+    "source",
+    "source_file",
+    "simple",
+    "rhai",
+    "jsonpath",
+    "xpath",
 ];
 
 /// Fixed declaration order for wrong-type diagnostics: the first present field
 /// whose value is neither a string nor null is the one reported.
-const VALUE_SOURCE_FIELD_ORDER: [&str; 6] =
-    ["language", "source", "simple", "rhai", "jsonpath", "xpath"];
+const VALUE_SOURCE_FIELD_ORDER: [&str; 7] = [
+    "language",
+    "source",
+    "source_file",
+    "simple",
+    "rhai",
+    "jsonpath",
+    "xpath",
+];
 
 /// Lower a `SetBodyData::Literal` into a value source. A JSON object is never a
 /// literal body: it is a value-source mapping that failed `SetBodyConfig`
@@ -2213,23 +2318,224 @@ fn bare_string_value_source(value: serde_json::Value) -> ValueSourceDef {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn parse_value_source(
-    literal: Option<serde_json::Value>,
+/// Script-file resolution context threaded from the parse entry points to
+/// every expression lowering.
+///
+/// `base_dir` anchors relative `source_file` references: the route file's
+/// parent directory for file-backed loads, `None` (CWD semantics) for string
+/// parsing. The sink records every successfully read script as
+/// `(path, contents)`; discovery folds the contents into the document source
+/// hash and the paths feed the watch registry. The `RefCell` keeps the parse
+/// closures `Fn` (the loader-layer typed probe requires `Fn`), which is safe
+/// because the context lives entirely inside one single-threaded
+/// document-parse scope: one thread creates it, fills it, and folds it — the
+/// borrow is never held across threads or across `await` points.
+#[derive(Default)]
+pub(crate) struct ScriptLoadContext {
+    base_dir: Option<PathBuf>,
+    scripts: RefCell<BTreeMap<PathBuf, String>>,
+}
+
+impl ScriptLoadContext {
+    /// Context for a document loaded from `base_dir`'s directory; `None`
+    /// gives CWD semantics for string-based parsing.
+    pub(crate) fn new(base_dir: Option<PathBuf>) -> Self {
+        Self {
+            base_dir,
+            scripts: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// Resolve `raw` to an ABSOLUTE path without touching the filesystem, so
+    /// every diagnostic names the same path the read uses: relative paths
+    /// join `base_dir`, and anything still relative joins the process
+    /// current working directory.
+    fn resolve(&self, raw: &str) -> Result<PathBuf, CamelError> {
+        if raw.trim().is_empty() {
+            return Err(CamelError::RouteError(
+                "script `source_file` must not be empty".into(),
+            ));
+        }
+        let raw_path = Path::new(raw);
+        let candidate = match (&self.base_dir, raw_path.is_absolute()) {
+            (Some(base_dir), false) => base_dir.join(raw_path),
+            _ => raw_path.to_path_buf(),
+        };
+        if candidate.is_absolute() {
+            return Ok(candidate);
+        }
+        Ok(match std::env::current_dir() {
+            Ok(cwd) => cwd.join(candidate),
+            Err(_) => candidate,
+        })
+    }
+
+    /// Record a successfully read script under its canonicalized path —
+    /// canonicalized AFTER the read so symlinked watcher paths stay
+    /// realistic — and keep its contents for the source-hash fold.
+    fn record(&self, abs_path: PathBuf, contents: String) {
+        let key = std::fs::canonicalize(&abs_path).unwrap_or(abs_path);
+        self.scripts.borrow_mut().insert(key, contents);
+    }
+
+    /// Consume the context into the recorded `(path, contents)` map. The
+    /// `BTreeMap` keys give the deterministic path order the hash fold and
+    /// the probe-then-retry dedup rely on.
+    pub(crate) fn into_scripts(self) -> BTreeMap<PathBuf, String> {
+        self.scripts.into_inner()
+    }
+}
+
+/// Named-fields parameter set for the shared script-expression resolver
+/// (ADR-0091): one struct instead of eight positional arguments.
+struct ExprSourceArgs<'a> {
     language: Option<String>,
     source: Option<String>,
+    source_file: Option<String>,
     simple: Option<String>,
     rhai: Option<String>,
     jsonpath: Option<String>,
     xpath: Option<String>,
-    context: &str,
+    context: &'a str,
+}
+
+/// The exactly-one error for expression objects, extended to name
+/// `source_file` as an accepted form.
+fn exactly_one_source_error(context: &str) -> CamelError {
+    CamelError::RouteError(format!(
+        "{context} must define exactly one source form: `language`+`source`, `source_file`, `simple`, `rhai`, `jsonpath`, or `xpath`"
+    ))
+}
+
+/// The exactly-one error for value sources: `value` joins the shared
+/// expression alternatives.
+fn value_source_exactly_one_error(context: &str) -> CamelError {
+    CamelError::RouteError(format!(
+        "{context} must define exactly one value source: `value`, `language+source`, `source_file`, `simple`, `rhai`, `jsonpath`, or `xpath`"
+    ))
+}
+
+/// Shared expression resolution for every DSL expression object (script
+/// step, predicates, loop-while, value sources). Implements the counting
+/// rules across the source forms:
+///
+/// - `source_file` together with `source` fails with a named error (context,
+///   both field names, and the absolute resolved path) raised BEFORE any
+///   file IO;
+/// - `source_file` together with a shorthand (`simple`/`rhai`/`jsonpath`/
+///   `xpath`) fails the exactly-one rule;
+/// - `source_file` alone or with `language` resolves to the ABSOLUTE path
+///   first (diagnostics stay ready when the file is missing), infers the
+///   language from the extension unless `language` is set (explicit wins),
+///   reads the file verbatim, records it in `script_ctx`, and inlines the
+///   contents as the expression source;
+/// - otherwise exactly one of `language`+`source`, `simple`, `rhai`,
+///   `jsonpath`, `xpath` must be set.
+fn resolve_script_expression(
+    args: ExprSourceArgs<'_>,
+    script_ctx: &ScriptLoadContext,
+) -> Result<LanguageExpressionDef, CamelError> {
+    let ExprSourceArgs {
+        language,
+        source,
+        source_file,
+        simple,
+        rhai,
+        jsonpath,
+        xpath,
+        context,
+    } = args;
+
+    if let Some(raw) = source_file {
+        // Conflict rules run before any file IO.
+        if source.is_some() {
+            let resolved = script_ctx.resolve(&raw)?;
+            return Err(CamelError::RouteError(format!(
+                "{context}: `source` and `source_file` must not be set together \
+                 (resolved `source_file` to `{}`)",
+                resolved.display()
+            )));
+        }
+        if simple.is_some() || rhai.is_some() || jsonpath.is_some() || xpath.is_some() {
+            return Err(exactly_one_source_error(context));
+        }
+        let resolved = script_ctx.resolve(&raw)?;
+        let language = match language {
+            Some(language) => language,
+            None => camel_api::infer_script_language(&resolved)?,
+        };
+        let source = camel_api::read_script_source(&resolved)?;
+        script_ctx.record(resolved, source.clone());
+        return Ok(LanguageExpressionDef { language, source });
+    }
+
+    if language.is_some() != source.is_some() {
+        return Err(CamelError::RouteError(format!(
+            "{context}: `language` and `source` must be set together"
+        )));
+    }
+
+    let mut selected = Vec::new();
+    if let (Some(language), Some(source)) = (language, source) {
+        selected.push(LanguageExpressionDef { language, source });
+    }
+    if let Some(source) = simple {
+        selected.push(LanguageExpressionDef {
+            language: "simple".to_string(),
+            source,
+        });
+    }
+    if let Some(source) = rhai {
+        selected.push(LanguageExpressionDef {
+            language: "rhai".to_string(),
+            source,
+        });
+    }
+    if let Some(source) = jsonpath {
+        selected.push(LanguageExpressionDef {
+            language: "jsonpath".to_string(),
+            source,
+        });
+    }
+    if let Some(source) = xpath {
+        selected.push(LanguageExpressionDef {
+            language: "xpath".to_string(),
+            source,
+        });
+    }
+    if selected.len() != 1 {
+        return Err(exactly_one_source_error(context));
+    }
+    Ok(selected.remove(0))
+}
+
+/// Lower a value-source expression (`value` literal or one expression form).
+///
+/// `value` is exclusive with every expression form. When `source_file` is
+/// set the shared resolver runs FIRST so its named pre-IO conflict errors
+/// take precedence over the value-source count; without `source_file` the
+/// local count (which includes `value`) picks the one accepted form and the
+/// shared resolver builds the expression.
+fn parse_value_source(
+    literal: Option<serde_json::Value>,
+    args: ExprSourceArgs<'_>,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<ValueSourceDef, CamelError> {
+    let context = args.context;
+    if args.source_file.is_some() {
+        let expression = resolve_script_expression(args, script_ctx)?;
+        return match literal {
+            Some(_) => Err(value_source_exactly_one_error(context)),
+            None => Ok(ValueSourceDef::Expression(expression)),
+        };
+    }
+
     let mut count = 0;
     if literal.is_some() {
         count += 1;
     }
-    if language.is_some() || source.is_some() {
-        if language.is_some() && source.is_some() {
+    if args.language.is_some() || args.source.is_some() {
+        if args.language.is_some() && args.source.is_some() {
             count += 1;
         } else {
             return Err(CamelError::RouteError(format!(
@@ -2237,133 +2543,38 @@ fn parse_value_source(
             )));
         }
     }
-    if simple.is_some() {
+    if args.simple.is_some() {
         count += 1;
     }
-    if rhai.is_some() {
+    if args.rhai.is_some() {
         count += 1;
     }
-    if jsonpath.is_some() {
+    if args.jsonpath.is_some() {
         count += 1;
     }
-    if xpath.is_some() {
+    if args.xpath.is_some() {
         count += 1;
     }
 
     if count != 1 {
-        return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one value source: `value`, `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
-        )));
+        return Err(value_source_exactly_one_error(context));
     }
 
     if let Some(value) = literal {
         return Ok(bare_string_value_source(value));
     }
-    if let (Some(language), Some(source)) = (language, source) {
-        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
-            language,
-            source,
-        }));
-    }
-    if let Some(source) = simple {
-        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
-            language: "simple".to_string(),
-            source,
-        }));
-    }
-    if let Some(source) = rhai {
-        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
-            language: "rhai".to_string(),
-            source,
-        }));
-    }
-    if let Some(source) = jsonpath {
-        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
-            language: "jsonpath".to_string(),
-            source,
-        }));
-    }
-    if let Some(source) = xpath {
-        return Ok(ValueSourceDef::Expression(LanguageExpressionDef {
-            language: "xpath".to_string(),
-            source,
-        }));
-    }
-
-    Err(CamelError::RouteError(format!(
-        "{context}: missing value source"
-    )))
+    Ok(ValueSourceDef::Expression(resolve_script_expression(
+        args, script_ctx,
+    )?))
 }
 
+/// Lower a language expression through the shared script-file resolution
+/// rules ([`resolve_script_expression`]).
 fn parse_language_expression(
-    language: Option<String>,
-    source: Option<String>,
-    simple: Option<String>,
-    rhai: Option<String>,
-    jsonpath: Option<String>,
-    xpath: Option<String>,
-    context: &str,
+    args: ExprSourceArgs<'_>,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<LanguageExpressionDef, CamelError> {
-    let mut count = 0;
-    if language.is_some() || source.is_some() {
-        if language.is_some() && source.is_some() {
-            count += 1;
-        } else {
-            return Err(CamelError::RouteError(format!(
-                "{context}: `language` and `source` must be set together"
-            )));
-        }
-    }
-    if simple.is_some() {
-        count += 1;
-    }
-    if rhai.is_some() {
-        count += 1;
-    }
-    if jsonpath.is_some() {
-        count += 1;
-    }
-    if xpath.is_some() {
-        count += 1;
-    }
-
-    if count != 1 {
-        return Err(CamelError::RouteError(format!(
-            "{context} must define exactly one language source: `language+source`, `simple`, `rhai`, `jsonpath`, or `xpath`"
-        )));
-    }
-
-    if let (Some(language), Some(source)) = (language, source) {
-        return Ok(LanguageExpressionDef { language, source });
-    }
-    if let Some(source) = simple {
-        return Ok(LanguageExpressionDef {
-            language: "simple".to_string(),
-            source,
-        });
-    }
-    if let Some(source) = rhai {
-        return Ok(LanguageExpressionDef {
-            language: "rhai".to_string(),
-            source,
-        });
-    }
-    if let Some(source) = jsonpath {
-        return Ok(LanguageExpressionDef {
-            language: "jsonpath".to_string(),
-            source,
-        });
-    }
-    if let Some(source) = xpath {
-        return Ok(LanguageExpressionDef {
-            language: "xpath".to_string(),
-            source,
-        });
-    }
-
-    Err(CamelError::RouteError(format!(
-        "{context}: missing language source"
-    )))
+    resolve_script_expression(args, script_ctx)
 }
 
 use crate::util::read_route_file_capped;
@@ -2395,8 +2606,20 @@ pub fn load_from_file_with_env(
         error!(path = %path.display(), error = %e, "failed to load routes from file");
         e
     })?;
-    match parse_routes_with_env(&content, lookup) {
-        Ok(routes) => Ok(routes),
+    // Script `source_file` references resolve against the route file's
+    // directory (string-based parse entry points keep CWD semantics).
+    let script_ctx = ScriptLoadContext::new(path.parent().map(Path::to_path_buf));
+    match parse_routes_with_env_inner(&content, lookup, &script_ctx) {
+        Ok(routes) => {
+            // File-backed loads have no discovery/reload pass to publish
+            // later, so their script dependencies are committed directly.
+            let script_paths: BTreeSet<PathBuf> = script_ctx.into_scripts().into_keys().collect();
+            let registry = crate::script_watch::ScriptWatchRegistry::global();
+            for route in &routes {
+                registry.register_direct(route.route_id(), script_paths.clone());
+            }
+            Ok(routes)
+        }
         Err(RoutesEnvError::Unresolved(var)) => Err(CamelError::RouteError(format!(
             "Environment variable '{var}' not set (required by {})",
             path.display()
@@ -2460,11 +2683,24 @@ pub fn parse_routes_with_env(
     raw: &str,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<RouteDefinition>, RoutesEnvError> {
+    parse_routes_with_env_inner(raw, lookup, &ScriptLoadContext::new(None))
+}
+
+/// Context-aware core of [`parse_routes_with_env`]: the caller owns the
+/// [`ScriptLoadContext`] (file-backed loads anchor `source_file` resolution
+/// at the route file's directory) and the parse closure stays `Fn` because
+/// the context mutates only through its interior `RefCell`.
+fn parse_routes_with_env_inner(
+    raw: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    script_ctx: &ScriptLoadContext,
+) -> Result<Vec<RouteDefinition>, RoutesEnvError> {
     let (text, provenance) =
         crate::env_interpolation::interpolate_yaml_source_with_provenance(raw, lookup)
             .map_err(RoutesEnvError::Unresolved)?;
-    match crate::env_int_probe::parse_with_probe(&text, provenance.as_deref(), parse_yaml_for_probe)
-    {
+    match crate::env_int_probe::parse_with_probe(&text, provenance.as_deref(), |probe_text| {
+        parse_yaml_for_probe(probe_text, script_ctx)
+    }) {
         Ok(routes) => Ok(routes),
         Err(first) => {
             // Final-failure replay (logging only): re-run the interpolated
@@ -3731,13 +3967,17 @@ routes:
     fn set_header_if_absent_shares_value_gate() {
         let value = parse_value_source(
             Some(serde_json::Value::String("Hi ${header.h}".to_string())),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            "set_header_if_absent",
+            ExprSourceArgs {
+                language: None,
+                source: None,
+                source_file: None,
+                simple: None,
+                rhai: None,
+                jsonpath: None,
+                xpath: None,
+                context: "set_header_if_absent",
+            },
+            &ScriptLoadContext::new(None),
         )
         .expect("set_header_if_absent value source parses");
         assert_eq!(
@@ -5262,7 +5502,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with both `exception` and `when`"
@@ -5283,7 +5526,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with `on_when` but no matcher"
@@ -5303,7 +5549,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with `*` mixed with other variants"
@@ -5318,7 +5567,10 @@ routes:
     steps: []
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(decl.is_err(), "must reject doTry with empty `steps`");
     }
 
@@ -5334,7 +5586,10 @@ routes:
         steps: []
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(decl.is_err(), "must reject catch clause with empty `steps`");
     }
 
@@ -5349,7 +5604,10 @@ routes:
       steps: []
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(decl.is_err(), "must reject finally with empty `steps`");
     }
 
@@ -5368,7 +5626,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with `on_when` when `when` (not `exception`) is the matcher"
@@ -5388,7 +5649,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with neither `exception` nor `when`"
@@ -5408,7 +5672,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with empty `exception` list"
@@ -5428,7 +5695,10 @@ routes:
           - to: "log:caught"
 "#;
         let steps: Vec<RouteDslStep> = serde_yml::from_str(yaml).unwrap();
-        let decl = route_step_to_declarative_step(steps.into_iter().next().unwrap());
+        let decl = route_step_to_declarative_step(
+            steps.into_iter().next().unwrap(),
+            &ScriptLoadContext::new(None),
+        );
         assert!(
             decl.is_err(),
             "must reject catch clause with blank variant name in `exception`"
@@ -6416,7 +6686,8 @@ routes:
             on_failure: None,
             http_error_mapping: None,
         };
-        let declarative = route_dsl_to_declarative_route(route).unwrap();
+        let declarative =
+            route_dsl_to_declarative_route(route, &ScriptLoadContext::new(None)).unwrap();
         match &declarative.steps[0] {
             DeclarativeStep::ContentNegotiation(def) => {
                 assert_eq!(def.consumes, "application/json");
@@ -6520,7 +6791,8 @@ routes:
             .into_iter()
             .next()
             .expect("fixture has exactly one route");
-        let declarative = route_dsl_to_declarative_route(route).expect("lowering must succeed");
+        let declarative = route_dsl_to_declarative_route(route, &ScriptLoadContext::new(None))
+            .expect("lowering must succeed");
         match &declarative.steps[0] {
             DeclarativeStep::Unmarshal(def) => {
                 assert!(
@@ -6867,6 +7139,289 @@ routes:
             msg.contains("unknown field"),
             "expected 'unknown field' in error, got: {msg}"
         );
+    }
+
+    // ── Script file source (`source_file`) tests ──
+
+    fn first_script_expression(routes: &[RouteDefinition]) -> LanguageExpressionDef {
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::DeclarativeScript { expression } => expression.clone(),
+            other => panic!("expected DeclarativeScript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_source_file_loads_with_inferred_language() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "hello.rhai", "1 + 1");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"hello.rhai\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        let expression = first_script_expression(&routes);
+        assert_eq!(expression.language, "rhai");
+        assert_eq!(expression.source, "1 + 1");
+
+        // Same fixture as JSON via `load_json_from_file`.
+        let json_path = write_route_file(
+            &dir,
+            "doc.json",
+            "{\"routes\":[{\"id\":\"r\",\"from\":\"direct:start\",\"steps\":[{\"script\":{\"source_file\":\"hello.rhai\"}}]}]}",
+        );
+        let routes = crate::json::load_json_from_file(&json_path).unwrap();
+        let expression = first_script_expression(&routes);
+        assert_eq!(expression.language, "rhai");
+        assert_eq!(expression.source, "1 + 1");
+    }
+
+    #[test]
+    fn script_source_and_source_file_rejected_pre_io() {
+        let dir = tempfile::tempdir().unwrap();
+        // The script file is absent: the rejection must happen before any IO.
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source: \"1 + 1\"\n          source_file: \"absent.rhai\"\n",
+        );
+
+        let err = load_from_file(&path)
+            .err()
+            .expect("load must fail")
+            .to_string();
+        assert!(err.contains("script"), "context missing: {err}");
+        assert!(err.contains("`source`"), "field name missing: {err}");
+        assert!(err.contains("`source_file`"), "field name missing: {err}");
+        let resolved = dir.path().join("absent.rhai");
+        assert!(
+            err.contains(&resolved.display().to_string()),
+            "resolved path missing: {err}"
+        );
+    }
+
+    #[test]
+    fn script_missing_source_form_error_names_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script: {}\n",
+        );
+
+        let err = load_from_file(&path)
+            .err()
+            .expect("load must fail")
+            .to_string();
+        assert!(err.contains("source_file"), "got: {err}");
+    }
+
+    #[test]
+    fn script_shorthand_plus_source_file_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          rhai: \"1 + 1\"\n          source_file: \"x.rhai\"\n",
+        );
+
+        let err = load_from_file(&path)
+            .err()
+            .expect("load must fail")
+            .to_string();
+        assert!(err.contains("exactly one"), "got: {err}");
+    }
+
+    #[test]
+    fn explicit_language_wins_over_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "notes.txt", "hello");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          language: simple\n          source_file: \"notes.txt\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        let expression = first_script_expression(&routes);
+        assert_eq!(expression.language, "simple");
+        assert_eq!(expression.source, "hello");
+    }
+
+    #[test]
+    fn unknown_extension_error_names_resolved_path() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "req.xyz", "opaque");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"req.xyz\"\n",
+        );
+
+        let err = load_from_file(&path)
+            .err()
+            .expect("load must fail")
+            .to_string();
+        let resolved = dir.path().join("req.xyz");
+        assert!(
+            err.contains(&resolved.display().to_string()),
+            "resolved path missing: {err}"
+        );
+        assert!(err.contains("xyz"), "extension missing: {err}");
+    }
+
+    #[test]
+    fn source_file_resolves_relative_to_route_file_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("routes/scripts")).unwrap();
+        write_route_file(&dir, "routes/scripts/x.rhai", "40 + 2");
+        let doc = write_route_file(
+            &dir,
+            "routes/doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"scripts/x.rhai\"\n",
+        );
+
+        let routes = load_from_file(&doc).unwrap();
+        let expression = first_script_expression(&routes);
+        assert_eq!(expression.source, "40 + 2");
+
+        // Missing sibling: the error names the ABSOLUTE resolved path.
+        let doc2 = write_route_file(
+            &dir,
+            "routes/doc2.yaml",
+            "routes:\n  - id: r2\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"scripts/absent.rhai\"\n",
+        );
+        let err = load_from_file(&doc2)
+            .err()
+            .expect("load must fail")
+            .to_string();
+        let resolved = dir.path().join("routes/scripts/absent.rhai");
+        assert!(
+            err.contains(&resolved.display().to_string()),
+            "absolute resolved path missing: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_script_file_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "blank.rhai", " \n\t\n");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"blank.rhai\"\n",
+        );
+
+        let err = load_from_file(&path)
+            .err()
+            .expect("load must fail")
+            .to_string();
+        assert!(err.contains("empty"), "got: {err}");
+        let resolved = dir.path().join("blank.rhai");
+        assert!(
+            err.contains(&resolved.display().to_string()),
+            "resolved path missing: {err}"
+        );
+    }
+
+    #[test]
+    fn script_contents_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "verbatim.rhai", "${env:SECRET}");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"verbatim.rhai\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        let expression = first_script_expression(&routes);
+        assert_eq!(expression.source, "${env:SECRET}");
+    }
+
+    #[test]
+    fn value_source_accepts_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "v.rhai", "${body}");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - set_header:\n          key: k\n          source_file: \"v.rhai\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::DeclarativeSetHeader { value, .. } => {
+                assert_eq!(
+                    value,
+                    &ValueSourceDef::Expression(LanguageExpressionDef {
+                        language: "rhai".to_string(),
+                        source: "${body}".to_string(),
+                    })
+                );
+            }
+            other => panic!("expected DeclarativeSetHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn predicate_block_accepts_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "p.rhai", "${body} != null");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - filter:\n          source_file: \"p.rhai\"\n          steps:\n            - to: \"log:info\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::DeclarativeFilter { predicate, .. } => {
+                assert_eq!(predicate.language, "rhai");
+                assert_eq!(predicate.source, "${body} != null");
+            }
+            other => panic!("expected DeclarativeFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loop_while_accepts_source_file() {
+        let dir = tempfile::tempdir().unwrap();
+        write_route_file(&dir, "w.rhai", "${body} < 10");
+        let path = write_route_file(
+            &dir,
+            "doc.yaml",
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - loop:\n          while:\n            source_file: \"w.rhai\"\n          steps:\n            - to: \"log:info\"\n",
+        );
+
+        let routes = load_from_file(&path).unwrap();
+        match &routes[0].steps()[0] {
+            camel_core::route::BuilderStep::DeclarativeLoop {
+                while_predicate, ..
+            } => {
+                let predicate = while_predicate
+                    .as_ref()
+                    .expect("loop while predicate must be present");
+                assert_eq!(predicate.language, "rhai");
+                assert_eq!(predicate.source, "${body} < 10");
+            }
+            other => panic!("expected DeclarativeLoop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absolute_source_file_path_loads_from_string_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let abs = write_route_file(&dir, "abs.rhai", "7 * 6");
+        let yaml = format!(
+            "routes:\n  - id: r\n    from: \"direct:start\"\n    steps:\n      - script:\n          source_file: \"{}\"\n",
+            abs.display()
+        );
+
+        let routes = parse_yaml(&yaml).unwrap();
+        let expression = first_script_expression(&routes);
+        assert_eq!(expression.source, "7 * 6");
     }
 }
 

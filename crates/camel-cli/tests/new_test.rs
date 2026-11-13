@@ -330,6 +330,75 @@ async fn scaffolded_test_doc_passes() {
     assert_eq!(summary.failed, 0, "stdout:\n{out}\nstderr:\n{err}");
 }
 
+/// The scaffold ships a rhai script in `scripts/` referenced from the route by
+/// a `source_file` path relative to `routes/`. No `language:` key: the
+/// extension picks the language.
+#[test]
+fn new_template_emits_script_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("script-proj");
+    let name = project_path.to_str().unwrap();
+
+    run_new(name, "basic", false, ProfileLayout::Env);
+
+    let script_path = project_path.join("scripts/hello.rhai");
+    assert!(
+        script_path.exists(),
+        "scripts/hello.rhai must be scaffolded"
+    );
+    let script = fs::read_to_string(&script_path).unwrap();
+    assert!(
+        !script.trim().is_empty(),
+        "scaffolded script must not be empty"
+    );
+
+    let route = fs::read_to_string(project_path.join("routes/hello.yaml")).unwrap();
+    assert!(
+        route.contains("source_file: ../scripts/hello.rhai"),
+        "route must reference the script by path relative to routes/, got:\n{route}"
+    );
+    // The script step is the only language-bearing step in this template, so a
+    // `language:` key anywhere would mean the extension inference is bypassed.
+    assert!(
+        !route.contains("language:"),
+        "script step must infer its language from the .rhai extension, got:\n{route}"
+    );
+}
+
+/// `load_from_file` on the scaffolded route resolves the relative `source_file`
+/// against the route file's directory and compiles the file contents.
+#[test]
+fn scaffolded_route_loads_script_from_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("script-load-proj");
+    let name = project_path.to_str().unwrap();
+
+    run_new(name, "basic", false, ProfileLayout::Env);
+
+    let routes = camel_dsl::load_from_file(&project_path.join("routes/hello.yaml"))
+        .expect("scaffolded route must load");
+    let route = routes
+        .first()
+        .expect("scaffolded route document must define a route");
+    let expression = route
+        .steps()
+        .iter()
+        .find_map(|step| match step {
+            camel_core::route::BuilderStep::DeclarativeScript { expression } => Some(expression),
+            _ => None,
+        })
+        .expect("scaffolded route must contain a script step");
+    let script = fs::read_to_string(project_path.join("scripts/hello.rhai")).unwrap();
+    assert_eq!(
+        expression.language, "rhai",
+        "language must be inferred from the .rhai extension"
+    );
+    assert_eq!(
+        expression.source, script,
+        "script source must equal the file contents"
+    );
+}
+
 /// Wildcard discovery over the scaffolded `routes/` sees exactly one route
 /// (the test document is skipped by the reserved-suffix rule).
 #[test]

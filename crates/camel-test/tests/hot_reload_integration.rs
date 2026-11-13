@@ -7,10 +7,13 @@ use camel_component_api::test_support::timeout_wait;
 use camel_component_mock::MockComponent;
 use camel_component_timer::TimerComponent;
 use camel_core::CamelContext;
-use camel_core::reload_watcher::{resolve_watch_dirs, watch_and_reload};
+use camel_core::reload_watcher::{DevSourceKind, resolve_watch_dirs, watch_and_reload};
 use std::time::Duration;
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
+
+/// No-op script publication hook: these scenarios exercise route files only.
+fn ignore_script_publish(_rebuilt: &[String], _removed: &[String]) {}
 
 /// Helper: write a timer→mock route YAML file.
 fn write_route_yaml(path: &std::path::Path, route_id: &str, period: u64, mock_name: &str) {
@@ -101,7 +104,8 @@ async fn test_watcher_swaps_pipeline_on_file_change() {
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
-            Vec::<(String, Vec<std::path::PathBuf>)>::new,
+            Vec::<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>::new,
+            ignore_script_publish,
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(50),
@@ -189,7 +193,8 @@ async fn test_watcher_removes_route_on_file_deletion() {
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
-            Vec::<(String, Vec<std::path::PathBuf>)>::new,
+            Vec::<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>::new,
+            ignore_script_publish,
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(50),
@@ -293,7 +298,8 @@ async fn test_watcher_restart_preserves_non_running_route_state() {
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
-            Vec::<(String, Vec<std::path::PathBuf>)>::new,
+            Vec::<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>::new,
+            ignore_script_publish,
             Some(shutdown_clone),
             std::time::Duration::from_secs(10),
             std::time::Duration::from_millis(50),
@@ -384,7 +390,8 @@ async fn test_restart_with_from_uri_change_processes_exchanges_via_new_endpoint(
                 camel_dsl::discover_routes(&patterns_clone)
                     .map_err(|e| camel_api::CamelError::RouteError(e.to_string()))
             },
-            Vec::<(String, Vec<std::path::PathBuf>)>::new,
+            Vec::<(String, Vec<(std::path::PathBuf, DevSourceKind)>)>::new,
+            ignore_script_publish,
             Some(shutdown_clone),
             Duration::from_secs(10),
             Duration::from_millis(50),

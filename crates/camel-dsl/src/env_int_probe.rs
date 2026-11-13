@@ -284,7 +284,12 @@ mod tests {
         let (text, provenance) =
             interpolate_yaml_source_with_provenance(raw, &|_| None).expect("interpolation");
         let provenance = provenance.expect("tree-walk path carries provenance");
-        parse_with_probe(&text, Some(&provenance), crate::yaml::parse_yaml_for_probe)
+        parse_with_probe(&text, Some(&provenance), |probe_text| {
+            crate::yaml::parse_yaml_for_probe(
+                probe_text,
+                &crate::yaml::ScriptLoadContext::new(None),
+            )
+        })
     }
 
     fn assert_throttle_max_requests(routes: &[RouteDefinition], expected: usize) {
@@ -438,8 +443,13 @@ mod tests {
         })
         .expect("interpolation");
         let provenance = provenance.expect("tree-walk path carries provenance");
-        let routes = parse_with_probe(&text, Some(&provenance), crate::yaml::parse_yaml_for_probe)
-            .expect("probe must fix the explicit bool");
+        let routes = parse_with_probe(&text, Some(&provenance), |probe_text| {
+            crate::yaml::parse_yaml_for_probe(
+                probe_text,
+                &crate::yaml::ScriptLoadContext::new(None),
+            )
+        })
+        .expect("probe must fix the explicit bool");
         assert!(routes[0].auto_startup());
     }
 

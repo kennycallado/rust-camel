@@ -8,4 +8,8 @@ routes:
       - set_header:
           key: "source"
           value: "hello"
+      # Script steps read their body from a file. The path is relative to this
+      # route file; the .rhai extension picks the language.
+      - script:
+          source_file: ../scripts/hello.rhai
       - to: "log:done"

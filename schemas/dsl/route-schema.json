@@ -699,6 +699,14 @@
             "null"
           ]
         },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "uri_delimiter": {
           "default": ",",
           "type": "string"
@@ -1070,6 +1078,14 @@
             "null"
           ]
         },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "value": {
           "default": null,
           "type": [
@@ -1109,7 +1125,7 @@
         },
         {
           "$ref": "#/$defs/LoopFullConfig",
-          "description": "Full form with config block."
+          "description": "Full form with config block. Boxed so the one-shot config block does\nnot bloat the enum beside the `Count` shorthand\n(clippy::large_enum_variant); the AST is parse-time only."
         }
       ]
     },
@@ -1200,6 +1216,14 @@
         },
         "source": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
           "type": [
             "string",
             "null"
@@ -1341,6 +1365,14 @@
             "null"
           ]
         },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "steps": {
           "items": {
             "$ref": "#/$defs/RouteDslStep"
@@ -1400,6 +1432,14 @@
         },
         "source": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
           "type": [
             "string",
             "null"
@@ -2666,6 +2706,14 @@
             "null"
           ]
         },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "uri_delimiter": {
           "default": ",",
           "type": "string"
@@ -2757,18 +2805,31 @@
     },
     "ScriptData": {
       "additionalProperties": false,
+      "description": "`script:` step payload. Exactly one source form: `language`+`source`, or\n`source_file` (with optional `language`) which resolves to inline source\nat load time.",
       "properties": {
         "language": {
-          "type": "string"
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "source": {
-          "type": "string"
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "required": [
-        "language",
-        "source"
-      ],
       "type": "object"
     },
     "ScriptStep": {
@@ -2816,6 +2877,14 @@
         },
         "source": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
           "type": [
             "string",
             "null"
@@ -2903,6 +2972,14 @@
             "null"
           ]
         },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "value": {
           "default": null
         },
@@ -2967,6 +3044,14 @@
         },
         "source": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
           "type": [
             "string",
             "null"
@@ -3137,6 +3222,14 @@
         },
         "source": {
           "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_file": {
+          "default": null,
+          "description": "Path to a script file, resolved relative to the route file and read at\nload time; the extension picks the language unless `language` is set.",
           "type": [
             "string",
             "null"

@@ -476,6 +476,7 @@ fn lower_operation(
             value: Some(serde_json::Value::String(op.produces.trim().to_string())),
             language: None,
             source: None,
+            source_file: None,
             simple: None,
             rhai: None,
             jsonpath: None,
@@ -496,6 +497,7 @@ fn lower_operation(
             value: Some(serde_json::Value::Number(default_status.into())),
             language: None,
             source: None,
+            source_file: None,
             simple: None,
             rhai: None,
             jsonpath: None,
@@ -723,13 +725,20 @@ mod tests {
 
         // Convert each route's steps through the YAML conversion path.
         for step in &routes[0].steps {
-            let _ = crate::yaml::route_step_to_declarative_step(step.clone())
-                .unwrap_or_else(|e| panic!("step {step:?} must convert to DeclarativeStep: {e}"));
+            let _ = crate::yaml::route_step_to_declarative_step(
+                step.clone(),
+                &crate::yaml::ScriptLoadContext::new(None),
+            )
+            .unwrap_or_else(|e| panic!("step {step:?} must convert to DeclarativeStep: {e}"));
         }
 
         // Verify the last step specifically converts to SetHeaderIfAbsent.
         let last = routes[0].steps.last().unwrap();
-        let declarative = crate::yaml::route_step_to_declarative_step(last.clone()).unwrap();
+        let declarative = crate::yaml::route_step_to_declarative_step(
+            last.clone(),
+            &crate::yaml::ScriptLoadContext::new(None),
+        )
+        .unwrap();
         assert!(
             matches!(
                 declarative,
@@ -762,6 +771,7 @@ mod tests {
                             value: Some(serde_json::json!(202)),
                             language: None,
                             source: None,
+                            source_file: None,
                             simple: None,
                             rhai: None,
                             jsonpath: None,

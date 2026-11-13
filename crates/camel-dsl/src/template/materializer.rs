@@ -15,12 +15,13 @@ use camel_api::template::{
 use camel_core::route::RouteDefinition;
 
 use crate::compile::compile_declarative_route_with_stream_cache_threshold;
-use crate::json::parse_json_to_declarative;
+use crate::json::parse_json_to_declarative_with_script_ctx;
 use crate::model::{DeclarativeRoute, SecurityCompileContext};
 use crate::template::placeholder::{
     param_type_name, parse_typed_bool, parse_typed_number, substitute_placeholders,
     whole_node_placeholder,
 };
+use crate::yaml::ScriptLoadContext;
 
 /// Result of compiling a materialized template instance.
 pub struct CompiledMaterializationResult {
@@ -213,14 +214,30 @@ pub fn compute_instance_source_hash(
 /// 1. Resolve parameters (defaults + provided values).
 /// 2. Substitute placeholders in the template's JSON body.
 /// 3. Wrap the substituted body in `{ "routes": [substituted] }`.
-/// 4. Parse via [`parse_json_to_declarative`].
+/// 4. Parse via `parse_json_to_declarative_with_script_ctx`.
 /// 5. Apply the explicit `route_id` override (single-route templates only).
 ///
 /// Returns the resulting [`Vec<DeclarativeRoute>`] and the resolved
 /// parameters, so callers can build instance-sensitive source hashes.
+///
+/// This public wrapper keeps CWD semantics for `source_file`; discovery
+/// materializes through `materialize_template_with_script_ctx` so the
+/// file references resolve against the TEMPLATE document's directory.
 pub fn materialize_template(
     template: &RouteTemplateSpec,
     templated: &TemplatedRouteSpec,
+) -> Result<(Vec<DeclarativeRoute>, BTreeMap<String, String>), CamelError> {
+    materialize_template_with_script_ctx(template, templated, &ScriptLoadContext::new(None))
+}
+
+/// Context-aware core of [`materialize_template`]: parsing the substituted
+/// route body against `script_ctx` lets `source_file` (already parameter
+/// substituted) resolve against the template document's directory and
+/// records every read script for the caller's hash fold and watch staging.
+fn materialize_template_with_script_ctx(
+    template: &RouteTemplateSpec,
+    templated: &TemplatedRouteSpec,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<(Vec<DeclarativeRoute>, BTreeMap<String, String>), CamelError> {
     if template.routes.is_empty() {
         return Err(CamelError::Config(
@@ -262,8 +279,8 @@ pub fn materialize_template(
         CamelError::RouteError(format!("failed to serialize materialized template: {e}"))
     })?;
 
-    // Step 5: parse to declarative routes.
-    let mut routes = parse_json_to_declarative(&json_str)?;
+    // Step 5: parse to declarative routes against the supplied file context.
+    let mut routes = parse_json_to_declarative_with_script_ctx(&json_str, script_ctx)?;
 
     // Step 6: apply explicit route_id override from the instantiation.
     if let Some(override_id) = &templated.route_id {
@@ -282,13 +299,39 @@ pub fn materialize_template(
 /// by the template, each carrying the compiled definition and the
 /// instance-sensitive source hash (template body + resolved params + the
 /// route's effective id, post-override).
+///
+/// This public wrapper keeps CWD semantics for `source_file`; discovery calls
+/// `materialize_and_compile_with_script_ctx` with a context anchored at the
+/// template document's directory.
 pub fn materialize_and_compile(
     template: &RouteTemplateSpec,
     templated: &TemplatedRouteSpec,
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<Vec<CompiledMaterializationResult>, CamelError> {
-    let (declarative_routes, resolved) = materialize_template(template, templated)?;
+    materialize_and_compile_with_script_ctx(
+        template,
+        templated,
+        &ScriptLoadContext::new(None),
+        stream_cache_threshold,
+        security_ctx,
+    )
+}
+
+/// Context-aware core of [`materialize_and_compile`].
+///
+/// The caller owns `script_ctx`, so the scripts recorded while lowering the
+/// materialized routes can be staged as instance watch dependencies and folded
+/// into the instance source hash.
+pub(crate) fn materialize_and_compile_with_script_ctx(
+    template: &RouteTemplateSpec,
+    templated: &TemplatedRouteSpec,
+    script_ctx: &ScriptLoadContext,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<Vec<CompiledMaterializationResult>, CamelError> {
+    let (declarative_routes, resolved) =
+        materialize_template_with_script_ctx(template, templated, script_ctx)?;
 
     declarative_routes
         .into_iter()

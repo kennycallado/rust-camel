@@ -21,6 +21,7 @@ pub mod openapi;
 mod parity_tests;
 pub mod rest;
 pub mod route_ast;
+pub mod script_watch;
 pub mod template;
 mod util;
 pub(crate) mod virtual_config;
@@ -57,6 +58,7 @@ pub use model::{
     ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use openapi::generate_openapi;
+pub use script_watch::ScriptWatchRegistry;
 pub use util::MAX_ROUTE_FILE_SIZE;
 pub use yaml::{
     RouteDslRoute, RouteDslRoutes, RouteDslStep, RoutesEnvError,

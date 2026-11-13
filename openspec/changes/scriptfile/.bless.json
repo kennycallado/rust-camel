@@ -1,0 +1,9 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "expert": "@experts/e_gpt",
+  "hash": "sha256:ad90e33f0249598ff91a33d85c6965f5357205d522ea72206d71264017793bf5",
+  "session": "ses_e2a03777affeGSERgD8WRssWa8",
+  "rounds": 3,
+  "date": "2026-11-13"
+}

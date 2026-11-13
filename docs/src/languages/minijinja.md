@@ -39,7 +39,18 @@ Each `MinijinjaExpression` owns an `Arc<minijinja::Environment<'static>>`. Templ
 
 Every template source must wrap in exactly one top-level `{% autoescape "html"|"json"|"none" %}...{% endautoescape %}` block. A lexical validator enforces this at compile time and rejects malformed templates immediately. This gives render output a declared escape strategy before any data interpolation occurs. Synchronous MiniJinja rendering runs on a Tokio blocking thread via `spawn_blocking`. The route future wraps the join handle in `tokio::time::timeout` for the configured render deadline. MiniJinja fuel provides an instruction budget that stops runaway templates, infinite loops, and algorithmic-complexity attacks.
 
-Use MiniJinja for template-driven body generation: HTML pages, JSON payloads, and prompt strings assembled from multiple fields. For a body derived from a single expression, the [transform](../eip/transform.md) step is simpler. Phase 1 covers inline templates only. External file loading, `{% include %}`, template inheritance, and hot-reload belong to Phase 2.
+Use MiniJinja for template-driven body generation: HTML pages, JSON payloads, and prompt strings assembled from multiple fields. For a body derived from a single expression, the [transform](../eip/transform.md) step is simpler. Templates are inline by default. A `source_file` reference loads one from a file. The engine does not evaluate `{% include %}` or template inheritance. `{% include %}`, template inheritance, and hot-reload belong to the Phase 2 template component (`camel-template`, bd rc-64if).
+
+## Scripts from files
+
+A `source_file` reference loads the template from a file. The `.jinja` and `.jinja2` extensions infer `minijinja`. Any other extension needs an explicit `language: minijinja`.
+
+```yaml
+- transform:
+    source_file: templates/orders.jinja
+```
+
+The loader passes the file contents to the engine unchanged, byte for byte. The file needs the same single top-level `{% autoescape %}` block as an inline template. See [Scripts from files](../eip/script.md) for how to set the field and for the error cases.
 
 ## Body values and streams
 

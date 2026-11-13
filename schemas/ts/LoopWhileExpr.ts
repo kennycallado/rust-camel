@@ -3,4 +3,9 @@
 /**
  * Expression-only predicate for loop while condition.
  */
-export type LoopWhileExpr = { language: string | null, source: string | null, simple: string | null, rhai: string | null, jsonpath: string | null, xpath: string | null, };
+export type LoopWhileExpr = { language: string | null, source: string | null, 
+/**
+ * Path to a script file, resolved relative to the route file and read at
+ * load time; the extension picks the language unless `language` is set.
+ */
+source_file: string | null, simple: string | null, rhai: string | null, jsonpath: string | null, xpath: string | null, };

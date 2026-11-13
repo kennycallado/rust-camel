@@ -39,24 +39,28 @@ use crate::lifecycle::application::route_definition::RouteDefinition;
 pub struct ReloadWatcher;
 
 impl ReloadWatcher {
-    pub async fn watch_and_reload<F, D>(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn watch_and_reload<F, D, P>(
         watch_dirs: Vec<PathBuf>,
         controller: RuntimeExecutionHandle,
         discover_fn: F,
         dev_provider: D,
+        publish_script_sources: P,
         shutdown: Option<CancellationToken>,
         drain_timeout: Duration,
         debounce: Duration,
     ) -> Result<(), CamelError>
     where
         F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + Sync + 'static,
-        D: Fn() -> Vec<(String, Vec<PathBuf>)> + Send + Sync + 'static,
+        D: Fn() -> Vec<(String, Vec<(PathBuf, DevSourceKind)>)> + Send + Sync + 'static,
+        P: Fn(&[String], &[String]) + Send + Sync + 'static,
     {
         watch_and_reload(
             watch_dirs,
             controller,
             discover_fn,
             dev_provider,
+            publish_script_sources,
             shutdown,
             drain_timeout,
             debounce,
@@ -76,10 +80,14 @@ impl ReloadWatcher {
 /// * `controller` — live route controller to apply reload actions to.
 /// * `discover_fn` — called after each debounced route-file event to load
 ///   the current set of route definitions from disk.
-/// * `dev_provider` — synchronous snapshot of committed template reload
-///   targets as `(route_id, watch_sources)` pairs. Its parent directories are
-///   watched (non-recursively) so edits to template/proto assets can trigger
-///   a per-route template reload.
+/// * `dev_provider` — synchronous snapshot of committed dev targets as
+///   `(route_id, [(path, kind)])` pairs. Parent directories of every source are
+///   watched (non-recursively) so asset edits can trigger a reload: template
+///   sources dispatch a per-route template reload, script sources trigger a
+///   full reload pass.
+/// * `publish_script_sources` — called once after every non-aborted reload pass
+///   with the route ids rebuilt and removed by it. The script watch registry
+///   promotes staged dependencies for rebuilt routes and drops removed ones.
 /// * `shutdown` — optional token; cancel it to stop the watcher gracefully.
 ///
 /// The function runs indefinitely until the channel is closed, the shutdown
@@ -90,24 +98,28 @@ impl ReloadWatcher {
 /// Returns `Err` only on fatal initialisation failure (watcher cannot be
 /// created, or a route directory cannot be watched). Per-route reload errors
 /// are logged as warnings and do not terminate the loop.
-pub async fn watch_and_reload<F, D>(
+#[allow(clippy::too_many_arguments)]
+pub async fn watch_and_reload<F, D, P>(
     watch_dirs: Vec<PathBuf>,
     controller: RuntimeExecutionHandle,
     discover_fn: F,
     dev_provider: D,
+    publish_script_sources: P,
     shutdown: Option<CancellationToken>,
     drain_timeout: Duration,
     debounce: Duration,
 ) -> Result<(), CamelError>
 where
     F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + Sync + 'static,
-    D: Fn() -> Vec<(String, Vec<PathBuf>)> + Send + Sync + 'static,
+    D: Fn() -> Vec<(String, Vec<(PathBuf, DevSourceKind)>)> + Send + Sync + 'static,
+    P: Fn(&[String], &[String]) + Send + Sync + 'static,
 {
     watch_and_reload_inner(
         watch_dirs,
         controller,
         discover_fn,
         dev_provider,
+        publish_script_sources,
         shutdown,
         drain_timeout,
         debounce,
@@ -127,11 +139,12 @@ where
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-pub async fn watch_and_reload_with_barriers<F, D>(
+pub async fn watch_and_reload_with_barriers<F, D, P>(
     watch_dirs: Vec<PathBuf>,
     controller: RuntimeExecutionHandle,
     discover_fn: F,
     dev_provider: D,
+    publish_script_sources: P,
     shutdown: Option<CancellationToken>,
     drain_timeout: Duration,
     debounce: Duration,
@@ -140,13 +153,15 @@ pub async fn watch_and_reload_with_barriers<F, D>(
 ) -> Result<(), CamelError>
 where
     F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + Sync + 'static,
-    D: Fn() -> Vec<(String, Vec<PathBuf>)> + Send + Sync + 'static,
+    D: Fn() -> Vec<(String, Vec<(PathBuf, DevSourceKind)>)> + Send + Sync + 'static,
+    P: Fn(&[String], &[String]) + Send + Sync + 'static,
 {
     watch_and_reload_inner(
         watch_dirs,
         controller,
         discover_fn,
         dev_provider,
+        publish_script_sources,
         shutdown,
         drain_timeout,
         debounce,
@@ -157,11 +172,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn watch_and_reload_inner<F, D>(
+async fn watch_and_reload_inner<F, D, P>(
     watch_dirs: Vec<PathBuf>,
     controller: RuntimeExecutionHandle,
     discover_fn: F,
     dev_provider: D,
+    publish_script_sources: P,
     shutdown: Option<CancellationToken>,
     drain_timeout: Duration,
     debounce: Duration,
@@ -170,7 +186,8 @@ async fn watch_and_reload_inner<F, D>(
 ) -> Result<(), CamelError>
 where
     F: Fn() -> Result<Vec<RouteDefinition>, CamelError> + Send + Sync + 'static,
-    D: Fn() -> Vec<(String, Vec<PathBuf>)> + Send + Sync + 'static,
+    D: Fn() -> Vec<(String, Vec<(PathBuf, DevSourceKind)>)> + Send + Sync + 'static,
+    P: Fn(&[String], &[String]) + Send + Sync + 'static,
 {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>(64);
 
@@ -218,11 +235,11 @@ where
     let (parents_tx, parents_rx) = watch::channel(initial_parents);
 
     // Route-file reload pass: discovery + diff + action execution. Returns the
-    // route ids rebuilt by this pass; early-continue paths return an empty vec.
+    // ids rebuilt and removed by this pass; early-continue paths abort.
     let discover = Arc::new(discover_fn);
     let reload_pass = {
         let controller = controller.clone();
-        move || -> BoxFuture<'static, Result<Vec<String>, CamelError>> {
+        move || -> BoxFuture<'static, Result<PassOutcome, CamelError>> {
             let controller = controller.clone();
             let discover = Arc::clone(&discover);
             Box::pin(async move {
@@ -230,7 +247,7 @@ where
                     Ok(defs) => defs,
                     Err(e) => {
                         tracing::warn!("hot-reload: route discovery failed: {e}");
-                        return Ok(Vec::new());
+                        return Ok(PassOutcome::aborted_pass());
                     }
                 };
 
@@ -242,7 +259,7 @@ where
                             error = %err,
                             "hot-reload: failed to list runtime routes; skipping this reload cycle"
                         );
-                        return Ok(Vec::new());
+                        return Ok(PassOutcome::aborted_pass());
                     }
                 };
                 let mut runtime_hashes: HashMap<String, u64> = HashMap::new();
@@ -260,7 +277,7 @@ where
 
                 if actions.is_empty() {
                     tracing::debug!("hot-reload: no route changes detected");
-                    return Ok(Vec::new());
+                    return Ok(PassOutcome::default());
                 }
 
                 tracing::info!("hot-reload: applying {} reload action(s)", actions.len());
@@ -293,7 +310,11 @@ where
                         err.error
                     );
                 }
-                Ok(derive_rebuilt_route_ids(&actions_for_derivation, &errors))
+                Ok(PassOutcome {
+                    rebuilt: derive_rebuilt_route_ids(&actions_for_derivation, &errors),
+                    removed: derive_removed_route_ids(&actions_for_derivation, &errors),
+                    aborted: false,
+                })
             })
         }
     };
@@ -338,6 +359,7 @@ where
         controller,
         &dev_map_provider,
         &reload_pass,
+        &publish_script_sources,
         &dispatch_reload,
         parents_tx,
         shutdown.clone(),
@@ -525,6 +547,35 @@ where
     }
 }
 
+/// Outcome of one route-file reload pass.
+///
+/// `rebuilt` drives template dispatch suppression: a rebuilt route's assets are
+/// covered by the pass. `removed` lists routes whose `Remove` action executed
+/// without error, so the script watch registry can drop them. `aborted` marks a
+/// pass that ended before computing a diff (discovery or runtime snapshot
+/// failure); an aborted pass must not be published, because it says nothing
+/// about which routes still run.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct PassOutcome {
+    /// Route ids successfully rebuilt by this pass.
+    pub(crate) rebuilt: Vec<String>,
+    /// Route ids removed by this pass (successful `Remove` actions only).
+    pub(crate) removed: Vec<String>,
+    /// `true` when the pass ended early without a diff.
+    pub(crate) aborted: bool,
+}
+
+impl PassOutcome {
+    /// An aborted pass: no diff was computed, so nothing may be published.
+    fn aborted_pass() -> Self {
+        Self {
+            rebuilt: Vec::new(),
+            removed: Vec::new(),
+            aborted: true,
+        }
+    }
+}
+
 /// Route ids successfully rebuilt by one reload pass.
 ///
 /// `Add`, `Swap` and `Restart` rebuild the route, so their ids are candidates.
@@ -549,19 +600,45 @@ pub(crate) fn derive_rebuilt_route_ids(
         .collect()
 }
 
+/// Route ids removed by one reload pass.
+///
+/// Only `Remove` actions count. A `Remove` that reported an error did not stop
+/// the route, so it keeps running and its script targets must be retained.
+pub(crate) fn derive_removed_route_ids(
+    actions: &[ReloadAction],
+    errors: &[ReloadError],
+) -> Vec<String> {
+    let failed: HashSet<&str> = errors.iter().map(|err| err.route_id.as_str()).collect();
+    actions
+        .iter()
+        .filter_map(|action| match action {
+            ReloadAction::Remove { route_id } => Some(route_id),
+            ReloadAction::Swap { .. }
+            | ReloadAction::Restart { .. }
+            | ReloadAction::Add { .. }
+            | ReloadAction::Skip { .. } => None,
+        })
+        .filter(|route_id| !failed.contains(route_id.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// Debounced watch loop extracted from [`watch_and_reload`] so tests can drive
 /// it with a synthetic event source.
 ///
-/// The loop classifies each debounced batch: route files run `reload_pass`,
-/// dev-target edits dispatch a per-route template reload, and unrelated events
-/// are ignored.
+/// The loop classifies each debounced batch: route files and script sources run
+/// `reload_pass` once, template edits dispatch a per-route template reload, and
+/// unrelated events are ignored. A successful, non-aborted pass publishes its
+/// [`PassOutcome`] through `publish_script_sources` so the script watch
+/// registry can promote or drop per-route script dependencies.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_reload_loop(
     mut event_rx: mpsc::Receiver<notify::Result<Event>>,
     route_roots: Vec<PathBuf>,
     _controller: RuntimeExecutionHandle,
     dev_provider: &(dyn Fn() -> DevTargetMap + Send + Sync),
-    reload_pass: &(dyn Fn() -> BoxFuture<'static, Result<Vec<String>, CamelError>> + Send + Sync),
+    reload_pass: &(dyn Fn() -> BoxFuture<'static, Result<PassOutcome, CamelError>> + Send + Sync),
+    publish_script_sources: &(dyn Fn(&[String], &[String]) + Send + Sync),
     dispatch_reload: &(dyn Fn(&str) -> BoxFuture<'static, Result<(), CamelError>> + Send + Sync),
     parents_tx: watch::Sender<Vec<PathBuf>>,
     shutdown: Option<CancellationToken>,
@@ -634,9 +711,9 @@ pub(crate) async fn run_reload_loop(
             }
         }
 
-        let has_route_file = batch
+        let has_full_pass_trigger = batch
             .iter()
-            .any(|(class, _)| *class == EventClass::RouteFile);
+            .any(|(class, _)| matches!(*class, EventClass::RouteFile | EventClass::ScriptSource));
         let mut pending: BTreeSet<String> = BTreeSet::new();
         for (class, event) in &batch {
             if *class == EventClass::DevTarget {
@@ -647,10 +724,18 @@ pub(crate) async fn run_reload_loop(
         }
 
         let mut rebuilt: HashSet<String> = HashSet::new();
-        if has_route_file {
+        if has_full_pass_trigger {
             tracing::info!("hot-reload: file change detected — reloading routes");
             match reload_pass().await {
-                Ok(route_ids) => rebuilt = route_ids.into_iter().collect(),
+                Ok(outcome) => {
+                    rebuilt = outcome.rebuilt.iter().cloned().collect();
+                    // An aborted pass computed no diff, so it says nothing
+                    // about which routes still run: publishing it would let the
+                    // registry react to a phantom empty outcome.
+                    if !outcome.aborted {
+                        publish_script_sources(&outcome.rebuilt, &outcome.removed);
+                    }
+                }
                 Err(err) => tracing::warn!("hot-reload: reload pass failed: {err}"),
             }
             // Re-derive after the route pass: a rebuilt route's assets are
@@ -696,77 +781,121 @@ pub(crate) async fn run_reload_loop(
 ///
 /// `None` (no class) is the ignore outcome: the event matches neither a
 /// dev-target source nor a route file.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the extracted loop (Task 2.2)
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventClass {
     /// YAML/JSON route definition under a configured route root.
     RouteFile,
-    /// Any file (template, proto, include, …) declared by a reload target.
+    /// Any template asset (template, proto, include, …) declared by a reload
+    /// target. Dispatched per route as `ReloadTemplates`.
     DevTarget,
+    /// Script file (`.rhai`, `.js`, …) declared as a route script source.
+    /// Triggers a full reload pass so the DSL can re-read the file.
+    ScriptSource,
 }
 
-/// Path → route-id edges for one snapshot of committed dev-target sources.
+/// Kind of a watched dev source.
+///
+/// Templates are reloaded per route (`ReloadTemplates`); scripts feed the
+/// script watch registry and trigger a full route reload pass so discovery
+/// re-reads the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DevSourceKind {
+    /// Template/proto/include asset owned by a template reload target.
+    Template,
+    /// Script file read by a route's `script:` step (and friends).
+    Script,
+}
+
+/// Path → route-id edges for one snapshot of committed dev-target sources,
+/// split by [`DevSourceKind`].
 ///
 /// Paths are normalized on insert and lookup (see [`normalize_path`]) so a
 /// relative source and an absolute event path for the same file compare equal.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the extracted loop (Task 2.2)
+/// Template accessors (`contains_path`, `routes_for`, `has_targets_for`) only
+/// see template entries; `script_routes_for` only sees script entries.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DevTargetMap {
-    path_to_routes: HashMap<PathBuf, HashSet<String>>,
+    template_path_to_routes: HashMap<PathBuf, HashSet<String>>,
+    script_path_to_routes: HashMap<PathBuf, HashSet<String>>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the extracted loop (Task 2.2)
+#[cfg_attr(not(test), allow(dead_code))]
 impl DevTargetMap {
-    /// Build the map from `(route_id, watch_sources)` pairs.
-    pub(crate) fn from_sources(sources: &[(String, Vec<PathBuf>)]) -> Self {
-        let mut path_to_routes: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+    /// Build the map from `(route_id, (path, kind))` pairs.
+    pub(crate) fn from_sources(sources: &[(String, Vec<(PathBuf, DevSourceKind)>)]) -> Self {
+        let mut map = Self::default();
         for (route_id, paths) in sources {
-            for path in paths {
-                path_to_routes
+            for (path, kind) in paths {
+                let by_path = match kind {
+                    DevSourceKind::Template => &mut map.template_path_to_routes,
+                    DevSourceKind::Script => &mut map.script_path_to_routes,
+                };
+                by_path
                     .entry(normalize_path(path))
                     .or_default()
                     .insert(route_id.clone());
             }
         }
-        Self { path_to_routes }
+        map
     }
 
-    /// Returns `true` when `path` is a tracked source.
+    /// Returns `true` when `path` is a tracked template source.
     pub(crate) fn contains_path(&self, path: &Path) -> bool {
-        self.path_to_routes.contains_key(&normalize_path(path))
+        self.template_path_to_routes
+            .contains_key(&normalize_path(path))
     }
 
-    /// Route ids that declare `path`; empty when the path is not tracked.
+    /// Route ids that declare `path` as a template source; empty when the path
+    /// is not tracked.
     pub(crate) fn routes_for(&self, path: &Path) -> HashSet<String> {
-        self.path_to_routes
+        self.template_path_to_routes
             .get(&normalize_path(path))
             .cloned()
             .unwrap_or_default()
     }
 
-    /// Returns `true` when `route_id` still declares at least one tracked source.
+    /// Returns `true` when `path` is a tracked script source.
+    pub(crate) fn contains_script_path(&self, path: &Path) -> bool {
+        self.script_path_to_routes
+            .contains_key(&normalize_path(path))
+    }
+
+    /// Route ids that declare `path` as a script source; empty when the path is
+    /// not tracked.
+    pub(crate) fn script_routes_for(&self, path: &Path) -> HashSet<String> {
+        self.script_path_to_routes
+            .get(&normalize_path(path))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Returns `true` when `route_id` still declares at least one tracked
+    /// template source.
     pub(crate) fn has_targets_for(&self, route_id: &str) -> bool {
-        self.path_to_routes
+        self.template_path_to_routes
             .values()
             .any(|routes| routes.contains(route_id))
     }
 
-    /// Unique parent directories of every tracked source.
+    /// Unique parent directories of every tracked source, template or script.
     ///
     /// Directories already subscribed as route roots are NOT removed here;
     /// that subtraction belongs to the watcher wrapper.
     pub(crate) fn parent_dirs(&self) -> Vec<PathBuf> {
-        self.path_to_routes
+        self.template_path_to_routes
             .keys()
+            .chain(self.script_path_to_routes.keys())
             .filter_map(|path| path.parent().map(Path::to_path_buf))
             .collect::<HashSet<_>>()
             .into_iter()
             .collect()
     }
 
-    /// Returns `true` when no sources are tracked.
+    /// Returns `true` when no sources of either kind are tracked.
     pub(crate) fn is_empty(&self) -> bool {
-        self.path_to_routes.is_empty()
+        self.template_path_to_routes.is_empty() && self.script_path_to_routes.is_empty()
     }
 }
 
@@ -836,10 +965,14 @@ fn is_route_file_path(path: &Path, route_roots: &[PathBuf]) -> bool {
 /// Classify a notify event against the dev-target map and route roots.
 ///
 /// Dev-target paths take precedence over the route-file extension check, so a
-/// tracked `.yaml` template source is treated as a dev target. Events in
-/// asset-only directories (outside every route root) return `None` and must be
-/// ignored.
-#[cfg_attr(not(test), allow(dead_code))] // consumed by the extracted loop (Task 2.2)
+/// tracked `.yaml` template source is treated as a dev target. A tracked
+/// script source yields [`EventClass::ScriptSource`]; scripts are checked after
+/// templates because a path cannot be both kinds of target for the same route,
+/// and before the route-file extension check because a script source may itself
+/// be a `.yaml`/`.yml`/`.json` file under a route root.
+/// Events in asset-only directories (outside every route root) return `None`
+/// and must be ignored.
+#[cfg_attr(not(test), allow(dead_code))]
 fn classify_event(
     event: &Event,
     dev_map: &DevTargetMap,
@@ -851,6 +984,14 @@ fn classify_event(
 
     if event.paths.iter().any(|path| dev_map.contains_path(path)) {
         return Some(EventClass::DevTarget);
+    }
+
+    if event
+        .paths
+        .iter()
+        .any(|path| dev_map.contains_script_path(path))
+    {
+        return Some(EventClass::ScriptSource);
     }
 
     if event
@@ -931,14 +1072,14 @@ mod tests {
     use camel_api::CamelError;
 
     use super::{
-        DevTargetMap, EventClass, ReloadWatcher, bounded_dispatch, classify_event,
-        derive_rebuilt_route_ids, is_reload_kind, is_route_file_path, normalize_path,
-        publish_parents, reload_dispatch_bound, resolve_watch_dirs, run_reload_loop,
-        watch_and_reload, watch_and_reload_with_barriers,
+        DevSourceKind, DevTargetMap, EventClass, PassOutcome, ReloadWatcher, bounded_dispatch,
+        classify_event, derive_rebuilt_route_ids, derive_removed_route_ids, is_reload_kind,
+        is_route_file_path, normalize_path, publish_parents, reload_dispatch_bound,
+        resolve_watch_dirs, run_reload_loop, watch_and_reload, watch_and_reload_with_barriers,
     };
 
     type ReloadPass =
-        Box<dyn Fn() -> BoxFuture<'static, Result<Vec<String>, CamelError>> + Send + Sync>;
+        Box<dyn Fn() -> BoxFuture<'static, Result<PassOutcome, CamelError>> + Send + Sync>;
     type DispatchReload =
         Box<dyn Fn(&str) -> BoxFuture<'static, Result<(), CamelError>> + Send + Sync>;
 
@@ -1072,17 +1213,20 @@ mod tests {
         let (version_tx, version_rx) = watch::channel(0u64);
         let shutdown = CancellationToken::new();
         let provider = move || {
-            TemplateReloadRegistry::global()
-                .route_watch_sources()
-                .into_iter()
-                .filter(|(route, _)| route.as_str() == route_id.as_str())
-                .collect::<Vec<(String, Vec<PathBuf>)>>()
+            template_kind_sources(
+                TemplateReloadRegistry::global()
+                    .route_watch_sources()
+                    .into_iter()
+                    .filter(|(route, _)| route.as_str() == route_id.as_str())
+                    .collect::<Vec<(String, Vec<PathBuf>)>>(),
+            )
         };
         let handle = tokio::spawn(watch_and_reload_with_barriers(
             watch_dirs,
             controller,
             discover_fn,
             provider,
+            noop_publish,
             Some(shutdown.clone()),
             Duration::from_millis(50),
             Duration::from_millis(20),
@@ -1135,8 +1279,31 @@ mod tests {
             let rebuilt = rebuilt.clone();
             Box::pin(async move {
                 calls.fetch_add(1, Ordering::SeqCst);
-                Ok(rebuilt)
+                Ok(PassOutcome {
+                    rebuilt,
+                    removed: Vec::new(),
+                    aborted: false,
+                })
             })
+        })
+    }
+
+    /// Publish hook that ignores every outcome. Integration scenarios that do
+    /// not exercise script sources pass this.
+    fn noop_publish(_rebuilt: &[String], _removed: &[String]) {}
+
+    /// Recorded `(rebuilt, removed)` pairs from a publish hook.
+    type PublishLog = Arc<Mutex<Vec<(Vec<String>, Vec<String>)>>>;
+    /// Publish hook accepting one pass outcome.
+    type PublishHook = Box<dyn Fn(&[String], &[String]) + Send + Sync>;
+
+    /// Publish hook that records every `(rebuilt, removed)` pair it receives.
+    fn publish_logger(calls: PublishLog) -> PublishHook {
+        Box::new(move |rebuilt: &[String], removed: &[String]| {
+            calls
+                .lock()
+                .expect("publish log poisoned")
+                .push((rebuilt.to_vec(), removed.to_vec()));
         })
     }
 
@@ -1259,7 +1426,8 @@ mod tests {
             vec![],
             ctx.runtime_execution_handle(),
             || Ok(vec![]),
-            Vec::<(String, Vec<PathBuf>)>::new,
+            Vec::<(String, Vec<(PathBuf, DevSourceKind)>)>::new,
+            noop_publish,
             Some(token),
             Duration::from_millis(1),
             Duration::from_millis(1),
@@ -1377,16 +1545,46 @@ mod tests {
     }
 
     fn make_dev_map(sources: &[(&str, &[&str])]) -> DevTargetMap {
-        let owned: Vec<(String, Vec<PathBuf>)> = sources
+        let owned: Vec<(String, Vec<(PathBuf, DevSourceKind)>)> = sources
             .iter()
             .map(|(route, paths)| {
                 (
                     (*route).to_string(),
-                    paths.iter().map(PathBuf::from).collect(),
+                    paths
+                        .iter()
+                        .map(|path| (PathBuf::from(path), DevSourceKind::Template))
+                        .collect(),
                 )
             })
             .collect();
         DevTargetMap::from_sources(&owned)
+    }
+
+    /// Build a dev map from `(route, path, kind)` triples.
+    fn make_kinded_dev_map(sources: &[(&str, &str, DevSourceKind)]) -> DevTargetMap {
+        let owned: Vec<(String, Vec<(PathBuf, DevSourceKind)>)> = sources
+            .iter()
+            .map(|(route, path, kind)| ((*route).to_string(), vec![(PathBuf::from(path), *kind)]))
+            .collect();
+        DevTargetMap::from_sources(&owned)
+    }
+
+    /// Wrap a plain template watch snapshot as kind-tagged sources.
+    fn template_kind_sources(
+        sources: Vec<(String, Vec<PathBuf>)>,
+    ) -> Vec<(String, Vec<(PathBuf, DevSourceKind)>)> {
+        sources
+            .into_iter()
+            .map(|(route, paths)| {
+                (
+                    route,
+                    paths
+                        .into_iter()
+                        .map(|path| (path, DevSourceKind::Template))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     fn modify_content() -> EventKind {
@@ -1467,8 +1665,21 @@ mod tests {
         let undeclared = PathBuf::from("/work/proto/never_declared.proto");
 
         let sources = vec![
-            ("t1".to_string(), vec![a.clone(), b.clone(), c.clone()]),
-            ("v1".to_string(), vec![schema.clone(), import.clone()]),
+            (
+                "t1".to_string(),
+                vec![
+                    (a.clone(), DevSourceKind::Template),
+                    (b.clone(), DevSourceKind::Template),
+                    (c.clone(), DevSourceKind::Template),
+                ],
+            ),
+            (
+                "v1".to_string(),
+                vec![
+                    (schema.clone(), DevSourceKind::Template),
+                    (import.clone(), DevSourceKind::Template),
+                ],
+            ),
         ];
         let map = DevTargetMap::from_sources(&sources);
 
@@ -1490,13 +1701,22 @@ mod tests {
             (
                 "t1".to_string(),
                 vec![
-                    PathBuf::from("/work/site/page.jinja"),
-                    PathBuf::from("/work/site/other.jinja"),
+                    (
+                        PathBuf::from("/work/site/page.jinja"),
+                        DevSourceKind::Template,
+                    ),
+                    (
+                        PathBuf::from("/work/site/other.jinja"),
+                        DevSourceKind::Template,
+                    ),
                 ],
             ),
             (
                 "v1".to_string(),
-                vec![PathBuf::from("/work/proto/schema.proto")],
+                vec![(
+                    PathBuf::from("/work/proto/schema.proto"),
+                    DevSourceKind::Template,
+                )],
             ),
         ];
 
@@ -1533,6 +1753,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -1586,6 +1807,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -1637,6 +1859,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -1724,6 +1947,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -1808,6 +2032,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -1861,6 +2086,18 @@ mod tests {
     where
         P: Fn() -> DevTargetMap + Send + Sync + 'static,
     {
+        drive_one_batch_with_hook(provider, reload_pass, &noop_publish, events).await
+    }
+
+    async fn drive_one_batch_with_hook<P>(
+        provider: P,
+        reload_pass: ReloadPass,
+        publish_script_sources: &(dyn Fn(&[String], &[String]) + Send + Sync),
+        events: Vec<Event>,
+    ) -> Vec<String>
+    where
+        P: Fn() -> DevTargetMap + Send + Sync + 'static,
+    {
         let ctx = CamelContext::builder()
             .build()
             .await
@@ -1879,6 +2116,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            publish_script_sources,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -2007,6 +2245,206 @@ mod tests {
         assert_eq!(dispatched, vec!["A".to_string()]);
     }
 
+    // ── script sources (Task 3.1) ───────────────────────────────────────────
+
+    #[test]
+    fn classify_script_path_yields_script_source_class() {
+        let dev_map = make_kinded_dev_map(&[("s1", "scripts/enrich.rhai", DevSourceKind::Script)]);
+        let script_path = PathBuf::from("scripts/enrich.rhai");
+        assert!(
+            dev_map.script_routes_for(&script_path).contains("s1"),
+            "the script source must map back to its route"
+        );
+        assert!(
+            dev_map.routes_for(&script_path).is_empty(),
+            "script sources must not appear as template targets"
+        );
+
+        let ev = make_event(&["scripts/enrich.rhai"], modify_content());
+        let roots = vec![PathBuf::from("routes")];
+
+        assert_eq!(
+            classify_event(&ev, &dev_map, &roots),
+            Some(EventClass::ScriptSource)
+        );
+    }
+
+    #[test]
+    fn classify_yaml_script_path_yields_script_source_not_route_file() {
+        // A `.yaml` script source under a route root matches both the script
+        // registry and the route-file extension check; the registry must win.
+        let dev_map =
+            make_kinded_dev_map(&[("s1", "routes/scripts/render.yaml", DevSourceKind::Script)]);
+        let script_path = PathBuf::from("routes/scripts/render.yaml");
+        assert!(
+            dev_map.script_routes_for(&script_path).contains("s1"),
+            "the script source must map back to its route"
+        );
+        assert!(
+            dev_map.routes_for(&script_path).is_empty(),
+            "script sources must not appear as template targets"
+        );
+
+        let ev = make_event(&["routes/scripts/render.yaml"], modify_content());
+        let roots = vec![PathBuf::from("routes")];
+
+        assert_eq!(
+            classify_event(&ev, &dev_map, &roots),
+            Some(EventClass::ScriptSource),
+            "a tracked .yaml script source must not classify as RouteFile or DevTarget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn script_event_triggers_full_reload_pass() {
+        let dev_map = make_kinded_dev_map(&[("s1", "scripts/enrich.rhai", DevSourceKind::Script)]);
+        let reload_calls = Arc::new(AtomicUsize::new(0));
+        let reload_pass = reload_pass_counter(Arc::clone(&reload_calls), Vec::new());
+
+        let dispatched = drive_one_batch(
+            dev_map,
+            reload_pass,
+            vec![modify_event("scripts/enrich.rhai")],
+        )
+        .await;
+
+        assert_eq!(
+            reload_calls.load(Ordering::SeqCst),
+            1,
+            "a script-only batch must run the full reload pass once"
+        );
+        assert!(
+            dispatched.is_empty(),
+            "a script source must not dispatch ReloadTemplates, got {dispatched:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn template_event_still_dispatches_reload_templates() {
+        let dev_map = make_dev_map(&[("t1", &["templates/page.jinja"])]);
+        let reload_calls = Arc::new(AtomicUsize::new(0));
+        let reload_pass = reload_pass_counter(Arc::clone(&reload_calls), Vec::new());
+
+        let dispatched = drive_one_batch(
+            dev_map,
+            reload_pass,
+            vec![modify_event("templates/page.jinja")],
+        )
+        .await;
+
+        assert_eq!(
+            reload_calls.load(Ordering::SeqCst),
+            0,
+            "a template-only batch must keep the per-route dispatch path"
+        );
+        assert_eq!(dispatched, vec!["t1".to_string()]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn script_and_route_edit_in_one_batch_single_pass() {
+        let dev_map = make_kinded_dev_map(&[("s1", "scripts/enrich.rhai", DevSourceKind::Script)]);
+        let reload_calls = Arc::new(AtomicUsize::new(0));
+        let reload_pass = reload_pass_counter(Arc::clone(&reload_calls), Vec::new());
+
+        drive_one_batch(
+            dev_map,
+            reload_pass,
+            vec![
+                modify_event("scripts/enrich.rhai"),
+                route_file_event("routes/a.yaml"),
+            ],
+        )
+        .await;
+
+        assert_eq!(
+            reload_calls.load(Ordering::SeqCst),
+            1,
+            "a mixed script+route batch must run exactly one reload pass"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publish_hook_called_with_outcome_after_pass() {
+        // A successful Remove appears in `removed`; a failed one does not,
+        // because the route keeps running and keeps its script targets.
+        let actions = vec![
+            ReloadAction::Remove {
+                route_id: "removed-ok".into(),
+            },
+            ReloadAction::Remove {
+                route_id: "removed-failed".into(),
+            },
+        ];
+        let errors = vec![super::ReloadError {
+            route_id: "removed-failed".into(),
+            action: "remove".into(),
+            error: CamelError::RouteError("removal failed".to_string()),
+        }];
+        assert_eq!(
+            derive_removed_route_ids(&actions, &errors),
+            vec!["removed-ok".to_string()],
+            "a failed removal must stay out of the removed set"
+        );
+
+        // Non-aborted pass: the hook sees exactly one (rebuilt, removed) pair.
+        let published = Arc::new(Mutex::new(Vec::new()));
+        let hook = publish_logger(Arc::clone(&published));
+        let outcome = PassOutcome {
+            rebuilt: vec!["rebuilt-1".to_string()],
+            removed: vec!["removed-ok".to_string()],
+            aborted: false,
+        };
+        let reload_pass: ReloadPass = Box::new(move || {
+            let outcome = outcome.clone();
+            Box::pin(async move { Ok(outcome) })
+        });
+        let dev_map = make_kinded_dev_map(&[("s1", "scripts/enrich.rhai", DevSourceKind::Script)]);
+        let _ = drive_one_batch_with_hook(
+            move || dev_map.clone(),
+            reload_pass,
+            &*hook,
+            vec![modify_event("scripts/enrich.rhai")],
+        )
+        .await;
+        assert_eq!(
+            *published.lock().expect("publish log poisoned"),
+            vec![(
+                vec!["rebuilt-1".to_string()],
+                vec!["removed-ok".to_string()]
+            )],
+            "a non-aborted pass must publish its outcome exactly once"
+        );
+
+        // Aborted pass: never publishes. A discovery failure says nothing
+        // about which routes still run.
+        let aborted_published = Arc::new(Mutex::new(Vec::new()));
+        let aborted_hook = publish_logger(Arc::clone(&aborted_published));
+        let aborted_pass: ReloadPass = Box::new(|| {
+            Box::pin(async {
+                Ok(PassOutcome {
+                    rebuilt: Vec::new(),
+                    removed: Vec::new(),
+                    aborted: true,
+                })
+            })
+        });
+        let dev_map = make_kinded_dev_map(&[("s1", "scripts/enrich.rhai", DevSourceKind::Script)]);
+        let _ = drive_one_batch_with_hook(
+            move || dev_map.clone(),
+            aborted_pass,
+            &*aborted_hook,
+            vec![modify_event("scripts/enrich.rhai")],
+        )
+        .await;
+        assert!(
+            aborted_published
+                .lock()
+                .expect("publish log poisoned")
+                .is_empty(),
+            "an aborted pass must never publish"
+        );
+    }
+
     /// Covers the production rebuilt-id derivation end-to-end against the real
     /// reload executor: only Add, Swap and Restart routes that did not error
     /// survive; Skip, Remove and the failed Swap are filtered out.
@@ -2113,6 +2551,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
@@ -2201,7 +2640,8 @@ mod tests {
         let _good = reg.register(good.as_dyn());
         let _bad = reg.register(bad.as_dyn());
 
-        let provider = move || DevTargetMap::from_sources(&reg.route_watch_sources());
+        let provider =
+            move || DevTargetMap::from_sources(&template_kind_sources(reg.route_watch_sources()));
         let reload_pass: ReloadPass = Box::new(|| {
             Box::pin(async { Err(CamelError::Config("discovery failed".to_string())) })
         });
@@ -2221,7 +2661,7 @@ mod tests {
             vec!["failed-pass-good".to_string()],
             "the surviving target must dispatch even after a failed route pass"
         );
-        let map = DevTargetMap::from_sources(&reg.route_watch_sources());
+        let map = DevTargetMap::from_sources(&template_kind_sources(reg.route_watch_sources()));
         assert!(
             !map.routes_for(&PathBuf::from("templates/good.jinja"))
                 .is_empty(),
@@ -2243,7 +2683,8 @@ mod tests {
         target.set_pending(vec![old.clone(), new.clone()]);
         let _guard = reg.register(target.as_dyn());
 
-        let provider = move || DevTargetMap::from_sources(&reg.route_watch_sources());
+        let provider =
+            move || DevTargetMap::from_sources(&template_kind_sources(reg.route_watch_sources()));
         let reload_pass = reload_pass_counter(Arc::new(AtomicUsize::new(0)), Vec::new());
         let dispatch: DispatchReload = Box::new(move |_route_id: &str| {
             Box::pin(async move { reg.reload_route("rederive-route").await })
@@ -2264,6 +2705,7 @@ mod tests {
                 ctx.runtime_execution_handle(),
                 &provider,
                 &reload_pass,
+                &noop_publish,
                 &dispatch,
                 parents_tx,
                 Some(shutdown),
@@ -2284,7 +2726,7 @@ mod tests {
         .expect("post-commit re-derivation must publish the new parent dir");
         assert!(published.is_ok(), "parents channel closed");
 
-        let map = DevTargetMap::from_sources(&reg.route_watch_sources());
+        let map = DevTargetMap::from_sources(&template_kind_sources(reg.route_watch_sources()));
         assert!(
             !map.routes_for(&new).is_empty(),
             "re-derived map must route the newly committed closure file"
@@ -2319,7 +2761,8 @@ mod tests {
         let target_b = FakeReloadTarget::new(route_b, vec![b_source.clone()]);
         let _guard_b = reg.register(target_b.as_dyn());
 
-        let provider = move || DevTargetMap::from_sources(&reg.route_watch_sources());
+        let provider =
+            move || DevTargetMap::from_sources(&template_kind_sources(reg.route_watch_sources()));
         let reload_pass = reload_pass_counter(Arc::new(AtomicUsize::new(0)), Vec::new());
 
         let token = CancellationToken::new();
@@ -2371,6 +2814,7 @@ mod tests {
             ctx.runtime_execution_handle(),
             &provider,
             &reload_pass,
+            &noop_publish,
             &dispatch,
             parents_tx,
             Some(token.clone()),
