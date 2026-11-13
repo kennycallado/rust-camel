@@ -64,16 +64,9 @@ fn fails_if_directory_exists_and_not_empty() {
     let name = project_path.to_str().unwrap();
 
     // run_new calls process::exit(1), so we test via the actual camel binary
-    let bin = std::env::var("CAMEL_BIN_PATH").unwrap_or_else(|_| {
-        // The test binary lives in target/debug/deps/<hash>; navigate up to find camel
-        let mut path = std::env::current_exe().unwrap();
-        path.pop(); // remove test binary name (e.g. new_test-<hash>)
-        path.pop(); // pop 'deps'
-        path.push("camel");
-        path.to_str().unwrap().to_string()
-    });
+    let bin = env!("CARGO_BIN_EXE_camel");
 
-    let output = std::process::Command::new(&bin)
+    let output = std::process::Command::new(bin)
         .args(["new", name, "--template", "basic"])
         .output()
         .unwrap();
@@ -172,15 +165,9 @@ fn unknown_template_returns_error() {
     let project_path = dir.path().join("tmpl-proj");
     let name = project_path.to_str().unwrap();
 
-    let bin = std::env::var("CAMEL_BIN_PATH").unwrap_or_else(|_| {
-        let mut path = std::env::current_exe().unwrap();
-        path.pop();
-        path.pop();
-        path.push("camel");
-        path.to_str().unwrap().to_string()
-    });
+    let bin = env!("CARGO_BIN_EXE_camel");
 
-    let output = std::process::Command::new(&bin)
+    let output = std::process::Command::new(bin)
         .args(["new", name, "--template", "nonexistent"])
         .output()
         .unwrap();
@@ -198,15 +185,9 @@ fn unknown_template_returns_error() {
 
 #[test]
 fn rejects_path_traversal_in_name() {
-    let bin = std::env::var("CAMEL_BIN_PATH").unwrap_or_else(|_| {
-        let mut path = std::env::current_exe().unwrap();
-        path.pop();
-        path.pop();
-        path.push("camel");
-        path.to_str().unwrap().to_string()
-    });
+    let bin = env!("CARGO_BIN_EXE_camel");
 
-    let output = std::process::Command::new(&bin)
+    let output = std::process::Command::new(bin)
         .args(["new", "../evil"])
         .output()
         .unwrap();
@@ -230,15 +211,9 @@ fn stdout_shows_next_steps() {
     let project_path = dir.path().join("stdout-proj");
     let name = project_path.to_str().unwrap();
 
-    let bin = std::env::var("CAMEL_BIN_PATH").unwrap_or_else(|_| {
-        let mut path = std::env::current_exe().unwrap();
-        path.pop();
-        path.pop();
-        path.push("camel");
-        path.to_str().unwrap().to_string()
-    });
+    let bin = env!("CARGO_BIN_EXE_camel");
 
-    let output = std::process::Command::new(&bin)
+    let output = std::process::Command::new(bin)
         .args(["new", name])
         .output()
         .unwrap();
