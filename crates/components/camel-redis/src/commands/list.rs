@@ -1,7 +1,7 @@
 use super::{
-    get_i64_header, get_str_header, get_u64_header, require_key, require_value, value_to_redis_arg,
+    get_i64_header, get_str_header, get_u64_header, require_key, require_value,
+    resolve_value_bytes, value_to_redis_arg,
 };
-#[cfg(test)]
 use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -233,36 +233,36 @@ pub async fn dispatch(
     let result: serde_json::Value = match cmd {
         RedisCommand::Lpush => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "LPUSH", HEADER_VALUE)?;
             let n: i64 = conn
-                .lpush(&key, value_to_redis_arg(&value))
+                .lpush(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("LPUSH", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Rpush => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "RPUSH", HEADER_VALUE)?;
             let n: i64 = conn
-                .rpush(&key, value_to_redis_arg(&value))
+                .rpush(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("RPUSH", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Lpushx => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "LPUSHX", HEADER_VALUE)?;
             let n: i64 = conn
-                .lpush_exists(&key, value_to_redis_arg(&value))
+                .lpush_exists(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("LPUSHX", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Rpushx => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "RPUSHX", HEADER_VALUE)?;
             let n: i64 = conn
-                .rpush_exists(&key, value_to_redis_arg(&value))
+                .rpush_exists(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("RPUSHX", e))?;
             serde_json::json!(n)
@@ -330,13 +330,13 @@ pub async fn dispatch(
         RedisCommand::Linsert => {
             let key = require_key(exchange)?;
             let (mode, pivot) = resolve_linsert_operands(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "LINSERT", HEADER_VALUE)?;
             // Use redis::cmd for LINSERT since AsyncCommands doesn't have a direct method
             let n: i64 = redis::cmd("LINSERT")
                 .arg(&key)
                 .arg(mode)
                 .arg(pivot)
-                .arg(value_to_redis_arg(&value))
+                .arg(&value)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("LINSERT", e))?;
@@ -345,8 +345,8 @@ pub async fn dispatch(
         RedisCommand::Lset => {
             let key = require_key(exchange)?;
             let idx = resolve_index(exchange)?;
-            let value = require_value(exchange)?;
-            conn.lset::<_, _, ()>(&key, idx, value_to_redis_arg(&value))
+            let value = resolve_value_bytes(exchange, "LSET", HEADER_VALUE)?;
+            conn.lset::<_, _, ()>(&key, idx, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("LSET", e))?;
             serde_json::Value::Null

@@ -264,6 +264,9 @@ The [command handlers](src/commands/) define the inputs for each command.
 | Header | Description |
 |--------|-------------|
 | `CamelRedis.Key` | Redis key |
+| `CamelRedis.Value` | Value payload for value-writing commands. Falls back to the exchange body when absent |
+| `CamelRedis.Member` | `GEOADD` member payload. Falls back to the exchange body when absent |
+| `CamelRedis.Values` | Field/value map for `HMSET` and `MSET` |
 | `CamelRedis.Field` | Hash field (for H* commands) |
 | `CamelRedis.Channel` | Pub/Sub channel |
 | `CamelRedis.Score` | Sorted set score |
@@ -273,9 +276,22 @@ The [command handlers](src/commands/) define the inputs for each command.
 
 ### Command Results (from responses)
 
-Command results are written to the message body as JSON (`Body::Json`), not to an
-exchange header. Input payloads for value-oriented commands (`SET`, `APPEND`) are
-read from the `CamelRedis.Value` header.
+Command results are written to the message body, not to an exchange header. Most
+results are JSON (`Body::Json`). `GET` replies with `Body::Text` when the value
+is valid UTF-8, `Body::Bytes` when it is not, and `Body::Json(null)` for a
+missing key. `MGET` keeps the JSON array of strings and nulls when every element
+is nil or valid UTF-8. When any element is binary, `MGET` replies with
+`Body::Bytes` that holds the RESP encoding of the reply array. All other getters
+keep JSON replies.
+
+Value-oriented commands (`SET`, `APPEND`, `PUBLISH`, the `ZADD` member, the
+`GEOADD` member, and others) read the payload from `CamelRedis.Value` (or
+`CamelRedis.Member` for `GEOADD`) when the header is present, and from the
+exchange body otherwise. The body codec is `Body::Text` to UTF-8, `Body::Json`
+to compact JSON, `Body::Xml` to XML text, and `Body::Bytes` verbatim.
+`Body::Empty` and `Body::Stream` fail before any command is sent. `HMSET` reads
+`CamelRedis.Values` or a JSON object body. See
+[ADR-0098](../../../docs/adr/0098-redis-value-contract.md).
 
 ## Example: Caching Layer
 

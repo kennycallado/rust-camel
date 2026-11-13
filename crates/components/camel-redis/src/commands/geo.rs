@@ -1,6 +1,6 @@
 use super::{
     get_bool_header, get_f64_header, get_i64_header, get_str_header, get_str_vec_header,
-    require_key, require_str_header,
+    require_key, require_str_header, resolve_value_bytes,
 };
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -92,8 +92,12 @@ fn resolve_geo_search_shape(exchange: &Exchange) -> Result<GeoSearchShape, Camel
     }
 }
 
+/// Header holding the GEOADD member. `GEOPOS`/`GEODIST`/`GEOHASH`/`GEOSEARCH`
+/// still require it; `GEOADD` falls back to the exchange body when it is absent.
+const MEMBER_HEADER: &str = "CamelRedis.Member";
+
 fn require_member(exchange: &Exchange) -> Result<String, CamelError> {
-    require_str_header(exchange, "CamelRedis.Member").map(|s| s.to_string())
+    require_str_header(exchange, MEMBER_HEADER).map(|s| s.to_string())
 }
 
 fn require_member2(exchange: &Exchange) -> Result<String, CamelError> {
@@ -110,13 +114,13 @@ fn require_members(exchange: &Exchange) -> Result<Vec<String>, CamelError> {
         })
 }
 
-fn resolve_geoadd_args(exchange: &Exchange) -> Result<(String, f64, f64, String), CamelError> {
+fn resolve_geoadd_args(exchange: &Exchange) -> Result<(String, f64, f64, Vec<u8>), CamelError> {
     let key = require_key(exchange)?;
     let longitude = require_f64_header(exchange, "CamelRedis.Longitude")?;
     validate_longitude(longitude)?;
     let latitude = require_f64_header(exchange, "CamelRedis.Latitude")?;
     validate_latitude(latitude)?;
-    let member = require_member(exchange)?;
+    let member = resolve_value_bytes(exchange, "GEOADD", MEMBER_HEADER)?;
     Ok((key, longitude, latitude, member))
 }
 

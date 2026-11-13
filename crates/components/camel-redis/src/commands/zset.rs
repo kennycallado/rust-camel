@@ -1,8 +1,7 @@
 use super::{
     get_bool_header, get_f64_header, get_i64_header, get_str_header, get_str_vec_header,
-    require_key, require_value, value_to_redis_arg,
+    require_key, require_value, resolve_value_bytes, value_to_redis_arg,
 };
-#[cfg(test)]
 use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -282,9 +281,9 @@ pub async fn dispatch(
         RedisCommand::Zadd => {
             let key = require_key(exchange)?;
             let score = resolve_zadd_score(exchange)?;
-            let member = require_value(exchange)?;
+            let member = resolve_value_bytes(exchange, "ZADD", HEADER_VALUE)?;
             let n: i64 = conn
-                .zadd(&key, value_to_redis_arg(&member), score)
+                .zadd(&key, &member, score)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("ZADD", e))?;
             serde_json::json!(n)

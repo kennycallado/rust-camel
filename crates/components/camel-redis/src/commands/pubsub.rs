@@ -1,4 +1,5 @@
-use super::require_str_header;
+use super::{require_str_header, resolve_value_bytes};
+use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -27,25 +28,6 @@ pub(crate) fn resolve_publish_message(exchange: &Exchange) -> Result<String, Cam
         _ => Err(CamelError::ProcessorError(
             "Message body must be convertible to Text for PUBLISH".into(),
         )),
-    }
-}
-
-pub(crate) fn extract_publish_message(exchange: &mut Exchange) -> Result<String, CamelError> {
-    let body = std::mem::replace(&mut exchange.input.body, Body::Empty)
-        .try_into_text()
-        .map_err(|e| {
-            CamelError::ProcessorError(format!(
-                "Message body must be convertible to Text for PUBLISH: {}",
-                e
-            ))
-        })?;
-    // REDIS-014: No expect() — try_into_text guarantees Text variant on success
-    match body {
-        Body::Text(t) => Ok(t.to_string()),
-        other => Err(CamelError::ProcessorError(format!(
-            "Unexpected body type after try_into_text: {:?}",
-            other
-        ))),
     }
 }
 
@@ -91,7 +73,7 @@ pub async fn dispatch(
     let result: serde_json::Value = match cmd {
         RedisCommand::Publish => {
             let channel = extract_publish_channel(exchange)?;
-            let message = extract_publish_message(exchange)?;
+            let message = resolve_value_bytes(exchange, "PUBLISH", HEADER_VALUE)?;
 
             let receivers: i64 = conn
                 .publish(&channel, &message)
@@ -162,21 +144,6 @@ mod tests {
         let exchange = Exchange::new(Message::default());
         let err = extract_publish_channel(&exchange).expect_err("channel header is required");
         assert!(err.to_string().contains("CamelRedis.Channel"));
-    }
-
-    #[test]
-    fn test_extract_publish_message_from_text_body() {
-        let mut exchange = Exchange::new(Message::new(Body::Text("event-1".to_string())));
-        let message = extract_publish_message(&mut exchange).expect("text body should be accepted");
-        assert_eq!(message, "event-1");
-        assert!(matches!(exchange.input.body, Body::Empty));
-    }
-
-    #[test]
-    fn test_extract_publish_message_serializes_json_body() {
-        let mut exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({"a": 1}))));
-        let message = extract_publish_message(&mut exchange).expect("json body should serialize");
-        assert_eq!(message, "{\"a\":1}");
     }
 
     // --- build_redis_cmd tests ---

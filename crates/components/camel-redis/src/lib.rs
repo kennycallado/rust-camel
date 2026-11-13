@@ -283,3 +283,6 @@ mod blocking_pop_tests;
 #[cfg(test)]
 #[path = "stream_fake_tests.rs"]
 mod stream_fake_tests;
+
+#[cfg(test)]
+mod value_fake_tests;

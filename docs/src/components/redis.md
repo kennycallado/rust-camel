@@ -176,11 +176,11 @@ Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLE
 
 ### Geospatial
 
-`GEOADD` stores one member with its coordinates. `GEOPOS` reads the stored positions of one or more members. `GEODIST` measures the distance between two members. `GEOSEARCH` queries members near a center point by radius or by bounding box. `GEOHASH` returns the standard base-32 geohash of one or more members. Every argument comes from headers; the Producer overwrites the Exchange body with the JSON result.
+`GEOADD` stores one member with its coordinates. `GEOPOS` reads the stored positions of one or more members. `GEODIST` measures the distance between two members. `GEOSEARCH` queries members near a center point by radius or by bounding box. `GEOHASH` returns the standard base-32 geohash of one or more members. The arguments come from headers, except the `GEOADD` member, which falls back to the Exchange body. The Producer overwrites the Exchange body with the JSON result.
 
 | Operation | Required headers | Optional headers |
 | --- | --- | --- |
-| `GEOADD` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude`, `CamelRedis.Member` | — |
+| `GEOADD` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude` | `CamelRedis.Member` |
 | `GEOPOS` | `CamelRedis.Key`, `CamelRedis.Members` | — |
 | `GEODIST` | `CamelRedis.Key`, `CamelRedis.Member`, `CamelRedis.Member2` | `CamelRedis.Unit` |
 | `GEOSEARCH` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude`, and one shape | `CamelRedis.Unit`, `CamelRedis.WithDist`, `CamelRedis.WithCoord`, `CamelRedis.Count` |
@@ -205,11 +205,25 @@ The `member` field is a plain string. `distance` is a number in the requested un
 
 ## Producer
 
-`redis://host:port?command=GET` sends the Exchange body to Redis. The Producer holds a single multiplexed connection per Endpoint. The connection opens lazily on the first call and stays open for the route lifetime.
+The Producer sends the command named by `command=`. A value-writing command takes its payload from the value header or, when the header is absent, from the Exchange body. The Producer holds a single multiplexed connection per Endpoint. The connection opens lazily on the first call and stays open for the route lifetime.
 
-The `command` parameter picks one of the 80+ commands listed above. The Exchange body, headers, and the URI parameters supply the command arguments. Different commands read different headers. For example, `HSET` reads `CamelRedis.Key` and `CamelRedis.Value`. `LRANGE` reads `CamelRedis.Start` and `CamelRedis.End`. Missing required headers return `CamelError`. A send failure returns `Err` to the route `ErrorHandler`.
+The `command` parameter picks one of the 80+ commands listed above. The Exchange body, headers, and the URI parameters supply the command arguments. Different commands read different headers. For example, `HSET` reads `CamelRedis.Key`, and takes its value from `CamelRedis.Value` or from the Exchange body. `LRANGE` reads `CamelRedis.Start` and `CamelRedis.End`. Missing required headers return `CamelError`. A send failure returns `Err` to the route `ErrorHandler`.
 
 The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step and reports per-route metrics.
+
+### Value source and reply rule
+
+A value-writing command reads its value payload from the command's value header when that header is present, and from the Exchange body otherwise. No other value source exists. The header wins over the body, so a route that sets the header keeps its wire bytes unchanged ([ADR-0098](../adr/0098-redis-value-contract.md)).
+
+| Header | Commands | Rule |
+| --- | --- | --- |
+| `CamelRedis.Value` | `SET`, `SETEX`, `SETNX`, `APPEND`, `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LINSERT`, `LSET`, `HSET`, `HSETNX`, `SADD`, the `ZADD` member, `PUBLISH` | Value payload. The header wins. The body is the fallback. |
+| `CamelRedis.Member` | `GEOADD` | Member payload. The header wins. The body is the fallback. |
+| `CamelRedis.Values` | `HMSET`, `MSET` | Field/value map header. `HMSET` accepts a JSON object body as fallback (Text or UTF-8 Bytes bodies that parse as JSON objects are also accepted). |
+
+The body codec is shared by every value-writing command. `Body::Text` contributes UTF-8 bytes. `Body::Json` contributes compact JSON. `Body::Xml` contributes the XML text as UTF-8 bytes. `Body::Bytes` passes verbatim. `Body::Empty` and `Body::Stream` fail before any command is sent, with an error that names the command and the rejected variant.
+
+`GET` replies with `Body::Text` when the value is valid UTF-8, `Body::Bytes` when it is not, and `Body::Json(null)` for a missing key. `MGET` keeps the JSON array of strings and nulls when every element is nil or valid UTF-8. When any element is binary, `MGET` replies with `Body::Bytes` that holds the RESP encoding of the reply array, which `redis::parse_redis_value` decodes. Every other getter keeps its JSON reply.
 
 ### Command selection
 

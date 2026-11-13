@@ -1,8 +1,7 @@
 use super::{
-    get_i64_header, get_str_header, get_str_vec_header, require_key, require_value,
-    value_to_redis_arg,
+    body_variant_name, get_i64_header, get_str_header, get_str_vec_header, require_key,
+    require_value, resolve_value_bytes, value_to_redis_arg,
 };
-#[cfg(test)]
 use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -51,6 +50,64 @@ pub(crate) fn resolve_hash_values_map(
         .iter()
         .map(|(f, v)| (f.clone(), value_to_redis_arg(v)))
         .collect::<Vec<_>>())
+}
+
+/// Resolves the `HMSET` field/value pairs as raw bytes.
+///
+/// `CamelRedis.Values` keeps precedence and encodes exactly as before
+/// ([`resolve_hash_values_map`]); when the header is absent the map comes from
+/// the exchange body: a JSON object body is used as-is, and `Text`/`Bytes`
+/// bodies are parsed as a JSON object. Any other body form is rejected before
+/// the command reaches Redis, naming `HMSET` and the rejected variant.
+pub(crate) fn resolve_hmset_values(
+    exchange: &Exchange,
+) -> Result<Vec<(String, Vec<u8>)>, CamelError> {
+    if exchange.input.header("CamelRedis.Values").is_some() {
+        return Ok(resolve_hash_values_map(exchange)?
+            .into_iter()
+            .map(|(field, value)| (field, value.into_bytes()))
+            .collect());
+    }
+
+    Ok(hmset_body_map(&exchange.input.body)?
+        .iter()
+        .map(|(field, value)| (field.clone(), value_to_redis_arg(value).into_bytes()))
+        .collect())
+}
+
+/// Reads the `HMSET` field/value map from an exchange body.
+fn hmset_body_map(body: &Body) -> Result<serde_json::Map<String, serde_json::Value>, CamelError> {
+    match body {
+        Body::Json(serde_json::Value::Object(map)) => Ok(map.clone()),
+        Body::Text(text) => parse_hmset_body(text),
+        Body::Bytes(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => parse_hmset_body(text),
+            Err(err) => Err(CamelError::ProcessorError(format!(
+                "HMSET value: the Bytes body is not valid UTF-8: {err}"
+            ))),
+        },
+        Body::Json(_) => Err(unencodable_hmset_body("Body::Json")),
+        Body::Xml(_) => Err(unencodable_hmset_body("Body::Xml")),
+        Body::Empty => Err(unencodable_hmset_body("Body::Empty")),
+        Body::Stream(_) => Err(unencodable_hmset_body("Body::Stream")),
+        other => Err(unencodable_hmset_body(&body_variant_name(other))),
+    }
+}
+
+/// Parses a `Text`/`Bytes` body into the `HMSET` field/value map.
+fn parse_hmset_body(text: &str) -> Result<serde_json::Map<String, serde_json::Value>, CamelError> {
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).map_err(|e| {
+        CamelError::ProcessorError(format!(
+            "HMSET value: the exchange body is not a JSON object: {e}"
+        ))
+    })
+}
+
+/// Named error for a body form that cannot carry `HMSET` field/value pairs.
+fn unencodable_hmset_body(variant: &str) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "HMSET value: the exchange body is {variant}; provide a JSON object body or set CamelRedis.Values"
+    ))
 }
 
 pub(crate) fn resolve_hash_increment(exchange: &Exchange) -> Result<i64, CamelError> {
@@ -192,9 +249,9 @@ pub async fn dispatch(
         RedisCommand::Hset => {
             let key = require_key(exchange)?;
             let field = resolve_hash_field(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "HSET", HEADER_VALUE)?;
             let n: i64 = conn
-                .hset(&key, field, value_to_redis_arg(&value))
+                .hset(&key, field, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("HSET", e))?;
             serde_json::json!(n)
@@ -210,16 +267,16 @@ pub async fn dispatch(
         RedisCommand::Hsetnx => {
             let key = require_key(exchange)?;
             let field = resolve_hash_field(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "HSETNX", HEADER_VALUE)?;
             let ok: bool = conn
-                .hset_nx(&key, field, value_to_redis_arg(&value))
+                .hset_nx(&key, field, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("HSETNX", e))?;
             serde_json::json!(ok)
         }
         RedisCommand::Hmset => {
             let key = require_key(exchange)?;
-            let values = resolve_hash_values_map(exchange)?;
+            let values = resolve_hmset_values(exchange)?;
             conn.hset_multiple::<_, _, _, ()>(&key, &values)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("HMSET", e))?;
@@ -728,5 +785,62 @@ mod tests {
     fn test_build_redis_cmd_rejects_non_hash() {
         let ex = ex_with(&[("CamelRedis.Key", serde_json::json!("k"))]);
         assert!(build_redis_cmd(&RedisCommand::Set, &ex).is_err());
+    }
+}
+
+#[cfg(test)]
+mod resolve_hmset_values_tests {
+    use super::*;
+    use camel_component_api::{Exchange, Message};
+
+    fn ex_with_body(body: Body, headers: &[(&str, serde_json::Value)]) -> Exchange {
+        let mut msg = Message::new(body);
+        for (k, v) in headers {
+            msg.set_header(*k, v.clone());
+        }
+        Exchange::new(msg)
+    }
+
+    fn processor_message(err: CamelError) -> String {
+        match err {
+            CamelError::ProcessorError(msg) => msg,
+            other => panic!("expected a processor error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hmset_empty_body_names_command_and_variant() {
+        let ex = ex_with_body(Body::Empty, &[]);
+        let msg = processor_message(
+            resolve_hmset_values(&ex).expect_err("an empty body must be rejected"),
+        );
+        assert!(msg.contains("HMSET"), "{msg}");
+        assert!(msg.contains("Body::Empty"), "{msg}");
+    }
+
+    #[test]
+    fn hmset_non_object_text_body_is_rejected() {
+        let ex = ex_with_body(Body::Text("[1,2,3]".to_string()), &[]);
+        let msg = processor_message(
+            resolve_hmset_values(&ex).expect_err("a JSON array body must be rejected"),
+        );
+        assert!(msg.contains("HMSET"), "{msg}");
+    }
+
+    #[test]
+    fn hmset_utf8_bytes_object_body_parses() {
+        let ex = ex_with_body(Body::Bytes(br#"{"f":"v"}"#.to_vec().into()), &[]);
+        let values = resolve_hmset_values(&ex).expect("a UTF-8 JSON object body must parse");
+        assert_eq!(values, vec![("f".to_string(), b"v".to_vec())]);
+    }
+
+    #[test]
+    fn hmset_header_wins_over_body() {
+        let ex = ex_with_body(
+            Body::Json(serde_json::json!({"b": "body"})),
+            &[("CamelRedis.Values", serde_json::json!({"h": "header"}))],
+        );
+        let values = resolve_hmset_values(&ex).expect("the header map must resolve");
+        assert_eq!(values, vec![("h".to_string(), b"header".to_vec())]);
     }
 }

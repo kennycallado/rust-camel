@@ -1,8 +1,7 @@
 use super::{
     get_i64_header, get_str_header, get_str_vec_header, require_key, require_value,
-    value_to_redis_arg,
+    resolve_value_bytes, value_to_redis_arg,
 };
-#[cfg(test)]
 use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -206,9 +205,10 @@ pub async fn dispatch(
 
     let result: serde_json::Value = match cmd {
         RedisCommand::Sadd => {
-            let (key, value) = resolve_key_value_operands(exchange)?;
+            let key = require_key(exchange)?;
+            let value = resolve_value_bytes(exchange, "SADD", HEADER_VALUE)?;
             let n: i64 = conn
-                .sadd(&key, value_to_redis_arg(&value))
+                .sadd(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SADD", e))?;
             serde_json::json!(n)

@@ -61,7 +61,7 @@ const TWO_ENTRY_REPLY: &[u8] = b"*1\r\n*2\r\n$2\r\ns1\r\n*2\r\n*2\r\n$3\r\n1-1\r
 const XACK_REPLY: &[u8] = b":1\r\n";
 
 /// Encode a RESP bulk string.
-fn resp_bulk(value: &str) -> Vec<u8> {
+pub(crate) fn resp_bulk(value: &str) -> Vec<u8> {
     let mut out = format!("${}\r\n", value.len()).into_bytes();
     out.extend_from_slice(value.as_bytes());
     out.extend_from_slice(b"\r\n");
@@ -69,7 +69,7 @@ fn resp_bulk(value: &str) -> Vec<u8> {
 }
 
 /// Encode a RESP array of already-encoded elements.
-fn resp_array(items: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn resp_array(items: &[Vec<u8>]) -> Vec<u8> {
     let mut out = format!("*{}\r\n", items.len()).into_bytes();
     for item in items {
         out.extend_from_slice(item);
@@ -78,17 +78,17 @@ fn resp_array(items: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// Encode a RESP integer.
-fn resp_int(value: i64) -> Vec<u8> {
+pub(crate) fn resp_int(value: i64) -> Vec<u8> {
     format!(":{value}\r\n").into_bytes()
 }
 
 /// RESP nil bulk string (parsed as `redis::Value::Nil`).
-fn resp_nil() -> Vec<u8> {
+pub(crate) fn resp_nil() -> Vec<u8> {
     b"$-1\r\n".to_vec()
 }
 
 /// Encode a RESP error reply (`-<message>`).
-fn resp_error(message: &str) -> Vec<u8> {
+pub(crate) fn resp_error(message: &str) -> Vec<u8> {
     format!("-{message}\r\n").into_bytes()
 }
 
@@ -167,7 +167,7 @@ enum HarnessEvent {
 /// recovery half second). Actions targeted at another connection stay queued
 /// for it and never consume the frame of the current connection.
 #[derive(Clone)]
-enum ScriptedAction {
+pub(crate) enum ScriptedAction {
     /// Answer the named command with `reply`; a non-matching command gets the
     /// default reply and leaves this action for the next frame.
     Reply {
@@ -251,7 +251,7 @@ enum FrameStep {
 }
 
 /// A loopback RESP server that accepts every connection until shutdown.
-struct StreamFakeServer {
+pub(crate) struct StreamFakeServer {
     addr: SocketAddr,
     connections: Arc<AtomicUsize>,
     commands: watch::Receiver<Vec<WireFrame>>,
@@ -262,7 +262,7 @@ struct StreamFakeServer {
 
 impl StreamFakeServer {
     /// Bind on an ephemeral loopback port and start serving `actions`.
-    async fn start(actions: Vec<ScriptedAction>) -> std::io::Result<Self> {
+    pub(crate) async fn start(actions: Vec<ScriptedAction>) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let connections = Arc::new(AtomicUsize::new(0));
@@ -316,7 +316,7 @@ impl StreamFakeServer {
     }
 
     /// Snapshot of every recorded application command.
-    fn recorded(&self) -> Vec<RecordedFrame> {
+    pub(crate) fn recorded(&self) -> Vec<RecordedFrame> {
         self.commands
             .borrow()
             .iter()
@@ -353,7 +353,7 @@ impl StreamFakeServer {
     }
 
     /// Recorded argument vectors for every command named `name`.
-    fn args_of(&self, name: &str) -> Vec<Vec<Vec<u8>>> {
+    pub(crate) fn args_of(&self, name: &str) -> Vec<Vec<Vec<u8>>> {
         self.commands
             .borrow()
             .iter()
@@ -363,7 +363,7 @@ impl StreamFakeServer {
     }
 
     /// Recorded argument vectors for command `name` on `connection`.
-    fn args_of_on_conn(&self, connection: usize, name: &str) -> Vec<Vec<Vec<u8>>> {
+    pub(crate) fn args_of_on_conn(&self, connection: usize, name: &str) -> Vec<Vec<Vec<u8>>> {
         self.commands
             .borrow()
             .iter()
@@ -427,7 +427,7 @@ impl StreamFakeServer {
     }
 
     /// Wait (bounded) until `count` commands named `name` have been recorded.
-    async fn wait_for_command(&mut self, name: &str, count: usize) {
+    pub(crate) async fn wait_for_command(&mut self, name: &str, count: usize) {
         let what = format!("{name} x{count}");
         self.wait_for_frames(&what, |frames| {
             frames.iter().filter(|frame| frame.name == name).count() >= count
@@ -702,7 +702,7 @@ fn stream_config(port: u16, extra: &str) -> RedisEndpointConfig {
 
 /// Stream producer config pointed at `port`, with `command` and `extra`
 /// query parameters.
-fn producer_config(port: u16, command: &str, extra: &str) -> RedisEndpointConfig {
+pub(crate) fn producer_config(port: u16, command: &str, extra: &str) -> RedisEndpointConfig {
     RedisEndpointConfig::from_uri(&format!(
         "redis://127.0.0.1:{port}?command={command}{extra}"
     ))
@@ -710,7 +710,7 @@ fn producer_config(port: u16, command: &str, extra: &str) -> RedisEndpointConfig
 }
 
 /// Run one exchange through a real producer against `server`.
-async fn call_producer(
+pub(crate) async fn call_producer(
     server: &StreamFakeServer,
     command: &str,
     extra: &str,
@@ -733,7 +733,7 @@ fn stream_entry_reply(stream: &str, id: &str, fields: &[(&str, &str)]) -> Vec<u8
 }
 
 /// Render a recorded argument vector as UTF-8 strings for assertions.
-fn args_as_strings(args: &[Vec<u8>]) -> Vec<String> {
+pub(crate) fn args_as_strings(args: &[Vec<u8>]) -> Vec<String> {
     args.iter()
         .map(|arg| String::from_utf8_lossy(arg).into_owned())
         .collect()
@@ -1937,12 +1937,12 @@ async fn default_path_nogroup_supervision_no_create_frame() {
 // ── Producer XADD / XLEN wire tests ─────────────────────────────────────────
 
 /// Exchange carrying `body`.
-fn body_exchange(body: Body) -> Exchange {
+pub(crate) fn body_exchange(body: Body) -> Exchange {
     Exchange::new(Message::new(body))
 }
 
 /// Exchange carrying `body` and the `CamelRedis.Key` header.
-fn keyed_exchange(body: Body, key: &str) -> Exchange {
+pub(crate) fn keyed_exchange(body: Body, key: &str) -> Exchange {
     let mut exchange = body_exchange(body);
     exchange.input.set_header("CamelRedis.Key", key);
     exchange
@@ -2263,8 +2263,8 @@ async fn xadd_prohibited_body_forms_fail_before_send() {
         .await
         .expect("fake server must bind");
 
-    // Body::Stream carrying valid UTF-8 content: `try_into_text` rejects the
-    // stream variant itself, before any materialization attempt.
+    // Body::Stream carrying valid UTF-8 content: `encode_body_value` rejects
+    // the stream variant itself, before any materialization attempt.
     let stream_bytes = Body::Text("valid UTF-8 content".to_string())
         .into_bytes(1024)
         .await
@@ -2276,11 +2276,7 @@ async fn xadd_prohibited_body_forms_fail_before_send() {
         metadata: Default::default(),
     });
 
-    let cases = [
-        ("Body::Empty", Body::Empty),
-        ("Body::Stream", stream_body),
-        ("non-UTF-8 bytes", Body::from(vec![0xff, 0xfe])),
-    ];
+    let cases = [("Body::Empty", Body::Empty), ("Body::Stream", stream_body)];
     for (label, body) in cases {
         let err = match call_producer(&server, "XADD", "&key=s1", body_exchange(body)).await {
             Err(err) => err,

@@ -1,8 +1,7 @@
 use super::{
-    get_i64_header, get_str_vec_header, get_u64_header, require_key, require_value,
-    value_to_redis_arg,
+    get_i64_header, get_str_vec_header, get_u64_header, reply_to_body, require_key, require_value,
+    resolve_value_bytes, value_to_redis_arg,
 };
-#[cfg(test)]
 use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -76,6 +75,47 @@ pub(crate) fn json_from_optional_string(value: Option<String>) -> serde_json::Va
 
 pub(crate) fn json_array_from_optional_strings(values: Vec<Option<String>>) -> serde_json::Value {
     serde_json::Value::Array(values.into_iter().map(json_from_optional_string).collect())
+}
+
+/// Encodes an `MGET` reply as a RESP array of bulk strings.
+///
+/// The shape mirrors the server's own reply (`*N\r\n`, per element
+/// `$<len>\r\n<bytes>\r\n`, nil as `$-1\r\n`), so a binary `MGET` reply keeps
+/// every element, its order, and its nils intact instead of degrading to a
+/// lossy JSON string.
+pub(crate) fn encode_mget_reply_bytes(values: &[Option<Vec<u8>>]) -> Vec<u8> {
+    let mut out = format!("*{}\r\n", values.len()).into_bytes();
+    for value in values {
+        match value {
+            None => out.extend_from_slice(b"$-1\r\n"),
+            Some(bytes) => {
+                out.extend_from_slice(format!("${}\r\n", bytes.len()).as_bytes());
+                out.extend_from_slice(bytes);
+                out.extend_from_slice(b"\r\n");
+            }
+        }
+    }
+    out
+}
+
+/// Maps an `MGET` reply to an exchange body.
+///
+/// A reply whose elements are all nils or valid UTF-8 keeps the JSON array
+/// shape (`["a", null, "c"]`) unchanged. A reply with any binary element is
+/// encoded with [`encode_mget_reply_bytes`] so no element is mangled.
+fn mget_reply_to_body(values: Vec<Option<Vec<u8>>>) -> Body {
+    let text: Option<Vec<Option<String>>> = values
+        .iter()
+        .map(|value| {
+            value.as_ref().map_or(Some(None), |bytes| {
+                String::from_utf8(bytes.clone()).ok().map(Some)
+            })
+        })
+        .collect();
+    match text {
+        Some(values) => Body::Json(json_array_from_optional_strings(values)),
+        None => Body::Bytes(encode_mget_reply_bytes(&values).into()),
+    }
 }
 
 #[allow(dead_code)]
@@ -196,19 +236,23 @@ pub async fn dispatch(
     let result: serde_json::Value = match cmd {
         RedisCommand::Set => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
-            conn.set::<_, _, ()>(&key, value_to_redis_arg(&value))
+            let value = resolve_value_bytes(exchange, "SET", HEADER_VALUE)?;
+            conn.set::<_, _, ()>(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SET", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Get => {
             let key = require_key(exchange)?;
-            let val: Option<String> = conn
-                .get(&key)
+            let val: Option<Vec<u8>> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("GET", e))?;
-            json_from_optional_string(val)
+            // Binary-safe reply: the body itself carries the payload, so this
+            // arm bypasses the `Body::Json` dispatch tail below.
+            exchange.input.body = reply_to_body(val.as_deref());
+            return Ok(());
         }
         RedisCommand::Getset => {
             let key = require_key(exchange)?;
@@ -221,29 +265,33 @@ pub async fn dispatch(
         }
         RedisCommand::Setnx => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "SETNX", HEADER_VALUE)?;
             let ok: bool = conn
-                .set_nx(&key, value_to_redis_arg(&value))
+                .set_nx(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SETNX", e))?;
             serde_json::Value::Bool(ok)
         }
         RedisCommand::Setex => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "SETEX", HEADER_VALUE)?;
             let ttl = resolve_timeout_seconds(exchange)?;
-            conn.set_ex::<_, _, ()>(&key, value_to_redis_arg(&value), ttl)
+            conn.set_ex::<_, _, ()>(&key, &value, ttl)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SETEX", e))?;
             serde_json::Value::Null
         }
         RedisCommand::Mget => {
             let keys = resolve_mget_keys(exchange)?;
-            let vals: Vec<Option<String>> = conn
-                .mget(&keys)
+            let vals: Vec<Option<Vec<u8>>> = redis::cmd("MGET")
+                .arg(&keys)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("MGET", e))?;
-            json_array_from_optional_strings(vals)
+            // Text replies keep the JSON array; binary replies carry the
+            // encoded RESP array in the body and bypass the dispatch tail.
+            exchange.input.body = mget_reply_to_body(vals);
+            return Ok(());
         }
         RedisCommand::Mset => {
             let values = resolve_mset_values(exchange)?;
@@ -288,9 +336,9 @@ pub async fn dispatch(
         }
         RedisCommand::Append => {
             let key = require_key(exchange)?;
-            let value = require_value(exchange)?;
+            let value = resolve_value_bytes(exchange, "APPEND", HEADER_VALUE)?;
             let n: i64 = conn
-                .append(&key, value_to_redis_arg(&value))
+                .append(&key, &value)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("APPEND", e))?;
             serde_json::json!(n)
