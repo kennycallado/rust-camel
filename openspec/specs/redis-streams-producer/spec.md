@@ -6,7 +6,10 @@ TBD - created by archiving change redisstreams. Update Purpose after archive.
 ### Requirement: XADD appends the exchange body as exactly one body field
 
 The producer SHALL accept `command=XADD` and append one entry to the stream
-named by `CamelRedis.Key` (falling back to the URI `key=`). The entry SHALL
+named by the URI `key=` (falling back to the exchange header `CamelRedis.Key`
+when the URI declares no key). The effective key SHALL be published on
+`CamelRedis.Key` — the URI key when the URI declares one — overwriting any
+stale upstream value before dispatch. The entry SHALL
 carry exactly one field named `body`; its value SHALL be
 `exchange.body.try_into_text()` — text as-is, compact JSON for structured
 bodies, UTF-8 bytes decoded as text. `Body::Empty`, `Body::Stream`, and
@@ -28,11 +31,25 @@ Round-trip contract: text `S` written by XADD SHALL be read by the
   is still `hello`, and the headers are `CamelRedis.StreamId=5-0` and
   `CamelRedis.Stream=s1`
 
-#### Scenario: header key overrides the URI key fallback
+<!-- openspec-scenario-ops
+renamed: header key overrides the URI key fallback -> URI key overrides the exchange header key
+-->
+
+#### Scenario: URI key overrides the exchange header key
 
 - **GIVEN** the URI `redis://127.0.0.1:6379?command=XADD&key=s1` and an
   exchange with header `CamelRedis.Key=s2` and body text `hello`
 - **WHEN** the producer executes
+- **THEN** the recorded frame is `XADD s1 * body hello`,
+  `CamelRedis.Stream=s1`, and the header `CamelRedis.Key` carries the
+  effective key `s1`
+
+#### Scenario: header key used when the URI declares no key
+
+- **GIVEN** the URI `redis://127.0.0.1:6379?command=XADD` (no `key=`) and
+  an exchange with header `CamelRedis.Key=s2` and body text `hello`
+- **WHEN** the producer executes against a fake RESP server that answers
+  XADD with `5-0`
 - **THEN** the recorded frame is `XADD s2 * body hello` and
   `CamelRedis.Stream=s2`
 
@@ -56,8 +73,10 @@ Round-trip contract: text `S` written by XADD SHALL be read by the
 ### Requirement: XLEN returns the entry count as the body
 
 The producer SHALL accept `command=XLEN` and replace the exchange body with
-the number of entries in the stream named by `CamelRedis.Key` (falling back
-to the URI `key=`). `XLEN` SHALL classify as idempotent (a read).
+the number of entries in the stream named by the URI `key=` (falling back
+to the exchange header `CamelRedis.Key` when the URI declares no key). The
+effective key SHALL be published on `CamelRedis.Key`. `XLEN` SHALL classify
+as idempotent (a read).
 
 #### Scenario: count is delivered as the body
 
@@ -83,4 +102,25 @@ Idempotent Consumer with `RedisIdempotentRepository` is the mitigation.
   producer executes the exchange
 - **THEN** the classification is `false`, exactly one XADD frame was sent
   (no retry), and the producer returned `Err`
+
+### Requirement: Rename, RENAMENX and MOVE are non-idempotent and never retried
+
+`Rename`, `Renamenx`, and `Move` SHALL NOT be listed by
+`is_idempotent_command`. The component SHALL NOT retry a failed `RENAME`,
+`RENAMENX`, or `MOVE`: a retry after an unconfirmed success turns success
+into a visible failure (`RENAME` answers `ERR no such key`; `RENAMENX` and
+`MOVE` answer `0`). An ambiguous transport failure SHALL return `Err` after
+exactly one attempt.
+
+#### Scenario: classification and no retry
+
+- **GIVEN** a fake executor that fails the first command with a transient
+  transport error, and `is_idempotent_command` classifying
+  `RedisCommand::Rename`, `RedisCommand::Renamenx`, and
+  `RedisCommand::Move`
+- **WHEN** the producer executes an exchange for each of the three
+  commands
+- **THEN** each classification is `false`, the executor was called exactly
+  once per exchange (no retry, no reconnect), and the producer returned
+  `Err`
 
