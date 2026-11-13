@@ -569,6 +569,7 @@ pub async fn execute_with_retry<E: RedisCommandExecutor>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::is_idempotent_command;
     use crate::topology::FakeTopology;
     use std::time::Duration;
 
@@ -678,6 +679,55 @@ mod tests {
         assert!(result.is_err(), "non-idempotent should not be retried");
         // Only 1 call — no retries
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    // Regression: a retried Rename/Renamenx/Move after an unconfirmed success
+    // fails visibly (ERR no such key / 0), so the retry flag must come from
+    // the classifier. One exchange per command, mirroring the spec scenario.
+    #[tokio::test]
+    async fn non_idempotent_command_is_attempted_once() {
+        for cmd in [
+            RedisCommand::Rename,
+            RedisCommand::Renamenx,
+            RedisCommand::Move,
+        ] {
+            let executor = FakeExecutor::new(vec![transient_err("connection reset")]);
+            let call_count = executor.call_count();
+            let reconnect_count = executor.reconnect_count();
+
+            let mut exchange = Exchange::default();
+
+            let policy = NetworkRetryPolicy {
+                max_attempts: 10,
+                initial_delay: Duration::from_millis(1),
+                max_delay: Duration::from_millis(10),
+                ..NetworkRetryPolicy::default()
+            };
+
+            let result = execute_with_retry(
+                &mut { executor },
+                &cmd,
+                &mut exchange,
+                is_idempotent_command(&cmd),
+                &policy,
+            )
+            .await;
+
+            assert!(
+                result.is_err(),
+                "{cmd:?} must be attempted once and fail: {result:?}"
+            );
+            assert_eq!(
+                call_count.load(Ordering::SeqCst),
+                1,
+                "non-idempotent {cmd:?} must not be retried"
+            );
+            assert_eq!(
+                reconnect_count.load(Ordering::SeqCst),
+                0,
+                "non-idempotent {cmd:?} must not reconnect"
+            );
+        }
     }
 
     #[tokio::test]

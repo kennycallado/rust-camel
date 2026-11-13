@@ -62,13 +62,19 @@ impl RedisProducer {
         Ok(config.command.clone())
     }
 
-    fn apply_default_key(exchange: &mut Exchange, config: &RedisEndpointConfig) {
-        if exchange.input.header("CamelRedis.Key").is_none()
-            && let Some(ref key) = config.key
-        {
-            exchange
+    /// Resolves the effective key: the URI `key=` wins, otherwise the
+    /// `CamelRedis.Key` header, otherwise no key at all.
+    ///
+    /// A non-string header value yields `None` (the header is left untouched),
+    /// so the command handlers surface their existing missing-header error.
+    fn resolve_key(exchange: &Exchange, config: &RedisEndpointConfig) -> Option<String> {
+        match config.key {
+            Some(ref key) => Some(key.clone()),
+            None => exchange
                 .input
-                .set_header("CamelRedis.Key", serde_json::Value::String(key.clone()));
+                .header("CamelRedis.Key")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         }
     }
 
@@ -130,8 +136,14 @@ impl Service<Exchange> for RedisProducer {
             //    header is rejected here, before any connection is attempted.
             let cmd = Self::resolve_command(&exchange, &config)?;
 
-            // 2. Set defaults from config if missing in headers
-            Self::apply_default_key(&mut exchange, &config);
+            // 2. Resolve the effective key and publish it, then set channel
+            //    defaults. Publishing before execution keeps command handlers
+            //    reading `CamelRedis.Key` unchanged.
+            if let Some(key) = Self::resolve_key(&exchange, &config) {
+                exchange
+                    .input
+                    .set_header("CamelRedis.Key", serde_json::Value::String(key));
+            }
             Self::apply_default_channels(&mut exchange, &config);
 
             // 3. Execute with retry on transient errors. The executor reconnects
@@ -288,28 +300,42 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_default_key_sets_when_missing() {
-        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?key=cfg-key").unwrap();
-        let mut exchange = Exchange::new(Message::default());
+    fn uri_key_wins_over_exchange_header() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?key=out").unwrap();
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.Key", serde_json::json!("in"));
+        let exchange = Exchange::new(msg);
 
-        RedisProducer::apply_default_key(&mut exchange, &config);
         assert_eq!(
-            exchange.input.header("CamelRedis.Key"),
-            Some(&serde_json::json!("cfg-key"))
+            RedisProducer::resolve_key(&exchange, &config),
+            Some("out".to_string()),
+            "the URI key must win over the CamelRedis.Key header"
         );
     }
 
     #[test]
-    fn test_apply_default_key_preserves_existing_header() {
-        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?key=cfg-key").unwrap();
+    fn header_key_used_when_uri_declares_none() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
         let mut msg = Message::default();
-        msg.set_header("CamelRedis.Key", serde_json::json!("header-key"));
-        let mut exchange = Exchange::new(msg);
+        msg.set_header("CamelRedis.Key", serde_json::json!("s2"));
+        let exchange = Exchange::new(msg);
 
-        RedisProducer::apply_default_key(&mut exchange, &config);
         assert_eq!(
-            exchange.input.header("CamelRedis.Key"),
-            Some(&serde_json::json!("header-key"))
+            RedisProducer::resolve_key(&exchange, &config),
+            Some("s2".to_string()),
+            "without a URI key the header must supply the key"
+        );
+    }
+
+    #[test]
+    fn resolve_key_returns_uri_key() {
+        let config = RedisEndpointConfig::from_uri("redis://localhost:6379?key=cfg-key").unwrap();
+        let exchange = Exchange::new(Message::default());
+
+        assert_eq!(
+            RedisProducer::resolve_key(&exchange, &config),
+            Some("cfg-key".to_string()),
+            "the URI key must be the resolved key"
         );
     }
 
@@ -346,12 +372,15 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_default_key_does_nothing_when_config_key_is_none() {
+    fn resolve_key_returns_none_without_sources() {
         let config = RedisEndpointConfig::from_uri("redis://localhost:6379").unwrap();
-        let mut exchange = Exchange::new(Message::default());
+        let exchange = Exchange::new(Message::default());
 
-        RedisProducer::apply_default_key(&mut exchange, &config);
-        assert!(exchange.input.header("CamelRedis.Key").is_none());
+        assert_eq!(
+            RedisProducer::resolve_key(&exchange, &config),
+            None,
+            "no URI key and no header must resolve to no key"
+        );
     }
 
     #[test]

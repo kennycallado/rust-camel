@@ -1555,10 +1555,8 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Pexpire
             | RedisCommand::Pexpireat
             | RedisCommand::Persist
-            | RedisCommand::Rename
-            | RedisCommand::Renamenx
-            | RedisCommand::Move
     )
+    // Rename/Renamenx/Move are deliberately absent: a retry after an unconfirmed success reports visible failure (RENAME: ERR no such key; RENAMENX/MOVE: 0).
 }
 
 #[cfg(test)]
@@ -2922,6 +2920,24 @@ mod tests {
         assert!(!is_idempotent_command(&RedisCommand::Sadd));
         assert!(!is_idempotent_command(&RedisCommand::Zadd));
         assert!(!is_idempotent_command(&RedisCommand::Publish));
+    }
+
+    // A retry after an unconfirmed success reports visible failure
+    // (RENAME: ERR no such key; RENAMENX/MOVE: 0), so these must not retry.
+    #[test]
+    fn rename_renamenx_move_are_not_idempotent() {
+        assert!(
+            !is_idempotent_command(&RedisCommand::Rename),
+            "Rename must not be classified idempotent"
+        );
+        assert!(
+            !is_idempotent_command(&RedisCommand::Renamenx),
+            "Renamenx must not be classified idempotent"
+        );
+        assert!(
+            !is_idempotent_command(&RedisCommand::Move),
+            "Move must not be classified idempotent"
+        );
     }
 
     // --- Strict validation tests ---

@@ -2150,7 +2150,7 @@ async fn xadd_server_coded_reply_names_definite_no_apply() {
 }
 
 #[tokio::test]
-async fn xadd_header_key_overrides_uri_key() {
+async fn xadd_uri_key_overrides_exchange_header() {
     let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
         matches_command: "XADD",
         reply: resp_bulk("5-0"),
@@ -2171,13 +2171,89 @@ async fn xadd_header_key_overrides_uri_key() {
     assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
     assert_eq!(
         args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", "hello"],
+        "the URI key must win over the CamelRedis.Key header"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.Stream"),
+        Some(&serde_json::json!("s1")),
+        "CamelRedis.Stream must carry the URI-resolved key"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.Key"),
+        Some(&serde_json::json!("s1")),
+        "the effective key must be published on CamelRedis.Key"
+    );
+}
+
+#[tokio::test]
+async fn xadd_header_key_used_when_uri_declares_none() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XADD",
+        reply: resp_bulk("5-0"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "XADD",
+        "",
+        keyed_exchange(Body::Text("hello".to_string()), "s2"),
+    )
+    .await
+    .expect("XADD must succeed");
+
+    let frames = server.args_of("XADD");
+    assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
+    assert_eq!(
+        args_as_strings(&frames[0]),
         vec!["s2", "*", "body", "hello"],
-        "the CamelRedis.Key header must win over the URI key fallback"
+        "without a URI key the header must supply the key"
     );
     assert_eq!(
         outcome.input.header("CamelRedis.Stream"),
         Some(&serde_json::json!("s2")),
         "CamelRedis.Stream must carry the header-resolved key"
+    );
+}
+
+#[tokio::test]
+async fn blpop_then_xadd_does_not_reuse_the_popped_key() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "XADD",
+        reply: resp_bulk("7-0"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    // Simulates a BLPOP consumer having published its popped key upstream
+    // (consumer.rs:735); the XADD endpoint's URI key must still win.
+    let mut exchange = body_exchange(Body::Text("job".to_string()));
+    exchange
+        .input
+        .set_header("CamelRedis.Key", serde_json::json!("in"));
+
+    let outcome = call_producer(&server, "XADD", "&key=out", exchange)
+        .await
+        .expect("XADD must succeed");
+
+    let frames = server.args_of("XADD");
+    assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["out", "*", "body", "job"],
+        "the URI key must not be shadowed by the upstream popped key"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.Key"),
+        Some(&serde_json::json!("out")),
+        "the effective key must be published on CamelRedis.Key"
+    );
+    assert_eq!(
+        outcome.input.header("CamelRedis.Stream"),
+        Some(&serde_json::json!("out")),
+        "CamelRedis.Stream must carry the URI-resolved key"
     );
 }
 

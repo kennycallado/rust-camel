@@ -1,0 +1,12 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e2a46b9e9ffe7vRlu6wS02FhBa",
+  "date": "2026-11-13",
+  "mission": "581",
+  "impl_head": "3c04ab8d9",
+  "blessed_plan_hash": "sha256:6c04e1fca400b50bc91aeec8965e9dc9bac3d4d1dd1c1877e6eba374d53eec5c",
+  "history": "First pass APPROVE-WITH-FINDINGS with two legitimate minors: (1) fix commit lacked the `!` breaking marker promised by proposal.md — branch history rewritten, fix commit is now `fix(redis)!: classify rename family non-idempotent; resolve key URI-first` with migration body line; `cargo xtask changelog --check` against base e01ce659a passes (5 commits, no unmarked breaking). (2) executor retry-once witness covered only Rename — parameterized over [Rename, Renamenx, Move] per the delta scenario's literal text (commit 3c04ab8d9); blessed plan scoped a single-variant minimum, loop accepted as superset (spec is the contract); plan hash unchanged, no re-bless needed. Second pass: APPROVE.",
+  "scope_observation": "The URI-first key inversion is generic (all producer commands via resolve_key/publish), while the delta spec modifies only the XADD/XLEN requirements. Checked for contradictions: redis-geo spec scenarios are header-only (no URI key=), examples and README declare no key= on producer URIs, CONTEXT-MAP/GLOSSARY have no CamelRedis.Key hits. Future specs adding key-precedence claims for non-stream commands must match URI-first."
+}

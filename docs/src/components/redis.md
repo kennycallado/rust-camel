@@ -238,7 +238,7 @@ The break reaches Rust library consumers too. `RedisCommand` gained the `Xadd` a
 
 ### Streams producer
 
-`redis://host:port?command=XADD&key=events` appends one entry to a stream. `redis://host:port?command=XLEN&key=events` reads the entry count. Both take the stream key from the `CamelRedis.Key` header, with the URI `key=` as the fallback.
+`redis://host:port?command=XADD&key=events` appends one entry to a stream. `redis://host:port?command=XLEN&key=events` reads the entry count. Both take the stream key from the URI `key=`, falling back to the `CamelRedis.Key` header when the URI declares no key; the effective key is published on `CamelRedis.Key`. Migration from pre-0.x routes that relied on header-over-URI: omit `key=` from the producer URI to keep per-message key routing.
 
 #### XADD
 
@@ -248,7 +248,7 @@ The Producer keeps the Exchange body unchanged. It reads one header and sets two
 
 | Header | Direction | Value |
 | --- | --- | --- |
-| `CamelRedis.Key` | input | Stream key; falls back to the URI `key=` |
+| `CamelRedis.Key` | input | Stream key; the URI `key=` wins when present (omit `key=` for per-message keys) |
 | `CamelRedis.StreamId` | output | Server-assigned entry ID |
 | `CamelRedis.Stream` | output | Resolved stream key |
 
