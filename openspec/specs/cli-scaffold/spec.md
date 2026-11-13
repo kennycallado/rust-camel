@@ -4,7 +4,6 @@
 Scaffolding for new camel projects. `camel new` with the basic template emits
 a sample `direct:` route and a colocated test document that references it, so
 a generated project is testable out of the box.
-
 ## Requirements
 ### Requirement: Basic template scaffolds a testable route with colocated test document
 
@@ -12,10 +11,12 @@ a generated project is testable out of the box.
 route with a `direct:` consumer and a `mock:` producer step, and a colocated
 `routes/hello.test.yaml` sample test document referencing it through
 `routeFiles: [hello.yaml]` with at least one input and one expectation. The
-generated README SHALL contain a test section instructing `camel test
-routes/hello.test.yaml`, placed before the run section. The scaffolded
-project SHALL pass `camel test routes/hello.test.yaml` and SHALL start
-under `camel run` without route discovery errors.
+template SHALL also emit a `scripts/hello.rhai` script file referenced from
+`routes/hello.yaml` through `source_file:` with the language inferred from
+the extension. The generated README SHALL contain a test section instructing
+`camel test routes/hello.test.yaml`, placed before the run section. The
+scaffolded project SHALL pass `camel test routes/hello.test.yaml` and SHALL
+start under `camel run` without route discovery errors.
 
 #### Scenario: scaffolded project passes its sample test
 
@@ -34,4 +35,12 @@ under `camel run` without route discovery errors.
 - **Given** a project created by `camel new` with the basic template
 - **When** the generated README is read
 - **Then** a test section mentioning `camel test routes/hello.test.yaml` appears before the run section
+
+#### Scenario: scaffolded route loads its script from a file
+
+- **Given** a project created by `camel new` with the basic template
+- **When** `routes/hello.yaml` is read
+- **THEN** it contains a `source_file: ../scripts/hello.rhai` reference with
+  no `language:` field, and `scripts/hello.rhai` exists at the project root
+  with non-empty rhai content
 

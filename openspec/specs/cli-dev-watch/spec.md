@@ -7,8 +7,13 @@ TBD - created by archiving change 476-template-proto-dev-reload. Update Purpose 
 
 In `camel run --watch` mode only, the watcher SHALL derive file watch targets
 from committed per-route reload-target metadata: every exposed template
-closure file and every validator protobuf descriptor source (schema file plus
-resolved local imports). The watcher SHALL NOT watch arbitrary files or
+closure file, every validator protobuf descriptor source (schema file plus
+resolved local imports), and every resolved script source file registered by
+route discovery. Publication follows the runtime outcome of the reload pass,
+not discovery success: successfully added, restarted, or swapped routes
+publish their staged script dependencies, failed or skipped routes retain
+their previous script dependencies, and routes removed by a committed reload
+have their script dependencies deleted. The watcher SHALL NOT watch arbitrary files or
 directories, SHALL NOT create targets for gRPC proto references (a documented
 non-goal), and SHALL re-derive targets after every route reload pass and
 after every committed template/proto reload. A partially failed route reload
@@ -59,6 +64,34 @@ SHALL retain the surviving routes' targets.
 - **WHEN** that file changes
 - **THEN** the event is handled as a dev-target event, not a route-file
   reload
+
+#### Scenario: resolved script files join the tracked set
+
+- **GIVEN** a watched route whose document references
+  `source_file: "scripts/enrich.rhai"`
+- **WHEN** watch targets are derived after route discovery
+- **THEN** the resolved script path is in the tracked dispatch set and an
+  edit to it dispatches a reload, while changes to unrelated files dispatch
+  nothing
+
+#### Scenario: failed route compile keeps the previous script target
+
+- **GIVEN** a watched route referencing `scripts/enrich.rhai`, and a second
+  watch pass whose discovery succeeds but whose route rebuild fails
+- **WHEN** the pass commits no swap for the failed route
+- **THEN** the failed route keeps its previously published script
+  dependency in the tracked set, while successfully swapped routes publish
+  their new script dependencies
+
+#### Scenario: changed script path publishes the new target
+
+- **GIVEN** a watched route whose committed generation references
+  `source_file: "scripts/old.rhai"`
+- **WHEN** the route document is edited to reference
+  `source_file: "scripts/new.rhai"` and the reload pass successfully
+  restarts the route
+- **THEN** `scripts/new.rhai` is in the route's tracked script set and
+  `scripts/old.rhai` is no longer tracked for that route
 
 ### Requirement: Template and proto change handling
 
@@ -186,4 +219,36 @@ watcher loop or its shutdown responsiveness.
 - **WHEN** the reload dispatch runs
 - **THEN** the reload fails all-or-nothing, nothing commits, and BOTH the
   prior descriptor and the prior template set keep serving
+
+### Requirement: Script source change handling
+
+On a script source file change, after the configured debounce, the watcher
+SHALL run the full route reload pass (re-discovery plus source-hash diff) for
+the watched route set. It SHALL NOT dispatch `ReloadTemplates` for a script
+change. When script files and route files change in the same debounce batch,
+exactly one reload pass SHALL run. A script edit that reproduces identical
+content SHALL keep the route running without a swap.
+
+#### Scenario: script edit swaps the route
+
+- **GIVEN** a watched route whose document references
+  `source_file: "scripts/enrich.rhai"`
+- **WHEN** the script file is edited and the debounce window closes
+- **THEN** the route reload pass runs, the route's new source hash differs
+  from the committed hash, and the route swaps to the generation built from
+  the new script contents
+
+#### Scenario: script and route file edits in one batch run a single pass
+
+- **GIVEN** a watched route document and its referenced script file
+- **WHEN** both files are edited within one debounce window
+- **THEN** exactly one reload pass runs for the batch
+
+#### Scenario: script restored to identical content does not swap
+
+- **GIVEN** a watched route referencing a script file
+- **WHEN** the script file is edited and restored to its previous content
+  before one debounce window closes, without an intervening reload commit
+- **THEN** the reload pass skips the route because the folded source hash,
+  compared against the currently committed generation, is unchanged
 
