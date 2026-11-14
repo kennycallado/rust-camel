@@ -1740,6 +1740,7 @@ pub(crate) fn route_step_to_declarative_step(
                     steps,
                     eager: body.eager,
                     remove_on_failure: body.remove_on_failure,
+                    on_missing_key: body.on_missing_key,
                 },
             ))
         }

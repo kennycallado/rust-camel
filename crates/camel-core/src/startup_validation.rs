@@ -619,6 +619,7 @@ mod tests {
                 steps: vec![BuilderStep::To("exec:echo".to_string())],
                 eager: false,
                 remove_on_failure: false,
+                on_missing_key: camel_processor::OnMissingKey::Fail,
             }],
         )
         .with_route_id("r".to_string());

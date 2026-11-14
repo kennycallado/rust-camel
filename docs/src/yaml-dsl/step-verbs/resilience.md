@@ -99,7 +99,8 @@ Deduplicate exchanges by message ID.
 | `expression` | string | yes | — | Message ID expression |
 | `steps` | list | no | `[]` | Steps for first-time exchanges |
 | `eager` | bool | no | — | Reserve the key before processing |
-| `remove_on_failure` | bool | no | — | Remove the key if the child fails |
+| `remove_on_failure` | bool | no | `true` under `eager`, else `false` | Remove the key if the child fails; an explicit `false` under `eager` warns at load |
+| `on_missing_key` | string | no | `fail` | `fail` or `process`; resolves an absent or empty key |
 
 ```yaml
 - idempotent_consumer:

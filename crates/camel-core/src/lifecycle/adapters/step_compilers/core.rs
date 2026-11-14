@@ -101,6 +101,7 @@ impl StepCompiler for CoreCompiler {
                 steps,
                 eager,
                 remove_on_failure,
+                on_missing_key,
             } => {
                 use crate::lifecycle::adapters::route_compiler::compose_outcome_segment;
 
@@ -132,6 +133,8 @@ impl StepCompiler for CoreCompiler {
                     child_pipeline,
                     eager,
                     remove_on_failure,
+                    on_missing_key,
+                    ctx.rt.clone(),
                 );
                 Ok(CompileOutcome::Matched(CompiledStep::Segment {
                     segment: camel_api::OutcomeSegment::new(Box::new(svc)),
@@ -1019,6 +1022,7 @@ mod tests {
             }],
             eager: false,
             remove_on_failure: true,
+            on_missing_key: camel_processor::OnMissingKey::Fail,
         };
 
         let result = reg.compile_step(step, 0, &ctx);

@@ -360,6 +360,8 @@ pub enum BuilderStep {
         steps: Vec<BuilderStep>,
         eager: bool,
         remove_on_failure: bool,
+        /// Missing-key policy (`fail` default, or `process`); see ADR-0099.
+        on_missing_key: camel_processor::OnMissingKey,
     },
     /// Cache step (EIP). Wraps a child sub-pipeline that runs only on cache
     /// miss; on hit the stored body is reconstructed and the child is skipped.
@@ -1742,9 +1744,10 @@ mod tests {
                     steps: vec![],
                     eager: true,
                     remove_on_failure: false,
+                    on_missing_key: camel_processor::OnMissingKey::Fail,
                 }
             ),
-            "IdempotentConsumer { repository: \"myRepo\", expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, steps: [], eager: true, remove_on_failure: false }"
+            "IdempotentConsumer { repository: \"myRepo\", expression: LanguageExpressionDef { language: \"simple\", source: \"${body}\" }, steps: [], eager: true, remove_on_failure: false, on_missing_key: Fail }"
         );
 
         // -- group L: DeclarativeDoTry -----------------------------------------

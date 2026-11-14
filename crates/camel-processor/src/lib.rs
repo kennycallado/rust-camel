@@ -90,7 +90,7 @@ pub use error_handler::{
     invoke_processor,
 };
 pub use filter::FilterSegment;
-pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdSource};
+pub use idempotent_consumer::{IdempotentConsumerSegment, MessageIdSource, OnMissingKey};
 pub use intercept_compose::compose_divert;
 pub use json_schema_validate::JsonSchemaValidateService;
 pub use load_balancer::LoadBalanceSegment;

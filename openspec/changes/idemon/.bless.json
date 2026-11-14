@@ -1,0 +1,14 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "hash": "fa2923ce1747fa9b27033417cc992a17623b31f40151fd3c5d390d7f3ff43b8e",
+  "expert": "experts/e_gpt",
+  "date": "2026-11-14",
+  "rounds": 4,
+  "spec_bless_hash": "0901a7941478ce7b66b61edcf6337dccbdd75a88f7efba2f4c4c744b703f46eb",
+  "notes": "Spec APPROVED after 4 rounds. Plan: r_glm review round (3 Important + 3 Minor, applied+verified), r_glm re-review APPROVE (2 folds applied), e_gpt plan-bless 3 rounds of fixes (eager-race test path, seeded marker-cleanup tests, ERROR-level :183 assertion, clone-safe AtomicUsize fixtures with entered-handshake gates + bounded waits + mutant-exclusivity, full CONTEXT-MAP/CONTEXT architecture refresh in 3.2, parse-based on_missing_key validation naming the field). Final APPROVED at fa2923ce.",
+  "reviewer_reviews": [
+    {"reviewer": "reviewers/r_glm", "verdict": "APPROVE-after-fixes", "findings_applied": 6},
+    {"reviewer": "reviewers/r_glm", "verdict": "APPROVE", "folds_applied": 3}
+  ]
+}

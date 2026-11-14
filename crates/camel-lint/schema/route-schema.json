@@ -926,9 +926,22 @@
           "description": "Simple-language expression that extracts the message-id (e.g. `\"${header.messageId}\"`).",
           "type": "string"
         },
+        "on_missing_key": {
+          "default": null,
+          "description": "Missing-key policy: `\"fail\"` (default) or `\"process\"`. Invalid values\nfail compile (canonical/programmatic path) with an error naming the\nfield. `null` is valid and means the default.",
+          "enum": [
+            "fail",
+            "process",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "remove_on_failure": {
           "default": null,
-          "description": "When `eager`, remove the key if the child fails (default `false`).",
+          "description": "When `eager`, remove the key if the child fails (default: `true` under\n`eager`, `false` otherwise). An explicit `false` under `eager` keeps an\nat-most-once contract and emits a load-time warning.",
           "type": [
             "boolean",
             "null"

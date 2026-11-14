@@ -1,0 +1,27 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "date": "2026-11-14",
+  "impl_base": "8a1c72edf",
+  "impl_head": "pre-park HEAD (feature/idemon)",
+  "findings": [
+    {
+      "severity": "minor",
+      "finding": "Dropped run future wedges in_flight marker for process lifetime (no RAII guard; restart heals; loud failure per ADR-0090)",
+      "disposition": "bd follow-up rc-umko6"
+    },
+    {
+      "severity": "minor",
+      "finding": "Task 3.2 Files list named camel-dsl/CONTEXT.md and camel-core/CONTEXT.md; both verified to carry no idempotency content and were intentionally untouched (vacuous-update avoidance). Outcome recorded here and in the park instead of fabricating entries.",
+      "disposition": "recorded"
+    },
+    {
+      "severity": "minor",
+      "finding": "Route-level unknown-field error degraded by untagged RouteDslStep variant collapse (pre-existing systemic; deny_unknown_fields pinned on typed parse)",
+      "disposition": "bd follow-up rc-fz9vy"
+    }
+  ],
+  "notes": "Delta spec coherent with canon eip-idempotency (pure ADDED, no collisions): 5 requirements, 19 scenarios, each with owning tests. Cross-task interactions verified sound (DSL default flip gated through eager && remove_on_failure; eager race clears marker; one critical section for ownership). Gate table: gates-local 29/29 pass (4 CI-owned skips: lint-commits, lint-bridge-releases, doc-guide-test, cargo-audit), cargo build --workspace OK, cargo test --workspace --lib 13355 passed 0 failed, hexagonal_architecture_boundaries_test 33 passed, cargo xtask schema --check OK, mdbook build + mdbook test OK. No Redis/MQTT-backed repository path touched (no camel-test suite required). No #[ignore]/infra-dependent tests touched.",
+  "followups_filed": ["rc-umko6", "rc-fz9vy", "rc-mkz55", "rc-5cq9h"]
+}

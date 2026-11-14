@@ -1617,17 +1617,41 @@ fn compile_loop_step(
     })
 }
 
+/// Resolve the effective `remove_on_failure` flag and whether the explicit
+/// at-most-once opt-in must be warned about at load time.
+///
+/// Under `eager`, the default rolls the reservation back so a failed child can
+/// be retried; an explicit `false` keeps an at-most-once contract and warns.
+/// Outside `eager` the flag is inert and defaults to `false`.
+fn resolve_remove_on_failure(eager: bool, explicit: Option<bool>) -> (bool, bool) {
+    match (eager, explicit) {
+        (true, None) => (true, false),
+        (true, Some(value)) => (value, !value),
+        (false, _) => (explicit.unwrap_or(false), false),
+    }
+}
+
 fn compile_idempotent_consumer_step(
     def: IdempotentConsumerStepDef,
     stream_cache_threshold: usize,
 ) -> Result<BuilderStep, CamelError> {
+    let on_missing_key = camel_processor::OnMissingKey::parse(def.on_missing_key.as_deref())?;
     let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold)?;
+    let eager = def.eager.unwrap_or(false);
+    let (remove_on_failure, warn_at_most_once) =
+        resolve_remove_on_failure(eager, def.remove_on_failure);
+    if warn_at_most_once {
+        tracing::warn!(
+            "idempotent_consumer: eager=true with explicit remove_on_failure=false keeps an at-most-once contract — a failed child leaves the key reserved and retries skip it as duplicates"
+        );
+    }
     Ok(BuilderStep::IdempotentConsumer {
         repository: def.repository,
         expression: def.expression,
         steps: sub_steps,
-        eager: def.eager.unwrap_or(false),
-        remove_on_failure: def.remove_on_failure.unwrap_or(false),
+        eager,
+        remove_on_failure,
+        on_missing_key,
     })
 }
 
@@ -7351,6 +7375,257 @@ rest:
             err.contains("'skip'"),
             "error should name the offending on_miss value, got: {err}"
         );
+    }
+
+    // ── idempotent_consumer: on_missing_key + eager rollback default ──
+
+    fn idempotent_step(
+        steps: &[BuilderStep],
+        index: usize,
+    ) -> (&bool, &bool, &camel_processor::OnMissingKey) {
+        match &steps[index] {
+            BuilderStep::IdempotentConsumer {
+                eager,
+                remove_on_failure,
+                on_missing_key,
+                ..
+            } => (eager, remove_on_failure, on_missing_key),
+            other => panic!("expected IdempotentConsumer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dsl_accepts_on_missing_key_fail_and_process() {
+        for (raw, expected) in [
+            ("fail", camel_processor::OnMissingKey::Fail),
+            ("process", camel_processor::OnMissingKey::Process),
+        ] {
+            let yaml = format!(
+                r#"
+routes:
+  - id: idem-on-missing
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${{header.messageId}}"
+          on_missing_key: "{raw}"
+          steps:
+            - to: "log:info"
+"#
+            );
+            let routes = crate::yaml::parse_yaml(&yaml).expect("valid on_missing_key must parse");
+            let (_, _, on_missing_key) = idempotent_step(routes[0].steps(), 0);
+            assert_eq!(*on_missing_key, expected, "on_missing_key: {raw}");
+        }
+    }
+
+    #[test]
+    fn dsl_rejects_invalid_on_missing_key_value() {
+        let yaml = r#"
+routes:
+  - id: idem-on-missing-bad
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          on_missing_key: "skip"
+          steps:
+            - to: "log:info"
+"#;
+        let Err(err) = crate::yaml::parse_yaml(yaml) else {
+            panic!("invalid on_missing_key must be rejected");
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("on_missing_key"),
+            "error must name the field, got: {err}"
+        );
+        assert!(
+            err.contains("\"fail\" or \"process\""),
+            "error must name the accepted values, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dsl_rejects_unknown_idempotent_field() {
+        let yaml = r#"
+routes:
+  - id: idem-unknown
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          on_duplicate: true
+          steps:
+            - to: "log:info"
+"#;
+        let Err(err) = crate::yaml::parse_yaml(yaml) else {
+            panic!("unknown idempotent field must be rejected");
+        };
+        let err = err.to_string();
+        assert!(
+            err.contains("steps"),
+            "route parsing must reject the unknown field, got: {err}"
+        );
+
+        // `RouteDslStep` is an untagged enum, which collapses the inner serde
+        // error at route level; pin `deny_unknown_fields` on the typed body.
+        let body = r#"
+idempotent_consumer:
+  repository: memory
+  expression: "${header.messageId}"
+  on_duplicate: true
+"#;
+        let typed =
+            noyalib::compat::serde_yaml::from_str::<crate::route_ast::IdempotentConsumerStep>(body);
+        let Err(typed) = typed else {
+            panic!("typed idempotent_consumer body must reject on_duplicate");
+        };
+        let typed = typed.to_string();
+        assert!(
+            typed.contains("unknown field"),
+            "expected an unknown-field error, got: {typed}"
+        );
+        assert!(
+            typed.contains("on_duplicate"),
+            "expected the unknown field to be named, got: {typed}"
+        );
+    }
+
+    #[test]
+    fn dsl_default_on_missing_key_is_fail() {
+        let yaml = r#"
+routes:
+  - id: idem-default
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          steps:
+            - to: "log:info"
+"#;
+        let routes = crate::yaml::parse_yaml(yaml).expect("default route must parse");
+        let (_, _, on_missing_key) = idempotent_step(routes[0].steps(), 0);
+        assert_eq!(*on_missing_key, camel_processor::OnMissingKey::Fail);
+    }
+
+    #[test]
+    fn resolve_remove_on_failure_matrix() {
+        assert_eq!(resolve_remove_on_failure(true, None), (true, false));
+        assert_eq!(resolve_remove_on_failure(true, Some(true)), (true, false));
+        assert_eq!(resolve_remove_on_failure(true, Some(false)), (false, true));
+        assert_eq!(resolve_remove_on_failure(false, None), (false, false));
+        assert_eq!(resolve_remove_on_failure(false, Some(true)), (true, false));
+        assert_eq!(
+            resolve_remove_on_failure(false, Some(false)),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn eager_explicit_false_warns_at_compile() {
+        let yaml = r#"
+routes:
+  - id: idem-at-most-once
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          eager: true
+          remove_on_failure: false
+          steps:
+            - to: "log:info"
+"#;
+        let (result, warns) = capture_warns(|| crate::yaml::parse_yaml(yaml));
+        result.expect("explicit at-most-once route must compile");
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("idempotent_consumer") && w.contains("at-most-once contract")),
+            "expected an at-most-once WARN, got: {warns:?}"
+        );
+    }
+
+    #[test]
+    fn eager_absent_remove_on_failure_compiles_effective_true() {
+        let yaml = r#"
+routes:
+  - id: idem-eager-rollback
+    from: "direct:in"
+    steps:
+      - idempotent_consumer:
+          repository: memory
+          expression: "${header.messageId}"
+          eager: true
+          steps:
+            - to: "log:info"
+"#;
+        let routes = crate::yaml::parse_yaml(yaml).expect("eager route must compile");
+        let (_, remove_on_failure, _) = idempotent_step(routes[0].steps(), 0);
+        assert!(
+            *remove_on_failure,
+            "eager without an explicit flag must default to rollback"
+        );
+    }
+
+    // WARN capture — mirrors `crates/camel-dsl/src/discovery.rs::capture_warns`
+    // and the guard convention in docs/testing/tracing-capture-guards.md.
+
+    struct WarnMessageVisitor<'a>(&'a mut Option<String>);
+
+    impl tracing::field::Visit for WarnMessageVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                *self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    struct WarnCaptureLayer {
+        events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for WarnCaptureLayer
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut slot = None;
+            event.record(&mut WarnMessageVisitor(&mut slot));
+            if let Some(message) = slot {
+                self.events
+                    .lock()
+                    .expect("capture lock")
+                    .push(format!("{}: {message}", event.metadata().level()));
+            }
+        }
+    }
+
+    fn capture_warns<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+        use tracing_subscriber::prelude::*;
+        crate::test_support::ensure_global_tracing_default();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let guard = tracing_subscriber::registry()
+            .with(WarnCaptureLayer {
+                events: std::sync::Arc::clone(&events),
+            })
+            .set_default();
+        let out = body();
+        drop(guard);
+        let captured = events.lock().expect("capture lock").clone();
+        (out, captured)
     }
 
     #[test]

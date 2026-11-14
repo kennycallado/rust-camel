@@ -1383,9 +1383,20 @@ pub struct IdempotentConsumerBody {
     /// Reserve the key before running the child (default `false`).
     #[serde(default)]
     pub eager: Option<bool>,
-    /// When `eager`, remove the key if the child fails (default `false`).
+    /// When `eager`, remove the key if the child fails (default: `true` under
+    /// `eager`, `false` otherwise). An explicit `false` under `eager` keeps an
+    /// at-most-once contract and emits a load-time warning.
     #[serde(default)]
     pub remove_on_failure: Option<bool>,
+    /// Missing-key policy: `"fail"` (default) or `"process"`. Invalid values
+    /// fail compile (canonical/programmatic path) with an error naming the
+    /// field. `null` is valid and means the default.
+    #[cfg_attr(
+        feature = "schema",
+        schemars(extend("enum" = json!(["fail", "process", null])))
+    )]
+    #[serde(default)]
+    pub on_missing_key: Option<String>,
 }
 
 /// Cache EIP step — puts/stores an exchange result in a `CacheRepository`.

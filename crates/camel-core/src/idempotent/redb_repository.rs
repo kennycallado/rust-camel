@@ -501,6 +501,8 @@ mod tests {
             OutcomeSegment::new(Box::new(child)),
             false, // non-eager: key added after child Completed
             false, // remove_on_failure: keep key even if child fails
+            camel_processor::OnMissingKey::Fail,
+            Arc::new(camel_component_api::test_support::NoopRuntimeObservability),
         );
         (segment, invoked)
     }

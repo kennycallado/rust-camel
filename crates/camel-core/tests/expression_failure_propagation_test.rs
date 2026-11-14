@@ -390,6 +390,7 @@ fn failing_steps(key: &str) -> Vec<BuilderStep> {
             steps: vec![],
             eager: false,
             remove_on_failure: false,
+            on_missing_key: camel_processor::OnMissingKey::Fail,
         }],
         "log" => vec![BuilderStep::DeclarativeLog {
             level: LogLevel::Info,

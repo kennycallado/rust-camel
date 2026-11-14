@@ -613,9 +613,13 @@ pub struct IdempotentConsumerStepDef {
     /// If `true`, reserve the key in the repository BEFORE running the child
     /// (eager mode). Default `false` (lazy: add only after the child completes).
     pub eager: Option<bool>,
-    /// If `true` and `eager` is `true`, remove the key from the repository
-    /// when the child returns `Failed`. Default `false`.
+    /// When `eager`, remove the key if the child fails (default: `true` under
+    /// `eager`, `false` otherwise). An explicit `false` under `eager` keeps an
+    /// at-most-once contract and emits a load-time warning.
     pub remove_on_failure: Option<bool>,
+    /// Missing-key policy: `"fail"` (default) or `"process"`, resolved at
+    /// compile time by `OnMissingKey::parse`.
+    pub on_missing_key: Option<String>,
 }
 
 /// Cache EIP step definition.

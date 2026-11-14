@@ -1,0 +1,57 @@
+# Design: idemon
+
+## Approach
+
+All semantics are fixed by the e_opus ruling (2026-11-14, recorded as bd comments on rc-36ujy / rc-v67ye — the authority over this order). Encoding, not relitigating:
+
+1. **`OnMissingKey`** — new enum in `camel-processor` (`Fail` | `Process`, ADR-0091 enum-over-bool), carried by `IdempotentConsumerSegment` next to `eager`/`remove_on_failure`. Key extraction normalizes empty→absent for BOTH arms inside `MessageIdSource::message_id` (the sync arm currently lets `Some("")` through as a real key). A missing key under `Fail` returns `PipelineOutcome::Failed(CamelError::ProcessorError(..))` naming `idempotent_consumer` and the repository; the child never runs. Under `Process` the segment logs `warn` and forwards to the child without touching the repository.
+2. **Eager rollback default** — resolved in the DSL compile (`camel-dsl/src/compile.rs`, `compile_idempotent_consumer_step`): effective `remove_on_failure = if eager { def.remove_on_failure.unwrap_or(true) } else { def.remove_on_failure.unwrap_or(false) }`. An explicit `Some(false)` under `eager` emits a load-time `tracing::warn` stating the at-most-once contract. Load-time rejection of `eager` + retries is NOT feasible (global handler invisible to camel-dsl; `on_exceptions` retries are runtime-predicated) — explicitly not attempted.
+3. **Failed rollback: error representation.** `PipelineOutcome::Failed` carries no exchange, so "mark and let the handler decide" is not expressible. The step returns the **child's error verbatim** — `on_exceptions` retry predicates match structurally (`camel-dsl/src/compile.rs:999`, `matches!(err, CamelError::Io(_))`), so any wrapper variant would silently break route-level retry semantics. The rollback failure is attached as **structured context**, not as error-wrapper surgery: an error-level log carrying both the child error and the rollback error as fields, the pending-rollback state (below), and the observable failure of the exchange itself. A regression test pins that a failed rollback under a `Failed(Io(..))` child still surfaces a `CamelError::Io(..)`.
+4. **Pending-rollback set: single-owner recovery with in-flight coordination.** The segment holds a shared lock-protected rollback state across clones — one `Arc<std::sync::Mutex<PendingRollbacks>>` where `PendingRollbacks` carries two `HashSet<String>`s (`pending`, `in_flight`) under a single critical section; no await holds the lock. This is the ruling's shared `Arc<Mutex<HashSet<String>>>` generalized to carry the in-flight marker the ownership guarantee needs. Semantics:
+   - **Failed eager rollback**: insert the key into `pending`; return the child error verbatim with the error-level context log.
+   - **Run start, before the contains check** (one critical section): key in `in_flight` → another clone is actively recovering → the raced delivery fails loudly (`Failed`, naming `idempotent_consumer`, the repository, and the recovery-in-progress reason) — it must not reserve-and-run, because the recovery may still end in a failed rollback; telling it "duplicate, done" would recreate the zero-work-success hazard. Key in `pending` → this clone takes ownership: move `pending → in_flight` atomically, then unlock and retry `repo.remove`: failure → move `in_flight → pending` back and fail with the removal error (primary — no child ran); success → proceed to the normal contains/reserve/child flow **with `in_flight` still held**.
+   - **Marker lifetime spans removal → reservation completion.** `in_flight` is cleared only when the key's reservation step resolves: eager mode — after the pre-child `add` resolves (reserved, race duplicate, or error), the outcome recorded as usual (race duplicate = observable skip; add error = `Failed`); lazy mode — after the post-child `add` resolves (success, `:183` failure with success kept, or the outcome being non-`Completed` so no add happens). A settled key can therefore never wedge in the in-flight state. Because raced deliveries fail while `in_flight` is held, the recovery owner is the only clone that can reserve during recovery and runs the child exactly once; every raced delivery is loud (`Failed`), never a silent `Completed`.
+   - `CamelRedelivered` is NOT used — it is a header, untrusted per ADR-0032.
+5. **Non-eager add failure (`:183`)** — the child already completed; failing the exchange would re-run completed work. Keep `Completed`, log at `error` level, increment `camel.idempotent.add_failures` (label `repository`, `// allow-open-label rc-36ujy` per the metric-labels lint).
+6. **Duplicate observability** — both duplicate paths (`contains == true` and eager race `add == Ok(false)`) set exchange property `camel.idempotent.duplicate = Bool(true)` and increment `camel.idempotent.duplicates` (label `repository`, allow-open-label). "A retry must never pass as a duplicate" is bounded to pending-rollback recovery: under pending recovery the owner always re-runs the child after a successful removal; the explicit at-most-once opt-in intentionally permits duplicate skips. Metrics flow through a new `rt: Arc<dyn RuntimeObservability>` constructor param (same seam as `CacheService`).
+7. **ADR-0099** — idempotent reservation semantics: fail-closed missing keys, eager rollback default, pending-rollback rule with single-owner recovery, "a retry must never pass as a duplicate" (bounded per 6). Cites ADR-0023 (C1), ADR-0032 (untrusted exchange data), ADR-0090 (loud failure). Deliberate divergence from Apache Camel, recorded so nobody "restores parity".
+
+Docs: `docs/src/eip/idempotent-consumer.md` (reservation semantics, duplicate observability) and `docs/src/yaml-dsl/step-verbs/resilience.md` (field table: `on_missing_key`, new `remove_on_failure` defaults) — ste-writing rules apply.
+
+## Affected crates
+
+`on_missing_key` is a policy value that must traverse the full step surface — every site below carries it:
+
+- `camel-processor`: `idempotent_consumer.rs` — `OnMissingKey` enum, empty→absent normalization in `MessageIdSource::message_id` (both arms), pending-rollback set with single-owner take, metrics, exchange property, error levels; `IdempotentConsumerSegment::new` grows `on_missing_key` and `rt` params.
+- `camel-dsl`:
+  - `route_ast.rs` — `on_missing_key: Option<String>` on `IdempotentConsumerBody` with a schemars `extend("enum")` rendering `["fail", "process", null]` (the `CachePeekStaleBody.on_miss` canonical pattern — a bare serde enum's unknown-variant error names the accepted variants but not the field, so resolution uses `OnMissingKey::parse` with an error naming both); `deny_unknown_fields` kept — unknown FIELDS rejected by serde, unknown VALUES rejected by `parse`.
+  - `model.rs` (`:606`, `IdempotentConsumerStepDef`) — the intermediate `DeclarativeStep` definition gains the field (YAML constructs this type before compilation).
+  - `yaml.rs` (`:1715` conversion) and the JSON path (`json.rs` uses the same serde model) — field mapping into `IdempotentConsumerStepDef`.
+  - `compile.rs` — value validation joins the existing `validate_step` pass; `compile_idempotent_consumer_step` (`:1620`) resolves eager-aware `remove_on_failure` default + warning, forwards `on_missing_key` into `BuilderStep::IdempotentConsumer` (`:1625`).
+- `camel-core`:
+  - `lifecycle/application/route_definition.rs` (`:357`) — `BuilderStep::IdempotentConsumer` gains the field.
+  - `lifecycle/adapters/step_compilers/core.rs` (`:98`) — passes `on_missing_key` + `ctx.rt.clone()` into the segment constructor.
+  - test sites updated: `startup_validation.rs` (`:616`), `step_compilers/core.rs` (`:1010`), the integration test `crates/camel-core/tests/expression_failure_propagation_test.rs` (`:387`), `idempotent/redb_repository.rs` (`:498`); the Debug-format test at `route_definition.rs` (`:1739`) CONSTRUCTS the struct with explicit fields — gains the new field and an updated expected Debug string; pattern-only sites (`startup_validation.rs:156`, `camel-bundles/src/stream_collision.rs:98`) use `..` and stay untouched.
+- `schemas/`: regenerated by `cargo xtask schema` (route-schema.json + TS types + camel-lint embedded copy).
+
+## Architecture boundaries
+
+Runtime semantics live in `camel-processor` (segment); policy defaulting lives in `camel-dsl` (compile-time); `camel-core` transports the field and wires constructor args; repositories and components untouched. Metrics use the existing `RuntimeObservability` seam; the exchange property uses the existing `Exchange::set_property` API. The canonical v2 path rejects `idempotent_consumer` today and stays untouched.
+
+## Test matrix (spec-backed)
+
+- Processor: {sync, async} × {absent, empty} × {fail, process}; eager rollback default; explicit opt-in + warning; failed rollback (typed-child regression: `Io` child survives as `Io`); pending recovery success; pending removal fails again (entry retained, no contains/add/child); raced delivery during in-flight recovery fails loudly with no repo ops and no child — deterministic regressions pause the owner BOTH before the removal and after the removal/before the reservation (the latter detects premature marker clearing); marker cleared once the reservation step resolves (no wedged in-flight key); recovery owner reserves and runs exactly once; duplicate property+metric (contains hit and eager race); `:183` success + error log + metric.
+- DSL: `on_missing_key: fail` parses; `on_missing_key: process` parses; invalid value → parse error naming the field; unknown field → `deny_unknown_fields` error; default absent → `fail`; eager + explicit `remove_on_failure: false` → load-time warning; eager + absent `remove_on_failure` → compiles with effective `true`.
+
+## Alternatives considered
+
+- `ProcessorErrorWithSource` wrapping the child error — rejected: structural `on_exceptions` matching (`compile.rs:999`) would stop matching the child's variant; a wrapper enum variant has the same defect. Child error travels verbatim.
+- Load-time eager+retries rejection — infeasible (e_opus Correction 1); warning-based default instead.
+- Fail the exchange on failed non-eager add — rejected (e_opus Correction 2): duplicate processing, not zero work; would re-run completed work.
+- `CamelRedelivered` to drive pending-rollback — rejected: header, untrusted (ADR-0032).
+- Mark-and-let-handler-decide on failed rollback — rejected: `PipelineOutcome::Failed` carries no exchange.
+- Two-clone independent recovery removes — rejected: a stale remove can delete another clone's fresh reservation and double-run the child; single-owner take under the set mutex closes it. An owner that merely takes ownership without an in-flight marker is ALSO rejected: a concurrent delivery can win the reserve race during the removal→re-reservation gap, the owner then skips as a race duplicate, and if the recovery later ends in a failed rollback the raced delivery was already told success — the in-flight marker closes that window by failing raced deliveries loudly (ADR-0090). Clearing the marker right after a successful removal (before the reservation) is rejected by the same counterexample: the gap would reopen between removal and reservation; the marker is held until the reservation step resolves and is always cleared when it does, so a settled key cannot wedge in-flight.
+
+## Deferred
+
+`namespace:` on the step (same key in two routes sharing one repository collides) — separate decision, tracked on rc-v67ye; not implemented here.
