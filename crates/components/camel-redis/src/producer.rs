@@ -96,21 +96,36 @@ impl RedisProducer {
     /// Health check: PINGs Redis and returns Ok(()) if reachable.
     ///
     /// Uses the same shared connection as normal operations. If no connection
-    /// exists yet, creates one (proving connectivity). On failure, returns
-    /// a `CamelError::ProcessorError`.
+    /// exists yet, creates one (proving connectivity).
+    ///
+    /// On a PING failure the cached connection is invalidated when the error
+    /// proves the socket is dead, and the error is returned with the
+    /// `RedisError` preserved as its source.
     pub async fn check_connection(&self) -> Result<(), CamelError> {
         let endpoint = self.config.safe_endpoint();
-        let mut connection = self.executor.get_conn().await?;
+        let (generation, mut connection) = self.executor.checkout().await?;
 
-        redis::cmd("PING")
+        if let Err(e) = redis::cmd("PING")
             .query_async::<String>(&mut connection)
             .await
-            .map_err(|e| {
-                CamelError::ProcessorError(format!(
-                    "Redis health check PING failed for '{}': {}",
-                    endpoint, e
-                ))
-            })?;
+        {
+            // e_opus ruling (change redisdisc): keep the existing text but
+            // flip the variant to `ProcessorErrorWithSource` so the transport
+            // classifiers read the `redis::RedisError` structure instead of
+            // sniffing prose. This is what lets a dead socket classify as
+            // invalidating here.
+            let err = CamelError::ProcessorErrorWithSource(
+                format!("Redis health check PING failed for '{}': {}", endpoint, e),
+                Arc::new(e),
+            );
+            // Compare-and-clear: only the generation this checkout observed is
+            // evicted, so a fresher connection rebuilt by another clone
+            // survives. Invalidation never dials by itself.
+            if crate::transport_error::invalidates_connection(&err) {
+                self.executor.invalidate_if_current(generation).await;
+            }
+            return Err(err);
+        }
 
         Ok(())
     }
@@ -171,10 +186,27 @@ impl Service<Exchange> for RedisProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::test_stub;
+    use crate::topology::FakeTopology;
     use camel_component_api::test_support::NoopRuntimeObservability;
+    use std::error::Error as _;
 
     fn test_rt() -> Arc<dyn RuntimeObservability> {
         Arc::new(NoopRuntimeObservability)
+    }
+
+    /// Producer wired to `topology` instead of the config-derived topology.
+    ///
+    /// `tests` is a descendant of the `producer` module, so it may build the
+    /// struct directly and inject the RESP stub topology.
+    fn stub_producer(url: &str, topology: Arc<FakeTopology>) -> RedisProducer {
+        let config = RedisEndpointConfig::from_uri(url).expect("valid stub redis URI");
+        let executor = MultiplexedExecutor::new(config.clone(), topology);
+        RedisProducer {
+            config,
+            executor,
+            runtime: test_rt(),
+        }
     }
 
     use camel_component_api::Message;
@@ -470,6 +502,108 @@ mod tests {
         assert!(
             result.is_err(),
             "check_connection should fail without live Redis"
+        );
+    }
+
+    /// redisdisc task 2.2: a PING failure on a dead socket must keep the
+    /// existing text, preserve the `RedisError` as source (the classifiers
+    /// read structure, not prose) and evict the cached connection.
+    #[tokio::test]
+    async fn check_connection_invalidates_on_killed_connection() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let producer = stub_producer(&stub.url(), topology.clone());
+
+        // First call primes the cache: the stub answers PING with +OK.
+        producer
+            .check_connection()
+            .await
+            .expect("the stub answers PING with +OK");
+        assert_eq!(topology.resolve_call_count(), 1);
+        let conn = producer.executor.conn_arc();
+        let cached = conn.lock().await; // allow-test-wait: test-owned cache cell; lock is uncontended in-test
+        assert!(
+            cached.is_some(),
+            "a successful PING must leave the connection cached"
+        );
+        drop(cached);
+
+        stub.kill().await;
+
+        let err = producer
+            .check_connection()
+            .await
+            .expect_err("a killed socket must fail PING");
+        let rendered = err.to_string();
+        // `CamelError::ProcessorErrorWithSource` renders with the shared
+        // "Processor error: " variant prefix; the health-check text follows it.
+        assert!(
+            rendered.starts_with("Processor error: Redis health check PING failed for '"),
+            "the existing health-check text must be preserved, got: {rendered}"
+        );
+        assert!(
+            err.source().is_some(),
+            "the PING failure must keep the RedisError as source: {err:?}"
+        );
+        assert!(
+            crate::transport_error::is_transient_redis_error(&err),
+            "socket death must classify transient: {err}"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "socket death must invalidate the cached connection: {err}"
+        );
+
+        let conn = producer.executor.conn_arc();
+        let cached = conn.lock().await; // allow-test-wait: test-owned cache cell; lock is uncontended in-test
+        assert!(
+            cached.is_none(),
+            "an invalidating PING failure must clear the cached connection"
+        );
+        drop(cached);
+        assert_eq!(
+            topology.resolve_call_count(),
+            1,
+            "an invalidation must never dial by itself"
+        );
+    }
+
+    /// redisdisc task 2.2: after the invalidation the next health check lazily
+    /// rebuilds through the topology and succeeds against the fresh node.
+    #[tokio::test]
+    async fn check_connection_recovers_after_kill() {
+        let dead = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let fresh = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![dead.url(), fresh.url()]));
+        let producer = stub_producer(&dead.url(), topology.clone());
+
+        producer
+            .check_connection()
+            .await
+            .expect("the first PING answers on the first stub");
+        assert_eq!(topology.resolve_call_count(), 1);
+
+        dead.kill().await;
+        producer
+            .check_connection()
+            .await
+            .expect_err("a killed socket must fail PING");
+
+        producer
+            .check_connection()
+            .await
+            .expect("the post-invalidation call must dial the fresh stub");
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "recovery must re-resolve exactly once"
+        );
+        let conn = producer.executor.conn_arc();
+        let cached = conn.lock().await; // allow-test-wait: test-owned cache cell; lock is uncontended in-test
+        assert_eq!(
+            cached.as_ref().map(|(generation, _)| *generation),
+            Some(2),
+            "the rebuilt connection must carry a fresh generation"
         );
     }
 

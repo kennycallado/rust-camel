@@ -137,7 +137,9 @@ pub(crate) struct QueueConsumerParams {
 ///
 /// On a transient error (connection refused/EOF/timeout/reset/readonly) at any
 /// stage the loop re-resolves the master and reconnects, bounded by `policy`;
-/// each such failure consumes one attempt. A non-transient error, or budget
+/// each such failure consumes one attempt. A proven pop — a delivered item or a
+/// blocking-pop timeout — resets the counter, because the budget counts
+/// CONSECUTIVE failures (ADR-0013). A non-transient error, or budget
 /// exhaustion, returns `Err` so Route supervision fires (ADR-0007).
 pub(crate) async fn queue_session<D, F>(
     topology: &dyn RedisTopology,
@@ -187,8 +189,23 @@ where
                 _ = cancel.cancelled() => return Ok(()),
                 popped = io.blpop(key, timeout_secs) => {
                     match popped {
-                        Ok(Some(item)) => deliver(item).await,
-                        Ok(None) => continue, // blocking-pop timeout — stay on this connection
+                        // ADR-0013: the budget counts CONSECUTIVE failures, so
+                        // a proven pop resets it. A popped item proves the link
+                        // end-to-end, and a blocking-pop timeout proves the
+                        // connection is healthy and merely idle.
+                        //
+                        // Never reset on connect: reconnecting SUCCEEDS even
+                        // against a master that dies right after the handshake,
+                        // so resetting there would make a fast-flapping master
+                        // retry forever. Only a pop outcome is proof.
+                        Ok(Some(item)) => {
+                            attempt = 0;
+                            deliver(item).await;
+                        }
+                        Ok(None) => {
+                            attempt = 0;
+                            continue; // blocking-pop timeout — stay on this connection
+                        }
                         Err(e) => {
                             match transient_retry_step(policy, &mut attempt, e, &pop_stage).await {
                                 ControlFlow::Continue(()) => break, // → reconnect
@@ -207,6 +224,7 @@ mod tests {
     use super::*;
     use crate::config::is_transient_redis_error;
     use crate::topology::FakeTopology;
+    use crate::transport_error::is_retry_budget_exhausted;
     use crate::transport_error::{io_refused_error, io_reset_error, redis_error_raw};
 
     fn io_reset() -> CamelError {
@@ -466,6 +484,171 @@ mod tests {
             "master should be re-resolved after blpop transient error"
         );
         assert_eq!(io.connect_count(), 2);
+    }
+
+    // ADR-0013: the budget counts CONSECUTIVE failures, so a proven pop
+    // (delivered item or blocking-pop timeout) resets the counter. Three
+    // isolated blips, each followed by a successful pop, must never exhaust a
+    // budget of 2. WITHOUT the reset the second blip lands at attempt 2 and
+    // `should_retry(2)` ends the session after `[v1]`.
+    //
+    // Batch shape must be `[success, Err]`, never `[Err, success]`: the fake
+    // installs the next batch only on a SUCCESSFUL connect, so the Err forces
+    // the reconnect that installs the following batch — an item queued after
+    // the Err in the same batch is lost.
+    #[tokio::test]
+    async fn queue_budget_survives_repeated_recovered_blips() {
+        let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+        let mut io = FakeQueueIo::new(vec![Ok(())], vec![]).with_blpop_per_connect(vec![
+            vec![Err(io_reset())],
+            vec![item("v1"), Err(io_reset())],
+            vec![item("v2"), Err(io_reset())],
+            vec![item("v3")],
+        ]);
+        let cancel = CancellationToken::new();
+
+        let values = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = values.clone();
+        let cancel_in_deliver = cancel.clone();
+        let deliver = move |(_k, v): (String, String)| {
+            let seen = seen.clone();
+            let cancel = cancel_in_deliver.clone();
+            async move {
+                let mut values = seen.lock().expect("values mutex");
+                values.push(v);
+                // End the session on the last item; the fake's next `blpop`
+                // pends, so cancellation resolves deterministically.
+                if values.len() == 3 {
+                    cancel.cancel();
+                }
+            }
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            queue_session(
+                &topology,
+                &mut io,
+                &queue_params(),
+                &fast_policy(2),
+                &cancel,
+                deliver,
+            ),
+        )
+        .await
+        .expect("session must not hang")
+        .expect("session must end Ok after cancellation");
+
+        assert_eq!(
+            *values.lock().expect("values mutex"),
+            vec!["v1".to_string(), "v2".to_string(), "v3".to_string()],
+            "every recovered blip must keep the budget: all items deliver, in order"
+        );
+        assert_eq!(
+            io.connect_count(),
+            4,
+            "one connection per blip plus the initial one"
+        );
+    }
+
+    // ADR-0013 companion for the OTHER proven-pop reset. The sibling
+    // `queue_budget_survives_repeated_recovered_blips` resets on a delivered
+    // item (`Ok(Some)`), which masks a deleted `Ok(None)` reset: every blip
+    // there is followed by an item, so the counter clears anyway. This test
+    // isolates the blocking-pop-timeout reset — `Ok(None)` is the only proof
+    // between the failures.
+    //
+    // With the reset: conn1 Err → 1, conn2 None resets → Err → 1, conn3
+    // Err → 2, conn4 delivers. A budget of 3 survives: session Ok, one
+    // connection per failure plus the delivery one.
+    // Without the reset (deletion regression): conn2's Err lands on attempt 2
+    // and conn3's on attempt 3, where `should_retry(3)` is false → session Err
+    // with nothing delivered, so the Ok/Err assertion below flips.
+    #[tokio::test]
+    async fn queue_blocking_pop_timeout_reset_is_discriminating() {
+        let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+        let mut io = FakeQueueIo::new(vec![Ok(())], vec![]).with_blpop_per_connect(vec![
+            vec![Err(io_reset())],
+            vec![Ok(None), Err(io_reset())],
+            vec![Err(io_reset())],
+            vec![item("v1")],
+        ]);
+        let cancel = CancellationToken::new();
+
+        let values = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = values.clone();
+        let cancel_in_deliver = cancel.clone();
+        let deliver = move |(_k, v): (String, String)| {
+            let seen = seen.clone();
+            let cancel = cancel_in_deliver.clone();
+            async move {
+                seen.lock().expect("values mutex").push(v);
+                cancel.cancel();
+            }
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            queue_session(
+                &topology,
+                &mut io,
+                &queue_params(),
+                &fast_policy(3),
+                &cancel,
+                deliver,
+            ),
+        )
+        .await
+        .expect("session must not hang")
+        .expect("the Ok(None) reset must keep the budget alive: session must end Ok");
+
+        assert_eq!(
+            *values.lock().expect("values mutex"),
+            vec!["v1".to_string()],
+            "only the item after the timeout reset may be delivered"
+        );
+        assert_eq!(
+            io.connect_count(),
+            4,
+            "one connection per failure (including the timeout-reset one) plus the delivery one"
+        );
+    }
+
+    // ADR-0013 companion: consecutive failures DO exhaust the budget. Each
+    // batch holds one pop failure, so every failure lands on a DIFFERENT
+    // connection — after each Err the loop reconnects and the next batch
+    // installs. The third failure reaches attempt 3 and `should_retry(3)` is
+    // false on a budget of 3.
+    #[tokio::test]
+    async fn queue_budget_exhausts_on_consecutive_pop_failures() {
+        let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+        let mut io = FakeQueueIo::new(vec![Ok(())], vec![]).with_blpop_per_connect(vec![
+            vec![Err(io_reset())],
+            vec![Err(io_reset())],
+            vec![Err(io_reset())],
+        ]);
+        let cancel = CancellationToken::new();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            queue_session(
+                &topology,
+                &mut io,
+                &queue_params(),
+                &fast_policy(3),
+                &cancel,
+                |_| async {},
+            ),
+        )
+        .await
+        .expect("session must not hang");
+
+        let err = result.expect_err("three consecutive pop failures must exhaust a budget of 3");
+        assert!(
+            is_retry_budget_exhausted(&err),
+            "exhaustion must carry the budget-exhausted marker: {err}"
+        );
+        assert_eq!(io.connect_count(), 3, "one connection per pop failure");
     }
 
     // C1 regression: a whole session of N items must be delivered over ONE

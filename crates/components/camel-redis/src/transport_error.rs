@@ -278,6 +278,86 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
     false
 }
 
+/// Returns true if `err` proves the cached connection is dead or unusable,
+/// so the caller must discard it before reconnecting.
+///
+/// # Ruled invalidation set
+///
+/// Exactly these shapes invalidate (ADR-0013, amended with the connection
+/// invalidation rule):
+///
+/// - the [`TransportTimeout`] marker — a half-open TCP socket surfaces as a
+///   timeout, so the timeout wrap is proof enough to drop the connection;
+/// - a `redis::RedisError` of kind `Server(ReadOnly)` — a demoted master;
+///   this is the ONE server reply that invalidates;
+/// - a `redis::RedisError` of kind `Io` whose inner `std::io::Error` kind is
+///   `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`, or
+///   `BrokenPipe`, or whose Display carries the driver's
+///   `connection dropped` phrase.
+///
+/// Everything else stays valid: every other server reply (settled-fatal
+/// codes and server text that merely matches the transient fallback words
+/// included), [`TransientRetryBudgetExhausted`], [`TransientByProse`],
+/// `ClusterConnectionNotFound`, io `TimedOut`, config errors, and plain
+/// `ProcessorError` text.
+///
+/// `CamelError::Io(_)` is explicitly NOT invalidating although
+/// [`is_transient_redis_error`] classifies it transient: the variant holds
+/// flattened text with no structural evidence — no `redis::RedisError` and no
+/// typed io kind sit in an inspectable chain — so no connection identity can
+/// be inferred from it. Real transport failures at the invalidation call
+/// sites preserve the `redis::RedisError` in the source chain instead.
+///
+/// # Subset obligation
+///
+/// The invalidation set is a strict subset of the transient set: for every
+/// error input, `invalidates_connection(e)` implies
+/// `is_transient_redis_error(e)`. Discarding a connection is a strictly
+/// stronger reaction than retrying, so any shape that warrants invalidation
+/// must already warrant a retry. Pinned by the corpus-driven
+/// `subset_property_holds_over_corpus` test.
+pub fn invalidates_connection(err: &CamelError) -> bool {
+    // Rule 1 (shared with the transient classifier): config-family errors are
+    // setup defects, never transport failures.
+    if matches!(err, CamelError::Config(_) | CamelError::ConfigValidation(_)) {
+        return false;
+    }
+    // `CamelError::Io` is transient but never invalidating — see the
+    // doc comment above.
+    if matches!(err, CamelError::Io(_)) {
+        return false;
+    }
+    // Same bounded walk as `is_transient_redis_error`; markers and the first
+    // `redis::RedisError` terminate it.
+    let mut source = err.source();
+    let mut hops = 0;
+    while let Some(raw) = source {
+        if hops >= MAX_SOURCE_HOPS {
+            break;
+        }
+        let src = unwrap_arc_dyn_error(raw);
+        if src.downcast_ref::<TransportTimeout>().is_some() {
+            return true;
+        }
+        // Budget exhaustion and prose markers are transient reasons with no
+        // structural connection evidence.
+        if src
+            .downcast_ref::<TransientRetryBudgetExhausted>()
+            .is_some()
+            || src.downcast_ref::<TransientByProse>().is_some()
+        {
+            return false;
+        }
+        if let Some(redis_err) = src.downcast_ref::<redis::RedisError>() {
+            return classify_redis_error_for_invalidation(redis_err);
+        }
+        source = src.source();
+        hops += 1;
+    }
+    // No marker, no `redis::RedisError` — nothing structural to invalidate on.
+    false
+}
+
 /// Returns the server code (`RedisError::code()`) of the first
 /// `redis::RedisError` in the chain starting at `root`, if any.
 ///
@@ -386,6 +466,49 @@ fn classify_redis_error(err: &redis::RedisError) -> bool {
     legacy_substring_matches(&err.to_string())
 }
 
+/// The [`invalidates_connection`] verdict for the first `redis::RedisError` in
+/// a source chain.
+///
+/// Only `Server(ReadOnly)` invalidates among server replies; only the four
+/// enumerated connection-death io kinds (or the driver's own
+/// `connection dropped` phrase) invalidate among io failures. Every other
+/// kind — TLS/static text, `ClusterConnectionNotFound`, authentication,
+/// business replies, io `TimedOut` — leaves the cached connection in place.
+fn classify_redis_error_for_invalidation(err: &redis::RedisError) -> bool {
+    match err.kind() {
+        // The one server reply that proves a demoted master.
+        redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly) => true,
+        // Every other server reply is a business outcome; reconnecting does
+        // not help and the socket is fine.
+        redis::ErrorKind::Server(_) => false,
+        // Transient bookkeeping, deliberately outside the ruled set.
+        redis::ErrorKind::ClusterConnectionNotFound => false,
+        redis::ErrorKind::Io => {
+            let connection_death_io_kind = err
+                .source()
+                .map(unwrap_arc_dyn_error)
+                .and_then(|src| src.downcast_ref::<std::io::Error>())
+                .is_some_and(|io_err| {
+                    matches!(
+                        io_err.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::BrokenPipe
+                    )
+                });
+            // redis-rs renders its own dead-socket detection as this phrase on
+            // io errors with no typed inner kind.
+            connection_death_io_kind
+                || err
+                    .to_string()
+                    .to_lowercase()
+                    .contains("connection dropped")
+        }
+        _ => false,
+    }
+}
+
 // ── Shared test fixtures ────────────────────────────────────────────────────
 //
 // Canonical transient fixtures reused by this crate's test modules
@@ -409,6 +532,7 @@ pub(crate) fn io_reset_error() -> redis::RedisError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_api::ConfigValidationError;
 
     fn io_redis_error(kind: std::io::ErrorKind) -> redis::RedisError {
         redis::RedisError::from(std::io::Error::from(kind))
@@ -794,6 +918,313 @@ mod tests {
         assert!(
             is_transient_redis_error(&shallow),
             "marker within the source-walk hop bound must be found: {shallow}"
+        );
+    }
+
+    // ── invalidates_connection ──────────────────────────────────────────
+
+    #[test]
+    fn invalidation_shapes_classify_true() {
+        let cases: [(&str, CamelError); 4] = [
+            (
+                "TransportTimeout marker",
+                marker_camel(
+                    "Redis connection to 'redis://x' timed out after 10s".into(),
+                    TransportTimeout { stage: "connect" },
+                ),
+            ),
+            (
+                "Server(ReadOnly) reply",
+                redis_error_to_camel(
+                    "SET",
+                    redis::RedisError::from((
+                        redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly),
+                        "READONLY You can't write against a read only replica.",
+                    )),
+                ),
+            ),
+            (
+                "Io-kind RedisError with ConnectionReset source",
+                redis_error_raw(io_redis_error(std::io::ErrorKind::ConnectionReset)),
+            ),
+            (
+                "Io-kind RedisError with driver connection-dropped phrase",
+                redis_error_raw(redis::RedisError::from((
+                    redis::ErrorKind::Io,
+                    "connection dropped",
+                ))),
+            ),
+        ];
+        for (shape, err) in cases {
+            assert!(
+                invalidates_connection(&err),
+                "{shape} must invalidate the cached connection: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_server_replies_never_invalidate() {
+        for (reply, code) in [
+            (
+                &b"-NOGROUP No such key 'stream:x' or consumer group 'g' in XREADGROUP with GROUP option\r\n"[..],
+                "NOGROUP",
+            ),
+            (
+                b"-BUSYGROUP Consumer Group name already exists\r\n",
+                "BUSYGROUP",
+            ),
+            (
+                b"-NOPERM this user has no permissions to run the 'xreadgroup' command\r\n",
+                "NOPERM",
+            ),
+            (
+                b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+                "WRONGTYPE",
+            ),
+        ] {
+            let err = redis_error_raw(parsed_server_error(reply));
+            assert!(
+                !invalidates_connection(&err),
+                "{code} is a server reply other than ReadOnly and must not invalidate: {err}"
+            );
+        }
+        // Server text that matches the transient fallback word set: transient
+        // yes (rule 6), invalidating no — only `Server(ReadOnly)` invalidates
+        // among server replies.
+        let fallback = redis_error_to_camel(
+            "GET",
+            redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "ERR connection lost while processing",
+            )),
+        );
+        assert!(
+            !invalidates_connection(&fallback),
+            "a server reply carrying a transient fallback word must not invalidate: {fallback}"
+        );
+        assert!(
+            is_transient_redis_error(&fallback),
+            "the fallback-word reply must stay transient (invalidating is the subset): {fallback}"
+        );
+    }
+
+    #[test]
+    fn io_variant_transient_but_not_invalidating() {
+        let err = CamelError::Io("x".into());
+        assert!(
+            is_transient_redis_error(&err),
+            "CamelError::Io stays transient (IO error: prefix): {err}"
+        );
+        assert!(
+            !invalidates_connection(&err),
+            "CamelError::Io carries no structural evidence and must not invalidate: {err}"
+        );
+    }
+
+    #[test]
+    fn io_timeout_is_transient_but_not_invalidating() {
+        let err = redis_error_raw(io_redis_error(std::io::ErrorKind::TimedOut));
+        assert!(
+            is_transient_redis_error(&err),
+            "Io-kind RedisError with TimedOut source is transient (rule 4): {err}"
+        );
+        assert!(
+            !invalidates_connection(&err),
+            "io TimedOut is not in the ruled invalidation set: {err}"
+        );
+    }
+
+    #[test]
+    fn subset_property_holds_over_corpus() {
+        let corpus: Vec<(&str, CamelError)> = vec![
+            // Shared transient fixtures.
+            ("io_refused_error", redis_error_raw(io_refused_error())),
+            ("io_reset_error", redis_error_raw(io_reset_error())),
+            (
+                "io ConnectionRefused via wrap site",
+                redis_error_to_camel("GET", io_redis_error(std::io::ErrorKind::ConnectionRefused)),
+            ),
+            (
+                "io BrokenPipe via wrap site",
+                redis_error_to_camel("GET", io_redis_error(std::io::ErrorKind::BrokenPipe)),
+            ),
+            (
+                "io ConnectionAborted via wrap site",
+                redis_error_to_camel("GET", io_redis_error(std::io::ErrorKind::ConnectionAborted)),
+            ),
+            (
+                "io PermissionDenied via wrap site",
+                redis_error_to_camel("GET", io_redis_error(std::io::ErrorKind::PermissionDenied)),
+            ),
+            (
+                "io TimedOut via raw wrap",
+                redis_error_raw(io_redis_error(std::io::ErrorKind::TimedOut)),
+            ),
+            (
+                "io custom text with refused kind",
+                redis_error_raw(redis::RedisError::from(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "no route",
+                ))),
+            ),
+            // Server replies.
+            (
+                "Server(ReadOnly)",
+                redis_error_to_camel(
+                    "SET",
+                    redis::RedisError::from((
+                        redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly),
+                        "READONLY You can't write against a read only replica.",
+                    )),
+                ),
+            ),
+            (
+                "Server(ResponseError) with classifier word",
+                redis_error_to_camel(
+                    "GET",
+                    redis::RedisError::from((
+                        redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                        "ERR connection lost while processing",
+                    )),
+                ),
+            ),
+            (
+                "NOGROUP",
+                redis_error_raw(parsed_server_error(
+                    b"-NOGROUP No such key 'stream:x' or consumer group 'g' in XREADGROUP with GROUP option\r\n",
+                )),
+            ),
+            (
+                "BUSYGROUP",
+                redis_error_raw(parsed_server_error(
+                    b"-BUSYGROUP Consumer Group name already exists\r\n",
+                )),
+            ),
+            (
+                "NOPERM with classifier word",
+                redis_error_raw(parsed_server_error(
+                    b"-NOPERM connection is not allowed for this user\r\n",
+                )),
+            ),
+            (
+                "WRONGTYPE",
+                redis_error_raw(parsed_server_error(
+                    b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+                )),
+            ),
+            (
+                "AuthenticationFailed",
+                redis_error_to_camel(
+                    "AUTH",
+                    redis::RedisError::from((
+                        redis::ErrorKind::AuthenticationFailed,
+                        "WRONGPASS invalid username-password pair",
+                    )),
+                ),
+            ),
+            // Client-side connection bookkeeping and generic io details.
+            (
+                "ClusterConnectionNotFound",
+                redis_error_to_camel(
+                    "GET",
+                    redis::RedisError::from((
+                        redis::ErrorKind::ClusterConnectionNotFound,
+                        "cluster connection not found",
+                    )),
+                ),
+            ),
+            (
+                "generic Io static detail (SSL handshake)",
+                redis_error_to_camel(
+                    "GET",
+                    redis::RedisError::from((redis::ErrorKind::Io, "SSL Handshake error")),
+                ),
+            ),
+            (
+                "generic Io driver connection-dropped phrase",
+                redis_error_raw(redis::RedisError::from((
+                    redis::ErrorKind::Io,
+                    "connection dropped",
+                ))),
+            ),
+            (
+                "TLS close-notify text",
+                redis_error_to_camel(
+                    "GET",
+                    redis::RedisError::from(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "peer closed connection without sending TLS close_notify",
+                    )),
+                ),
+            ),
+            // Markers.
+            (
+                "TransportTimeout marker",
+                marker_camel(
+                    "Redis connection to 'redis://x' timed out after 10s".into(),
+                    TransportTimeout { stage: "connect" },
+                ),
+            ),
+            (
+                "TransientRetryBudgetExhausted marker",
+                marker_camel(
+                    "connection lost while connecting (retry budget exhausted after 3 attempts): x"
+                        .into(),
+                    TransientRetryBudgetExhausted {
+                        stage: "connecting".into(),
+                        attempts: 3,
+                    },
+                ),
+            ),
+            (
+                "TransientByProse marker",
+                marker_camel(
+                    "failed to build Redis connection info: can't connect with TLS".into(),
+                    TransientByProse {
+                        site: "topology connection info",
+                    },
+                ),
+            ),
+            // Non-transport and boundary variants.
+            (
+                "Config error",
+                CamelError::Config("CA file at /etc/readonly.pem unreadable".into()),
+            ),
+            (
+                "ConfigValidation error",
+                CamelError::ConfigValidation(ConfigValidationError::ThrottlerMaxRequestsZero),
+            ),
+            (
+                "CamelError::Io variant",
+                CamelError::Io("cache serialization: bogus".into()),
+            ),
+            (
+                "plain ProcessorError",
+                CamelError::ProcessorError("connection refused".into()),
+            ),
+            // Chained wraps inside and beyond the hop bound.
+            ("chained marker depth 1", chained_marker_chain(1)),
+            ("chained marker depth 9", chained_marker_chain(9)),
+        ];
+        let mut invalidating = 0usize;
+        for (shape, err) in &corpus {
+            let invalidates = invalidates_connection(err);
+            if invalidates {
+                invalidating += 1;
+            }
+            assert!(
+                !invalidates || is_transient_redis_error(err),
+                "subset violated by {shape}: invalidates_connection is true but is_transient_redis_error is false: {err}"
+            );
+        }
+        // Guard against a vacuous property: the corpus must contain the
+        // invalidation-positive shapes the ruled set accepts (TransportTimeout
+        // marker, Server(ReadOnly), Io ConnectionReset, driver connection-dropped
+        // phrase).
+        assert!(
+            invalidating >= 4,
+            "corpus must exercise the invalidation-positive shapes, saw {invalidating}"
         );
     }
 }

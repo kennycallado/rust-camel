@@ -86,11 +86,11 @@ Custom component bundles follow the same convention. A bundle named `echo` reads
 
 ## [supervision]
 
-The runtime uses these knobs to restart a failed Consumer with capped exponential backoff. Defaults match a one-second start, doubling each attempt, capped at one minute, with five attempts.
+Supervision is off until an operator declares the `[supervision]` table, or code sets a policy on the context builder. The policy follows [ADR-0007](../adr/0007-route-supervised-consumer-failure.md). Once the table is declared, the defaults are a one-second start, doubling each attempt, capped at one minute, with no attempt limit.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_attempts` | integer or `null` | `5` | Maximum restart attempts. `null` retries forever. |
+| `max_attempts` | integer or `null` | `null` | Maximum restart attempts. `null` retries forever. An omitted key with the `[supervision]` table declared also retries forever. |
 | `initial_delay_ms` | integer (ms) | `1000` | Delay before the first attempt. Must be `> 0`. |
 | `backoff_multiplier` | float | `2.0` | Multiplier applied to the delay after each failure. Must be `>= 1.0`. |
 | `max_delay_ms` | integer (ms) | `60000` | Cap on the per-attempt delay. Must be `> 0`. |

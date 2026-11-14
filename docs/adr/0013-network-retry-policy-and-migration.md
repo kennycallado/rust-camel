@@ -2,6 +2,8 @@
 
 Status: Accepted
 
+Amended: 2026-11 — transport invalidation rule and consecutive-failure budget (bd rc-2un5k, rc-n64k3)
+
 ## Context
 
 Components duplicated capped exponential backoff loops for transient network reconnects, each with its own config struct, classifier, and log shape. The duplication made retry behavior inconsistent (max_attempts=0 meant unlimited in some components and zero-attempts in others), backoff hard to tune, and reconnect observability noisy.
@@ -21,6 +23,23 @@ Provide two public retry primitives in `camel-component-api::network_retry`, plu
 
 Do not add a public stateful HRTB/boxed-future variant (`retry_async_with_state`). The confirmed Redis producer and executor cases borrow mutable state across `await`, but they also require retry-specific side effects (`reconnect`, stale connection clearing) whose timing is clearer in explicit loops. These sites should keep manual loops using `NetworkRetryPolicy::should_retry` and `NetworkRetryPolicy::delay_for`.
 
+### Transport invalidation and the retry budget
+
+A cached connection is only a candidate. A transport failure proves the cache wrong, so a retry must not reuse the same socket.
+
+The executor caches the connection as `Option<(u64, MultiplexedConnection)>`. The `u64` is a generation drawn from an allocator shared by every clone. `execute_command` and the producer `check_connection` compare the generation they observed with the cached one when `invalidates_connection` classifies the failure. On a match they clear the cache. On a mismatch a fresher connection already exists, so they leave it alone. The error path never dials. It rethrows the original error unchanged. The lazy rebuild happens on the next checkout, under the single-flight gate, and it re-resolves the topology. `reconnect` follows the same rule. It clears only the generation this instance last used for a command. A stale clone then cannot clobber the fresh connection of a sibling.
+
+The retry budget counts consecutive failures since the last proven round trip. It has no time window. A connect is never proof, because a failing master can accept the handshake and then die. Each loop shape names its own reset point:
+
+- Streams read half: reset on `BatchDone` after a failure-free read round trip. A transient ack failure between the read and the batch end keeps the budget consumed. `reset_read_budget` compares the counter against the snapshot taken at the last good read.
+- Streams recovery half: reset on a completed `XAUTOCLAIM` pass, with or without claimed entries.
+- Queue consumer: reset on a pop that yields `Ok(Some)` or `Ok(None)`.
+- Pub/sub consumer: reset on a stream end whose connection uptime is at least `policy.max_delay`. A quiet channel offers no other health proof.
+
+The recovery drain-ack path is a deliberate exception. A drain ack consumes budget only through the reconnect internals. A pass that completes still resets the counter. An ack that always fails transiently therefore oscillates without exhausting the budget. Pass success remains the recovery half's proof of health. The read half differs, because it guards its reset with an explicit failed-ack check.
+
+Redis now follows the same consecutive-failure model as the Kafka, MQTT, and JMS consumers.
+
 ## Migration decision tree
 
 - **Use `retry_async`**: operation owns or clones its state, no shutdown-cancellation need. Examples: WS connect (`Some("ws-producer")`), CXF pool connect (`Some("cxf")`), gRPC producer (`Some("grpc-producer")`), OpenSearch producer (`Some("opensearch-producer")`), SQL pool connect (`Some("sql-consumer")`, `Some("sql-producer")`).
@@ -39,4 +58,5 @@ Do not add a public stateful HRTB/boxed-future variant (`retry_async_with_state`
 - Follow-up work tracked in bd:
   - `rc-cvq` was evaluated and closed wontfix: a stateful HRTB/boxed-future helper would add public API complexity without simplifying the confirmed Redis sites enough to justify it.
   - `rc-1nm` resolved: `retry_async` and `retry_async_cancelable` now accept `label: Option<&'static str>`. All 8 migrated components pass component identity via `Some("ws-producer")` etc., emitting a structured `component` tracing field. Operators can filter by component label.
+  - `rc-2un5k` and `rc-n64k3` amended this ADR with the transport invalidation rule and the consecutive-failure budget for the Redis executor and consumer loops.
   - Container test dead-store cleanup (pre-existing `attempt = 0` before `break`).

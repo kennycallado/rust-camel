@@ -13,17 +13,24 @@ use support::install_crypto_provider;
 use support::redis::shared_redis;
 
 use camel_api::error_handler::ErrorHandlerConfig;
-use camel_api::{Body, Exchange, Value};
+use camel_api::{Body, Exchange, Message, Value};
 use camel_builder::{RouteBuilder, StepAccumulator};
-use camel_component_api::NetworkRetryPolicy;
-use camel_component_redis::{RedisComponent, RedisConfig};
+use camel_component_api::test_support::NoopRuntimeObservability;
+use camel_component_api::{CamelError, NetworkRetryPolicy};
+use camel_component_redis::{RedisComponent, RedisConfig, RedisEndpointConfig, RedisProducer};
 use camel_test::CamelTestContext;
 use futures::{FutureExt, StreamExt};
 use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
 use serde_json::json;
 use std::panic::AssertUnwindSafe;
+use std::sync::Arc;
 use support::send_to_direct;
 use support::wait::wait_until;
+use testcontainers::runners::AsyncRunner;
+use testcontainers::{ContainerAsync, ImageExt};
+use testcontainers_modules::redis::Redis;
+use tower::Service;
 
 // ===========================================================================
 // String commands tests
@@ -1216,4 +1223,173 @@ async fn pubsub_startup_fails_fast_on_unreachable_broker() {
         payload.is::<String>() || payload.is::<&str>(),
         "expected the harness expect() panic, got a non-panic unwind payload"
     );
+}
+
+// ===========================================================================
+// Kill-connection regression and health recovery
+// ===========================================================================
+//
+// `CLIENT KILL TYPE normal` severs the multiplexed socket server-side, which
+// is the only failure mode the crate's invalidation path cannot observe as a
+// dial error: the driver may still hold a live-looking connection. These
+// tests therefore run on DEDICATED containers — the shared fixture serves
+// parallel tests whose connections the kill would also sever.
+
+/// List key used by the kill-connection tests.
+const KILL_KEY: &str = "killreg";
+
+/// Starts a dedicated `redis:7-alpine` container for one kill test.
+///
+/// Deliberately not `shared_redis()`: `CLIENT KILL TYPE normal` disconnects
+/// every client on the broker, including the connections of tests running in
+/// parallel against the shared fixture.
+async fn dedicated_redis() -> (ContainerAsync<Redis>, String) {
+    let container = Redis::default()
+        .with_tag("7-alpine")
+        .start()
+        .await
+        .expect("dedicated Redis container failed to start");
+    let port = container
+        .get_host_port_ipv4(6379)
+        .await
+        .expect("dedicated Redis port not available");
+    let conn_str = format!("127.0.0.1:{port}");
+    eprintln!("dedicated Redis ready at: {conn_str}");
+    (container, conn_str)
+}
+
+/// Producer for `LPUSH <KILL_KEY>` with a fresh, lazily connected executor.
+fn kill_test_producer(conn_str: &str) -> RedisProducer {
+    let uri = format!("redis://{conn_str}?command=LPUSH&key={KILL_KEY}");
+    RedisProducer::new(
+        RedisEndpointConfig::from_uri(&uri).expect("LPUSH endpoint config"),
+        Arc::new(NoopRuntimeObservability),
+    )
+    .expect("LPUSH producer")
+}
+
+/// LPUSH `value` through the producer (the text body is the pushed value).
+async fn lpush(producer: &mut RedisProducer, value: &str) -> Result<Exchange, CamelError> {
+    producer
+        .call(Exchange::new(Message::new(Body::Text(value.to_string()))))
+        .await
+}
+
+/// Fresh admin connection to `conn_str`, bounded so a stalled dial fails the
+/// test instead of hanging it.
+async fn admin_connection(conn_str: &str) -> MultiplexedConnection {
+    let client = redis::Client::open(format!("redis://{conn_str}")).expect("valid redis url");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.get_multiplexed_async_connection(),
+    )
+    .await
+    .expect("admin redis connect within 5s")
+    .expect("admin redis connection")
+}
+
+/// `LLEN <KILL_KEY>` over a fresh admin connection.
+async fn kill_key_len(conn_str: &str) -> i64 {
+    let mut conn = admin_connection(conn_str).await;
+    redis::cmd("LLEN")
+        .arg(KILL_KEY)
+        .query_async::<i64>(&mut conn)
+        .await
+        .expect("admin LLEN must succeed")
+}
+
+/// Kills every normal client of the dedicated broker (the caller excepted)
+/// and returns the number of connections killed.
+async fn client_kill_normal(conn: &mut MultiplexedConnection) -> i64 {
+    redis::cmd("CLIENT")
+        .arg("KILL")
+        .arg("TYPE")
+        .arg("normal")
+        .query_async::<i64>(conn)
+        .await
+        .expect("CLIENT KILL TYPE normal must report the killed count")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_kill_then_next_command_reconnects() {
+    install_crypto_provider();
+    let (_container, conn_str) = dedicated_redis().await;
+    let mut producer = kill_test_producer(&conn_str);
+
+    // Arrange: one command primes the cached connection, LLEN proves it
+    // reached the server.
+    lpush(&mut producer, "a")
+        .await
+        .expect("first LPUSH must succeed");
+    assert_eq!(
+        kill_key_len(&conn_str).await,
+        1,
+        "the primed connection must have applied 'a'"
+    );
+
+    // Act: sever the producer's socket server-side.
+    let mut admin = admin_connection(&conn_str).await;
+    let killed = client_kill_normal(&mut admin).await;
+    assert!(
+        killed >= 1,
+        "CLIENT KILL TYPE normal must kill at least the producer's client, killed {killed}"
+    );
+
+    // The killed socket still looks cached: LPUSH is non-idempotent, so the
+    // transport failure is rethrown unchanged and 'b' is never applied.
+    let err = lpush(&mut producer, "b")
+        .await
+        .expect_err("non-idempotent command on a killed socket must not be retried into success");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Redis LPUSH failed"),
+        "the original transport failure must be rethrown at the LPUSH wrap site, got: {msg}"
+    );
+
+    // The failure invalidated the cache, so the next command dials lazily.
+    lpush(&mut producer, "c")
+        .await
+        .expect("post-kill LPUSH must rebuild the connection");
+
+    assert_eq!(
+        kill_key_len(&conn_str).await,
+        2,
+        "'a' and 'c' must be the only applied pushes; the killed in-flight 'b' must be absent"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn health_recovers_after_client_kill() {
+    install_crypto_provider();
+    let (_container, conn_str) = dedicated_redis().await;
+    let producer = kill_test_producer(&conn_str);
+
+    // Arrange: a successful health check primes the cached connection.
+    producer
+        .check_connection()
+        .await
+        .expect("health check must succeed before the kill");
+
+    // Act: sever the producer's socket server-side.
+    let mut admin = admin_connection(&conn_str).await;
+    let killed = client_kill_normal(&mut admin).await;
+    assert!(
+        killed >= 1,
+        "CLIENT KILL TYPE normal must kill at least the producer's client, killed {killed}"
+    );
+
+    // Assert: the first check observes the dead socket and invalidates it;
+    // the second one dials and succeeds.
+    let first = producer
+        .check_connection()
+        .await
+        .expect_err("the first health check after the kill must fail");
+    assert!(
+        first.to_string().contains("Redis health check PING failed"),
+        "the kill failure must surface at the health-check wrap site, got: {first}"
+    );
+    producer
+        .check_connection()
+        .await
+        .expect("the second health check must rebuild the connection and succeed");
 }

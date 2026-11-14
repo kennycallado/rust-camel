@@ -254,6 +254,11 @@ where
         )
         .await?;
 
+        // Start of this connection's uptime, measured on the deliver loop's
+        // clock. Used below to tell a stream that lived long enough to prove
+        // health from one that died young.
+        let connected_at = tokio::time::Instant::now();
+
         // First live, fully-subscribed connection: readiness fires only
         // now — signalling earlier opened a window in which start()
         // returned before the server had registered the SUBSCRIBE, so a
@@ -277,6 +282,18 @@ where
                     match msg {
                         Some(m) => deliver(m).await,
                         None => {
+                            // ADR-0013: the budget counts CONSECUTIVE
+                            // failures. A quiet channel delivers nothing, so
+                            // uptime is the only health proof a pub/sub
+                            // stream can offer: a connection that lived at
+                            // least `max_delay` was healthy and its end must
+                            // not consume budget. A short-lived connection
+                            // proves nothing and must NOT reset — otherwise a
+                            // master that accepts and immediately drops
+                            // clients would retry forever.
+                            if connected_at.elapsed() >= policy.max_delay {
+                                attempt = 0;
+                            }
                             // Stream ended (connection closed). Reconnect and
                             // replay subscriptions, bounded by the retry budget.
                             attempt += 1;

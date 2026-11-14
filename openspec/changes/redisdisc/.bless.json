@@ -1,0 +1,33 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "hash": "sha256:ee8a0d0b6e4af6297d2930f263d3483918f8e83a9eb972bea51eb4e151099f65",
+  "expert": "e_gpt",
+  "date": "2026-11-14",
+  "session": "ses_e256ded74ffegwWCL0XJj3TeJi",
+  "supersedes_spec_bless": "sha256:3add4e295fdc7e8eba483cebe737267419288b1f3502c1c398dadb6eee3940a2",
+  "reviewer_loop": {
+    "reviewer": "r_glm",
+    "session": "ses_e258682ceffedWTsbygvmML7uS",
+    "findings_applied": "3 Important + 5 Minor + 1 absurd-minor, all applied before bless"
+  },
+  "rounds": [
+    {
+      "verdict": "APPROVED-WITH-FIXES",
+      "hash": "sha256:e385711c8df57022b4cb7979c5b78eef1983e6bd92caa84740a552f90188cef1"
+    },
+    {
+      "verdict": "APPROVED-WITH-FIXES",
+      "hash": "sha256:ec610936a8c3d6327e8828f1402b92e67b925add5d4643f0749d884434b3b0c6"
+    },
+    {
+      "verdict": "APPROVED-WITH-FIXES",
+      "hash": "sha256:2d38be8d13bf765a2cc343fa57f4e2408c8f1024b6dc722144f212c13fe36d66"
+    },
+    {
+      "verdict": "APPROVED",
+      "hash": "sha256:ee8a0d0b6e4af6297d2930f263d3483918f8e83a9eb972bea51eb4e151099f65"
+    }
+  ],
+  "notes": "settle_ack transient-ack-failure budget consumption added per bless round 1 (spec-required: failed ack blocks reset, always-failing ack exhausts)."
+}

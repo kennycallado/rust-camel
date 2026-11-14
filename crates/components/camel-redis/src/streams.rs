@@ -1076,10 +1076,13 @@ enum AckDispatch {
 
 /// Executes one `XACK` and answers its reply channel.
 ///
-/// A transient failure reconnects the read half under the task's budget and
-/// replies with the original transient error: the session invalidates the ids
-/// as unknown (only recovery may redeliver) without retrying the ack. A
-/// non-transient failure or budget exhaustion replies with the terminal error.
+/// A transient failure consumes one attempt, reconnects the read half under
+/// the task's budget, and replies with the original transient error: the
+/// session invalidates the ids as unknown (only recovery may redeliver)
+/// without retrying the ack. The attempt is consumed before the reconnect so
+/// an immediately-successful reconnect cannot hide an always-failing ack from
+/// the budget. A non-transient failure or budget exhaustion replies with the
+/// terminal error.
 #[allow(clippy::too_many_arguments)]
 async fn settle_ack(
     read: &mut dyn StreamReadIo,
@@ -1102,6 +1105,18 @@ async fn settle_ack(
                 let _ = reply.send(Err(err));
                 return AckDispatch::Stop;
             }
+            // Mirror `transient_retry_step`'s classify → budget step: the
+            // failed ack itself consumes one attempt. The reconnect below
+            // consumes further attempts through its own retry steps.
+            *attempt += 1;
+            if !policy.should_retry(*attempt) {
+                let _ = reply.send(Err(crate::retry::retry_budget_exhausted(
+                    policy,
+                    "settling stream ack",
+                    "stream ack failed",
+                )));
+                return AckDispatch::Stop;
+            }
             match reconnect_after_ack(read, topology, policy, attempt, cancel).await {
                 AckReconnect::Ready => {
                     let _ = reply.send(Err(err));
@@ -1114,6 +1129,21 @@ async fn settle_ack(
                 }
             }
         }
+    }
+}
+
+/// Returns the retry budget a settled batch no longer owes (ADR-0013).
+///
+/// `attempt_at_read_ok` carries the attempt count of the last failure-free
+/// read, and `read_proven` says whether such a read happened at all. A batch
+/// settles failure-free only when the counter still equals that snapshot: an
+/// ack failure in between keeps the budget consumed. The start-handshake
+/// `BatchDone` precedes any read, so `read_proven` is still false and it
+/// cannot reset.
+fn reset_read_budget(attempt: &mut u32, attempt_at_read_ok: &mut u32, read_proven: &mut bool) {
+    if *read_proven && *attempt == *attempt_at_read_ok {
+        *attempt = 0;
+        *read_proven = false;
     }
 }
 
@@ -1144,6 +1174,11 @@ async fn read_task_loop(
     let key = params.key.clone();
     let group = params.group.clone();
     let mut attempt: u32 = 0;
+    // Attempt count recorded by the last failure-free read, and whether such
+    // a read happened at all. Together they let a settled batch return the
+    // budget spent reaching a proven connection (see `reset_read_budget`).
+    let mut attempt_at_read_ok: u32 = u32::MAX;
+    let mut read_proven = false;
     let mut started = false;
 
     'session: loop {
@@ -1212,7 +1247,11 @@ async fn read_task_loop(
                 return;
             }
             match next_cmd(&mut cmd_rx, &cancel).await {
-                NextCmd::Command(ReadTaskCmd::BatchDone) => {}
+                NextCmd::Command(ReadTaskCmd::BatchDone) => {
+                    // The start handshake precedes any read, so this cannot
+                    // reset the budget (see `reset_read_budget`).
+                    reset_read_budget(&mut attempt, &mut attempt_at_read_ok, &mut read_proven);
+                }
                 NextCmd::Command(ReadTaskCmd::Ack { reply, .. }) => {
                     // No read happened yet, so an ack here is a protocol
                     // violation. Answer non-transiently so the session fails
@@ -1236,11 +1275,15 @@ async fn read_task_loop(
 
             match read_result {
                 Ok(Some(entries)) => {
+                    attempt_at_read_ok = attempt;
+                    read_proven = true;
                     if msg_tx.send(ReadTaskMsg::Batch(entries)).await.is_err() {
                         return;
                     }
                 }
                 Ok(None) => {
+                    attempt_at_read_ok = attempt;
+                    read_proven = true;
                     if msg_tx.send(ReadTaskMsg::NilTick).await.is_err() {
                         return;
                     }
@@ -1279,7 +1322,10 @@ async fn read_task_loop(
                             return;
                         }
                     }
-                    NextCmd::Command(ReadTaskCmd::BatchDone) => break,
+                    NextCmd::Command(ReadTaskCmd::BatchDone) => {
+                        reset_read_budget(&mut attempt, &mut attempt_at_read_ok, &mut read_proven);
+                        break;
+                    }
                     NextCmd::Closed | NextCmd::Cancelled => return,
                 }
             }
@@ -1313,9 +1359,12 @@ async fn await_in_flight<F: Future>(slot: Option<&mut (StreamEntry, Pin<Box<F>>)
 ///
 /// On a transient error (connection refused/EOF/timeout/reset/readonly) at any
 /// stage the read task re-resolves the master and reconnects, bounded by
-/// `policy`; each such failure consumes one attempt. A non-transient error, or
-/// budget exhaustion, ends the session with `Err` so Route supervision fires
-/// (ADR-0007).
+/// `policy`; each such failure consumes one attempt. A batch that settles
+/// without a failure between its read and the batch-done signal returns the
+/// attempts spent reaching that proven connection (ADR-0013); a transient ack
+/// failure consumes one attempt before its reconnect. A non-transient error,
+/// or budget exhaustion, ends the session with `Err` so Route supervision
+/// fires (ADR-0007).
 ///
 /// `on_ready` fires exactly once, after the first successful read connect and
 /// — when `create_group` is set — after `XGROUP CREATE` succeeds or reports
@@ -1498,6 +1547,11 @@ async fn recovery_pass(
                 );
                 *cursor = batch.next_cursor.clone();
                 queue.extend(batch.recovered);
+                // A completed pass is the proven `XAUTOCLAIM` round trip,
+                // claimed entries or not: the retry budget only measures
+                // consecutive failures. The counter stays independent of the
+                // read half's (ADR-0013).
+                *attempt = 0;
                 return Ok(RecoveryPass::Completed);
             }
             Err(err) => {

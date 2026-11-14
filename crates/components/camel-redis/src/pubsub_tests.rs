@@ -5,7 +5,7 @@
 use super::*;
 use crate::config::{RedisEndpointConfig, is_transient_redis_error};
 use crate::topology::{FakeTopology, StandaloneTopology};
-use crate::transport_error::{io_refused_error, redis_error_raw};
+use crate::transport_error::{io_refused_error, is_retry_budget_exhausted, redis_error_raw};
 
 fn io_refused() -> CamelError {
     redis_error_raw(io_refused_error())
@@ -757,5 +757,125 @@ async fn reconnect_budget_exhaustion_is_transient() {
         is_transient_redis_error(&err),
         "pubsub budget-exhaustion error must classify as transient: {}",
         err
+    );
+}
+
+// ADR-0013: pub/sub stream ends reset the consecutive-failure budget once
+// the connection has proven uptime. A quiet channel delivers nothing, so
+// uptime is the only health proof available. WITHOUT the reset the second
+// stream end lands at attempt 2 and `should_retry(2)` ends the session
+// after `[m1, m2]` — the third batch is never reached.
+//
+// `max_delay: Duration::ZERO` makes every uptime count as proven, so the
+// reset is deterministic without sleeping. Cancel on the THIRD delivery:
+// cancelling after the second would end the session before the second
+// (discriminating) stream end.
+#[tokio::test]
+async fn pubsub_budget_survives_long_lived_stream_ends() {
+    let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+    let mut io = FakePubSubIo::new(vec![Ok(())]).with_messages_per_connect(vec![
+        vec![fake_msg("ch", "m1")],
+        vec![fake_msg("ch", "m2")],
+        vec![fake_msg("ch", "m3")],
+    ]);
+    let cancel = CancellationToken::new();
+    let policy = NetworkRetryPolicy {
+        max_attempts: 2,
+        initial_delay: Duration::ZERO,
+        max_delay: Duration::ZERO,
+        jitter_factor: 0.0,
+        ..NetworkRetryPolicy::default()
+    };
+
+    let payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let delivered = payloads.clone();
+    let cancel_in_deliver = cancel.clone();
+    let deliver = move |msg: Msg| {
+        let delivered = delivered.clone();
+        let cancel = cancel_in_deliver.clone();
+        async move {
+            let payload = msg
+                .get_payload::<String>()
+                .expect("fake payload decodes as String");
+            let mut seen = delivered.lock().expect("payloads mutex");
+            seen.push(payload);
+            if seen.len() == 3 {
+                cancel.cancel();
+            }
+        }
+    };
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        pubsub_session(
+            &topology,
+            &mut io,
+            &["ch".into()],
+            &[],
+            &policy,
+            &cancel,
+            None,
+            deliver,
+        ),
+    )
+    .await
+    .expect("session must terminate within 5s")
+    .expect("cancelled session must end Ok");
+
+    assert_eq!(
+        *payloads.lock().expect("payloads mutex"),
+        vec!["m1".to_string(), "m2".to_string(), "m3".to_string()],
+        "each stream end after proven uptime must reconnect, not exhaust the budget"
+    );
+    assert_eq!(io.connect_count, 3, "one connect per message batch");
+}
+
+// ADR-0013 companion: a stream that ends BEFORE `max_delay` proves nothing,
+// so consecutive short-lived stream ends consume the budget and exhaust it.
+// The EMPTY third batch is load-bearing: conn 2 drains with batches still
+// queued, so its stream ENDS (`None`) and the second failure consumes
+// attempt 2. With only `[[m1], [m2]]` the final tail pends instead of
+// ending and the exhaustion never fires.
+#[tokio::test]
+async fn pubsub_stream_end_before_max_delay_consumes_budget() {
+    let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+    let mut io = FakePubSubIo::new(vec![Ok(())]).with_messages_per_connect(vec![
+        vec![fake_msg("ch", "m1")],
+        vec![fake_msg("ch", "m2")],
+        Vec::new(),
+    ]);
+    let cancel = CancellationToken::new();
+    let policy = NetworkRetryPolicy {
+        max_attempts: 2,
+        initial_delay: Duration::ZERO,
+        max_delay: Duration::from_secs(3600),
+        jitter_factor: 0.0,
+        ..NetworkRetryPolicy::default()
+    };
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        pubsub_session(
+            &topology,
+            &mut io,
+            &["ch".into()],
+            &[],
+            &policy,
+            &cancel,
+            None,
+            |_| async {},
+        ),
+    )
+    .await
+    .expect("session must terminate within 5s");
+
+    let err = result.expect_err("short-lived stream ends must exhaust the budget");
+    assert!(
+        is_retry_budget_exhausted(&err),
+        "exhaustion must carry the retry-budget marker: {err}"
+    );
+    assert_eq!(
+        io.connect_count, 2,
+        "the second stream end must exhaust the budget"
     );
 }

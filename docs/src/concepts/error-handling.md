@@ -405,7 +405,14 @@ let ctx = CamelContext::builder()
     .await?;
 ```
 
-This is Rust API only. YAML routes compile to the same RouteDefinition but cannot express registration logic. Supervision is a `CamelContext` concern, not a route field.
+Supervision is a `CamelContext` concern, not a route field. Route YAML has
+no supervision key. A route document that declares one fails to parse.
+
+Configure supervision in `Camel.toml` with the `[supervision]` table:
+`max_attempts`, `initial_delay_ms`, `backoff_multiplier`, and
+`max_delay_ms`. See [Camel.toml schema](../configuration/schema.md). Or
+configure it in code with `CamelContext::builder().supervision(config)`.
+See [ADR-0007](../adr/0007-route-supervised-consumer-failure.md).
 
 See `examples/auto-restart/` for a complete example.
 

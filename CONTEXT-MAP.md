@@ -58,7 +58,7 @@ are a convenience index and may lag the file.
 - [0010](./docs/adr/0010-security-policy-pre-pipeline-authorization.md) — Route-level SecurityPolicy authorizes before normal Route Steps run, rather than as a normal Pipeline Step
 - [0011](./docs/adr/0011-canonical-route-spec-minimal-contract.md) — CanonicalRouteSpec v1 is a stable minimal route contract, not a full RouteDefinition mirror
 - [0012](./docs/adr/0012-log-level-convention-handler-contract-boundaries.md) — Log levels follow handler-contract ownership boundaries
-- [0013](./docs/adr/0013-network-retry-policy-and-migration.md) — NetworkRetryPolicy centralizes adapter retry semantics and migration boundaries
+- [0013](./docs/adr/0013-network-retry-policy-and-migration.md) — NetworkRetryPolicy centralizes adapter retry semantics and migration boundaries _(amended 2026-11: transport invalidation rule and consecutive-failure budget)_
 - [0014](./docs/adr/0014-wasm-plugin-config-unification.md) — WASM plugin runtime configuration is unified across plugin types
 - [0015](./docs/adr/0015-endpoint-created-polling-consumer-for-pollenrich.md) — Endpoint-created PollingConsumer powers pollEnrich and WASM camel_poll
 - [0016](./docs/adr/0016-canonical-route-spec-v2-contract.md) — CanonicalRouteSpec v2 adds lifecycle/execution metadata with strict rejection for unsupported fields _(amends 0011)_

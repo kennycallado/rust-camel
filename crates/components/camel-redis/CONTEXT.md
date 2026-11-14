@@ -39,6 +39,13 @@ Per ADR-0012, this component's `error!` sites are categorized as:
   `is_transient_redis_error` classify it transient (ADR-0012); the word
   "connection" stays in the text for operator continuity only.
 
+Transport invalidation and budget scope (ADR-0013, amended 2026-11): the
+executor invalidates the cached connection when `invalidates_connection`
+classifies a failure, by compare-and-clear on the connection generation.
+It never dials in the error path. The consumer loops count consecutive
+failures since the last proven round trip, not failures inside a time
+window, and each loop shape names its own reset point.
+
 Line numbers can drift between revisions. The inline `// log-policy: <category>`
 annotation before each `error!` and `scripts/xtask/allowlist-log-levels.txt` are
 authoritative under ADR-0012. This section is a readability aid.

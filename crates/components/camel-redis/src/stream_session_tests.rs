@@ -277,6 +277,8 @@ struct RecoveryHandles {
     connect_changed: Arc<Notify>,
     recover_calls: Arc<AtomicUsize>,
     recover_changed: Arc<Notify>,
+    passes_completed: Arc<AtomicUsize>,
+    pass_completed_changed: Arc<Notify>,
     recover_cursors: Arc<Mutex<Vec<String>>>,
     recover_budgets: Arc<Mutex<Vec<u64>>>,
     acks: Arc<Mutex<Vec<String>>>,
@@ -298,6 +300,9 @@ struct FakeRecoveryIo {
     connect_changed: Arc<Notify>,
     recover_calls: Arc<AtomicUsize>,
     recover_changed: Arc<Notify>,
+    /// Successful passes, recorded when `recover` resolves `Ok`.
+    passes_completed: Arc<AtomicUsize>,
+    pass_completed_changed: Arc<Notify>,
     recover_cursors: Arc<Mutex<Vec<String>>>,
     recover_budgets: Arc<Mutex<Vec<u64>>>,
     acks: Arc<Mutex<Vec<String>>>,
@@ -315,6 +320,8 @@ impl FakeRecoveryIo {
             connect_changed: Arc::new(Notify::new()),
             recover_calls: Arc::new(AtomicUsize::new(0)),
             recover_changed: Arc::new(Notify::new()),
+            passes_completed: Arc::new(AtomicUsize::new(0)),
+            pass_completed_changed: Arc::new(Notify::new()),
             recover_cursors: Arc::new(Mutex::new(Vec::new())),
             recover_budgets: Arc::new(Mutex::new(Vec::new())),
             acks: Arc::new(Mutex::new(Vec::new())),
@@ -363,6 +370,8 @@ impl FakeRecoveryIo {
             connect_changed: Arc::clone(&self.connect_changed),
             recover_calls: Arc::clone(&self.recover_calls),
             recover_changed: Arc::clone(&self.recover_changed),
+            passes_completed: Arc::clone(&self.passes_completed),
+            pass_completed_changed: Arc::clone(&self.pass_completed_changed),
             recover_cursors: Arc::clone(&self.recover_cursors),
             recover_budgets: Arc::clone(&self.recover_budgets),
             acks: Arc::clone(&self.acks),
@@ -413,14 +422,19 @@ impl StreamRecoveryIo for FakeRecoveryIo {
             }
         }
 
-        match self.recover_outcomes.get(idx) {
+        let outcome = match self.recover_outcomes.get(idx) {
             Some(outcome) => outcome.clone(),
             None => Ok(RecoveryBatch {
                 pending_count: None,
                 recovered: Vec::new(),
                 next_cursor: cursor.to_string(),
             }),
+        };
+        if outcome.is_ok() {
+            self.passes_completed.fetch_add(1, Ordering::SeqCst);
+            self.pass_completed_changed.notify_waiters();
         }
+        outcome
     }
 
     async fn recover_ack(
@@ -490,6 +504,23 @@ where
     D: FnMut(StreamEntry) -> F + Send + 'static,
     F: Future<Output = DeliveryOutcome> + Send + 'static,
 {
+    spawn_core_with(recovery, params, fast_policy(3), cancel, on_ready, deliver)
+}
+
+/// [`spawn_core`] with an explicit retry policy, for tests that pin a budget
+/// other than the harness default of three attempts.
+fn spawn_core_with<D, F>(
+    recovery: Box<dyn StreamRecoveryIo>,
+    params: StreamConsumerParams,
+    policy: NetworkRetryPolicy,
+    cancel: CancellationToken,
+    on_ready: Option<Box<dyn FnOnce() + Send>>,
+    deliver: D,
+) -> SessionRun
+where
+    D: FnMut(StreamEntry) -> F + Send + 'static,
+    F: Future<Output = DeliveryOutcome> + Send + 'static,
+{
     let (msg_tx, msg_rx) = mpsc::channel(8);
     let (cmd_tx, cmd_rx) = mpsc::channel(8);
     let topology = Arc::new(FakeTopology::addrs(vec!["redis://a:6379".into()]));
@@ -501,7 +532,7 @@ where
             recovery,
             topology,
             params,
-            fast_policy(3),
+            policy,
             session_cancel,
             on_ready,
             deliver,
@@ -615,6 +646,17 @@ async fn wait_for_recover_calls(handles: &RecoveryHandles, target: usize) {
     )
     .await
     .expect("the recovery pass must run before the timeout");
+}
+
+async fn wait_for_completed_passes(handles: &RecoveryHandles, target: usize) {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        wait_until(&handles.pass_completed_changed, || {
+            handles.passes_completed.load(Ordering::SeqCst) >= target
+        }),
+    )
+    .await
+    .expect("the recovery pass must complete before the timeout");
 }
 
 async fn wait_for_recovery_acks(handles: &RecoveryHandles, target: usize) {
@@ -1558,6 +1600,205 @@ async fn session_budget_exhausted_ack_error_fails_supervision() {
     );
 }
 
+// ADR-0013: a failure-free read settles the batch on a proven connection, so
+// the retry budget it consumed on the way there is returned. Three blips with
+// `max_attempts: 2` are survivable precisely because each one lands on a
+// fresh counter.
+#[tokio::test]
+async fn stream_read_budget_survives_blips_exceeding_max_attempts() {
+    let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let io = FakeStreamIo::new(
+        vec![Ok(()), Ok(()), Ok(()), Ok(())],
+        vec![
+            batch(vec![entry("1-1", &[])]),
+            Err(io_reset()),
+            batch(vec![entry("2-2", &[])]),
+            Err(io_reset()),
+            batch(vec![entry("3-3", &[])]),
+            Err(io_reset()),
+            batch(vec![entry("4-4", &[])]),
+        ],
+    )
+    .with_ack_outcomes(vec![Ok(1), Ok(1), Ok(1), Ok(1)])
+    .with_read_entered(entered_tx);
+    let acks = io.acks.clone();
+    let ack_changed = io.ack_changed.clone();
+    let connects = io.connects.clone();
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&delivered);
+    let cancel = CancellationToken::new();
+    let cancel_task = cancel.clone();
+
+    let handle = tokio::spawn(async move {
+        let deliver = move |entry: StreamEntry| {
+            let seen = Arc::clone(&seen);
+            async move {
+                seen.lock().expect("delivered mutex").push(entry.id);
+                DeliveryOutcome::Completed
+            }
+        };
+        stream_session(
+            Box::new(io),
+            fake_recovery(),
+            Arc::new(topology),
+            stream_params(),
+            fast_policy(2),
+            cancel_task,
+            None,
+            deliver,
+        )
+        .await
+    });
+
+    // Cancel only after the fourth ack settled and the fifth read is blocked:
+    // cancelling earlier would race the ack and hide the reset.
+    wait_for_acks(&acks, &ack_changed, 4).await;
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("the fifth read must begin")
+        .expect("the read gate sender must live");
+    cancel.cancel();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("the session must not hang")
+        .expect("session task must not panic");
+    assert!(result.is_ok(), "session must end Ok: {result:?}");
+    assert_eq!(
+        *delivered.lock().expect("delivered mutex"),
+        vec![
+            "1-1".to_string(),
+            "2-2".to_string(),
+            "3-3".to_string(),
+            "4-4".to_string()
+        ],
+        "every batch must be delivered across the blips"
+    );
+    assert_eq!(
+        *acks.lock().expect("acks mutex"),
+        vec![
+            "1-1".to_string(),
+            "2-2".to_string(),
+            "3-3".to_string(),
+            "4-4".to_string()
+        ],
+        "every batch must be acked"
+    );
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        4,
+        "each blip must reconnect exactly once"
+    );
+}
+
+#[tokio::test]
+async fn stream_read_budget_exhausts_on_consecutive_read_failures() {
+    let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+    let io = FakeStreamIo::new(
+        vec![Ok(()), Ok(()), Ok(())],
+        vec![Err(io_reset()), Err(io_reset()), Err(io_reset())],
+    );
+    let connects = io.connects.clone();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream_session(
+            Box::new(io),
+            fake_recovery(),
+            Arc::new(topology),
+            stream_params(),
+            fast_policy(3),
+            CancellationToken::new(),
+            None,
+            |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+        ),
+    )
+    .await
+    .expect("the session must not hang");
+
+    let err = result.expect_err("three consecutive read failures must exhaust max_attempts=3");
+    assert!(
+        is_retry_budget_exhausted(&err),
+        "the failure must carry the budget-exhaustion marker: {err}"
+    );
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        3,
+        "every read failure before exhaustion must reconnect"
+    );
+}
+
+#[tokio::test]
+async fn failed_ack_between_read_and_batch_done_blocks_reset() {
+    let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+    let io = FakeStreamIo::new(
+        vec![Ok(()), Ok(())],
+        vec![batch(vec![entry("1-1", &[])]), Err(io_reset())],
+    )
+    .with_ack_outcomes(vec![Err(io_reset())]);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream_session(
+            Box::new(io),
+            fake_recovery(),
+            Arc::new(topology),
+            stream_params(),
+            fast_policy(2),
+            CancellationToken::new(),
+            None,
+            |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+        ),
+    )
+    .await
+    .expect("the session must not hang");
+
+    let err = result.expect_err(
+        "an ack failure between the read and its BatchDone must keep the consumed attempt",
+    );
+    assert!(
+        is_retry_budget_exhausted(&err),
+        "the next read failure must exhaust the budget: {err}"
+    );
+}
+
+#[tokio::test]
+async fn always_failing_acks_exhaust_budget() {
+    let topology = FakeTopology::addrs(vec!["redis://a:6379".into()]);
+    let io = FakeStreamIo::new(
+        vec![Ok(())],
+        vec![
+            batch(vec![entry("1-1", &[])]),
+            batch(vec![entry("2-2", &[])]),
+            batch(vec![entry("3-3", &[])]),
+        ],
+    )
+    .with_ack_outcomes(vec![Err(io_reset()), Err(io_reset()), Err(io_reset())]);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        stream_session(
+            Box::new(io),
+            fake_recovery(),
+            Arc::new(topology),
+            stream_params(),
+            fast_policy(2),
+            CancellationToken::new(),
+            None,
+            |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+        ),
+    )
+    .await
+    .expect("the session must not hang");
+
+    let err = result.expect_err("two failing acks must exhaust max_attempts=2");
+    assert!(
+        is_retry_budget_exhausted(&err),
+        "the ack failure must surface budget exhaustion: {err}"
+    );
+}
+
 fn bulk(value: &str) -> redis::Value {
     redis::Value::BulkString(value.as_bytes().to_vec())
 }
@@ -2321,6 +2562,94 @@ async fn recovery_cursor_passed_across_passes_and_reconnect() {
     );
     let result = finish_ok(run).await;
     assert!(result.is_ok(), "session must end Ok: {result:?}");
+}
+
+/// The recovery half's attempt counter resets on every completed pass
+/// (claimed entries or not), so transient blips separated by a successful
+/// pass never exhaust a budget smaller than the blip count. ADR-0013 keeps
+/// this counter independent of the read half's.
+#[tokio::test]
+async fn recovery_budget_survives_recovered_blips() {
+    let fake = FakeRecoveryIo::new().with_recover_outcomes(vec![
+        Err(io_reset()),
+        Ok(recovery_batch(None, Vec::new(), "0-0")),
+        Err(io_reset()),
+        Ok(recovery_batch(None, Vec::new(), "0-0")),
+    ]);
+    let handles = fake.handles();
+    let mut run = spawn_core_with(
+        Box::new(fake),
+        recovery_params(1),
+        fast_policy(2),
+        CancellationToken::new(),
+        None,
+        |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+    );
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        run.msg_tx
+            .send(ReadTaskMsg::Connected)
+            .await
+            .expect("the session must accept Connected");
+
+        // Without the reset the second blip consumes the last attempt and the
+        // session dies before the fourth call; awaiting completions (not call
+        // entries) proves the fourth pass actually resolved.
+        tokio::select! {
+            result = &mut run.handle => panic!(
+                "the session must survive both recovered blips, but it ended: {result:?}"
+            ),
+            () = wait_for_completed_passes(&handles, 4) => {}
+        }
+
+        finish_ok(run).await
+    })
+    .await
+    .expect("the session must finish before the timeout");
+
+    assert!(
+        outcome.is_ok(),
+        "cancellation after the recovered blips must end Ok: {outcome:?}"
+    );
+    assert!(
+        handles.recover_calls.load(Ordering::SeqCst) >= 4,
+        "both blips must be absorbed across four recovery calls"
+    );
+    assert!(
+        handles.passes_completed.load(Ordering::SeqCst) >= 2,
+        "the passes between the blips must complete"
+    );
+}
+
+#[tokio::test]
+async fn recovery_budget_exhausts_on_consecutive_pass_failures() {
+    let fake = FakeRecoveryIo::new().with_recover_outcomes(vec![Err(io_reset()), Err(io_reset())]);
+    let handles = fake.handles();
+    let run = spawn_core_with(
+        Box::new(fake),
+        recovery_params(60_000),
+        fast_policy(2),
+        CancellationToken::new(),
+        None,
+        |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+    );
+
+    run.msg_tx
+        .send(ReadTaskMsg::Connected)
+        .await
+        .expect("the session must accept Connected");
+    let result = join_session(run).await;
+
+    let err = result.expect_err("two consecutive failed passes must exhaust max_attempts=2");
+    assert!(
+        is_retry_budget_exhausted(&err),
+        "the recovery failure must carry the budget-exhaustion marker: {err}"
+    );
+    assert_eq!(
+        handles.recover_calls.load(Ordering::SeqCst),
+        2,
+        "no pass may run after the recovery budget is exhausted"
+    );
 }
 
 #[tokio::test]
