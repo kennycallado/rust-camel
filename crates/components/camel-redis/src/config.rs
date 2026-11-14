@@ -14,6 +14,10 @@ pub enum RedisCommand {
     Set,
     Get,
     Getset,
+    Getdel,
+    Getex,
+    Setrange,
+    Getrange,
     Setnx,
     Setex,
     Mget,
@@ -40,6 +44,9 @@ pub enum RedisCommand {
     Persist,
     Move,
     Sort,
+    Unlink,
+    Copy,
+    Touch,
 
     // List operations
     Lpush,
@@ -58,6 +65,11 @@ pub enum RedisCommand {
     Lrem,
     Ltrim,
     Rpoplpush,
+    Lmpop,
+    Blmpop,
+    Lmove,
+    Blmove,
+    Lpos,
 
     // Hash operations
     Hset,
@@ -72,6 +84,8 @@ pub enum RedisCommand {
     Hvals,
     Hgetall,
     Hincrby,
+    Hrandfield,
+    Hincrbyfloat,
 
     // Set operations
     Sadd,
@@ -88,6 +102,8 @@ pub enum RedisCommand {
     Sunionstore,
     Sdiffstore,
     Srandmember,
+    Smismember,
+    Sintercard,
 
     // Sorted set operations
     Zadd,
@@ -106,6 +122,13 @@ pub enum RedisCommand {
     Zremrangebyscore,
     Zunionstore,
     Zinterstore,
+    Zmpop,
+    Bzmpop,
+    Zrandmember,
+    Zdiff,
+    Zinter,
+    Zunion,
+    Zrangebylex,
 
     // Geo operations
     Geoadd,
@@ -138,6 +161,10 @@ impl FromStr for RedisCommand {
             "SET" => Ok(RedisCommand::Set),
             "GET" => Ok(RedisCommand::Get),
             "GETSET" => Ok(RedisCommand::Getset),
+            "GETDEL" => Ok(RedisCommand::Getdel),
+            "GETEX" => Ok(RedisCommand::Getex),
+            "SETRANGE" => Ok(RedisCommand::Setrange),
+            "GETRANGE" => Ok(RedisCommand::Getrange),
             "SETNX" => Ok(RedisCommand::Setnx),
             "SETEX" => Ok(RedisCommand::Setex),
             "MGET" => Ok(RedisCommand::Mget),
@@ -164,6 +191,9 @@ impl FromStr for RedisCommand {
             "PERSIST" => Ok(RedisCommand::Persist),
             "MOVE" => Ok(RedisCommand::Move),
             "SORT" => Ok(RedisCommand::Sort),
+            "UNLINK" => Ok(RedisCommand::Unlink),
+            "COPY" => Ok(RedisCommand::Copy),
+            "TOUCH" => Ok(RedisCommand::Touch),
 
             // List operations
             "LPUSH" => Ok(RedisCommand::Lpush),
@@ -182,6 +212,11 @@ impl FromStr for RedisCommand {
             "LREM" => Ok(RedisCommand::Lrem),
             "LTRIM" => Ok(RedisCommand::Ltrim),
             "RPOPLPUSH" => Ok(RedisCommand::Rpoplpush),
+            "LMPOP" => Ok(RedisCommand::Lmpop),
+            "BLMPOP" => Ok(RedisCommand::Blmpop),
+            "LMOVE" => Ok(RedisCommand::Lmove),
+            "BLMOVE" => Ok(RedisCommand::Blmove),
+            "LPOS" => Ok(RedisCommand::Lpos),
 
             // Hash operations
             "HSET" => Ok(RedisCommand::Hset),
@@ -196,6 +231,8 @@ impl FromStr for RedisCommand {
             "HVALS" => Ok(RedisCommand::Hvals),
             "HGETALL" => Ok(RedisCommand::Hgetall),
             "HINCRBY" => Ok(RedisCommand::Hincrby),
+            "HRANDFIELD" => Ok(RedisCommand::Hrandfield),
+            "HINCRBYFLOAT" => Ok(RedisCommand::Hincrbyfloat),
 
             // Set operations
             "SADD" => Ok(RedisCommand::Sadd),
@@ -212,6 +249,8 @@ impl FromStr for RedisCommand {
             "SUNIONSTORE" => Ok(RedisCommand::Sunionstore),
             "SDIFFSTORE" => Ok(RedisCommand::Sdiffstore),
             "SRANDMEMBER" => Ok(RedisCommand::Srandmember),
+            "SMISMEMBER" => Ok(RedisCommand::Smismember),
+            "SINTERCARD" => Ok(RedisCommand::Sintercard),
 
             // Sorted set operations
             "ZADD" => Ok(RedisCommand::Zadd),
@@ -230,6 +269,13 @@ impl FromStr for RedisCommand {
             "ZREMRANGEBYSCORE" => Ok(RedisCommand::Zremrangebyscore),
             "ZUNIONSTORE" => Ok(RedisCommand::Zunionstore),
             "ZINTERSTORE" => Ok(RedisCommand::Zinterstore),
+            "ZMPOP" => Ok(RedisCommand::Zmpop),
+            "BZMPOP" => Ok(RedisCommand::Bzmpop),
+            "ZRANDMEMBER" => Ok(RedisCommand::Zrandmember),
+            "ZDIFF" => Ok(RedisCommand::Zdiff),
+            "ZINTER" => Ok(RedisCommand::Zinter),
+            "ZUNION" => Ok(RedisCommand::Zunion),
+            "ZRANGEBYLEX" => Ok(RedisCommand::Zrangebylex),
 
             // Geo operations
             "GEOADD" => Ok(RedisCommand::Geoadd),
@@ -256,6 +302,158 @@ impl FromStr for RedisCommand {
                 "Unknown Redis command: {}",
                 s
             ))),
+        }
+    }
+}
+
+impl RedisCommand {
+    /// Returns the uppercase wire token for this command.
+    ///
+    /// The inverse of [`RedisCommand::from_str`]: for every variant `v`,
+    /// `v.as_str().parse::<RedisCommand>() == Ok(v)`. New variants must add a
+    /// `FromStr` arm and an arm here in the same change.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            // String operations
+            RedisCommand::Set => "SET",
+            RedisCommand::Get => "GET",
+            RedisCommand::Getset => "GETSET",
+            RedisCommand::Getdel => "GETDEL",
+            RedisCommand::Getex => "GETEX",
+            RedisCommand::Setrange => "SETRANGE",
+            RedisCommand::Getrange => "GETRANGE",
+            RedisCommand::Setnx => "SETNX",
+            RedisCommand::Setex => "SETEX",
+            RedisCommand::Mget => "MGET",
+            RedisCommand::Mset => "MSET",
+            RedisCommand::Incr => "INCR",
+            RedisCommand::Incrby => "INCRBY",
+            RedisCommand::Decr => "DECR",
+            RedisCommand::Decrby => "DECRBY",
+            RedisCommand::Append => "APPEND",
+            RedisCommand::Strlen => "STRLEN",
+
+            // Key operations
+            RedisCommand::Exists => "EXISTS",
+            RedisCommand::Del => "DEL",
+            RedisCommand::Expire => "EXPIRE",
+            RedisCommand::Expireat => "EXPIREAT",
+            RedisCommand::Pexpire => "PEXPIRE",
+            RedisCommand::Pexpireat => "PEXPIREAT",
+            RedisCommand::Ttl => "TTL",
+            RedisCommand::Keys => "KEYS",
+            RedisCommand::Rename => "RENAME",
+            RedisCommand::Renamenx => "RENAMENX",
+            RedisCommand::Type => "TYPE",
+            RedisCommand::Persist => "PERSIST",
+            RedisCommand::Move => "MOVE",
+            RedisCommand::Sort => "SORT",
+            RedisCommand::Unlink => "UNLINK",
+            RedisCommand::Copy => "COPY",
+            RedisCommand::Touch => "TOUCH",
+
+            // List operations
+            RedisCommand::Lpush => "LPUSH",
+            RedisCommand::Rpush => "RPUSH",
+            RedisCommand::Lpushx => "LPUSHX",
+            RedisCommand::Rpushx => "RPUSHX",
+            RedisCommand::Lpop => "LPOP",
+            RedisCommand::Rpop => "RPOP",
+            RedisCommand::Blpop => "BLPOP",
+            RedisCommand::Brpop => "BRPOP",
+            RedisCommand::Llen => "LLEN",
+            RedisCommand::Lrange => "LRANGE",
+            RedisCommand::Lindex => "LINDEX",
+            RedisCommand::Linsert => "LINSERT",
+            RedisCommand::Lset => "LSET",
+            RedisCommand::Lrem => "LREM",
+            RedisCommand::Ltrim => "LTRIM",
+            RedisCommand::Rpoplpush => "RPOPLPUSH",
+            RedisCommand::Lmpop => "LMPOP",
+            RedisCommand::Blmpop => "BLMPOP",
+            RedisCommand::Lmove => "LMOVE",
+            RedisCommand::Blmove => "BLMOVE",
+            RedisCommand::Lpos => "LPOS",
+
+            // Hash operations
+            RedisCommand::Hset => "HSET",
+            RedisCommand::Hget => "HGET",
+            RedisCommand::Hsetnx => "HSETNX",
+            RedisCommand::Hmset => "HMSET",
+            RedisCommand::Hmget => "HMGET",
+            RedisCommand::Hdel => "HDEL",
+            RedisCommand::Hexists => "HEXISTS",
+            RedisCommand::Hlen => "HLEN",
+            RedisCommand::Hkeys => "HKEYS",
+            RedisCommand::Hvals => "HVALS",
+            RedisCommand::Hgetall => "HGETALL",
+            RedisCommand::Hincrby => "HINCRBY",
+            RedisCommand::Hrandfield => "HRANDFIELD",
+            RedisCommand::Hincrbyfloat => "HINCRBYFLOAT",
+
+            // Set operations
+            RedisCommand::Sadd => "SADD",
+            RedisCommand::Srem => "SREM",
+            RedisCommand::Smembers => "SMEMBERS",
+            RedisCommand::Scard => "SCARD",
+            RedisCommand::Sismember => "SISMEMBER",
+            RedisCommand::Spop => "SPOP",
+            RedisCommand::Smove => "SMOVE",
+            RedisCommand::Sinter => "SINTER",
+            RedisCommand::Sunion => "SUNION",
+            RedisCommand::Sdiff => "SDIFF",
+            RedisCommand::Sinterstore => "SINTERSTORE",
+            RedisCommand::Sunionstore => "SUNIONSTORE",
+            RedisCommand::Sdiffstore => "SDIFFSTORE",
+            RedisCommand::Srandmember => "SRANDMEMBER",
+            RedisCommand::Smismember => "SMISMEMBER",
+            RedisCommand::Sintercard => "SINTERCARD",
+
+            // Sorted set operations
+            RedisCommand::Zadd => "ZADD",
+            RedisCommand::Zrem => "ZREM",
+            RedisCommand::Zrange => "ZRANGE",
+            RedisCommand::Zrevrange => "ZREVRANGE",
+            RedisCommand::Zrank => "ZRANK",
+            RedisCommand::Zrevrank => "ZREVRANK",
+            RedisCommand::Zscore => "ZSCORE",
+            RedisCommand::Zcard => "ZCARD",
+            RedisCommand::Zincrby => "ZINCRBY",
+            RedisCommand::Zcount => "ZCOUNT",
+            RedisCommand::Zrangebyscore => "ZRANGEBYSCORE",
+            RedisCommand::Zrevrangebyscore => "ZREVRANGEBYSCORE",
+            RedisCommand::Zremrangebyrank => "ZREMRANGEBYRANK",
+            RedisCommand::Zremrangebyscore => "ZREMRANGEBYSCORE",
+            RedisCommand::Zunionstore => "ZUNIONSTORE",
+            RedisCommand::Zinterstore => "ZINTERSTORE",
+            RedisCommand::Zmpop => "ZMPOP",
+            RedisCommand::Bzmpop => "BZMPOP",
+            RedisCommand::Zrandmember => "ZRANDMEMBER",
+            RedisCommand::Zdiff => "ZDIFF",
+            RedisCommand::Zinter => "ZINTER",
+            RedisCommand::Zunion => "ZUNION",
+            RedisCommand::Zrangebylex => "ZRANGEBYLEX",
+
+            // Geo operations
+            RedisCommand::Geoadd => "GEOADD",
+            RedisCommand::Geopos => "GEOPOS",
+            RedisCommand::Geodist => "GEODIST",
+            RedisCommand::Geosearch => "GEOSEARCH",
+            RedisCommand::Geohash => "GEOHASH",
+
+            // Stream operations
+            RedisCommand::Xadd => "XADD",
+            RedisCommand::Xlen => "XLEN",
+            RedisCommand::Xreadgroup => "XREADGROUP",
+
+            // Pub/Sub operations
+            RedisCommand::Publish => "PUBLISH",
+            RedisCommand::Subscribe => "SUBSCRIBE",
+            RedisCommand::Psubscribe => "PSUBSCRIBE",
+
+            // Other operations
+            RedisCommand::Ping => "PING",
+            RedisCommand::Echo => "ECHO",
         }
     }
 }
@@ -1505,7 +1703,9 @@ pub(crate) fn enrich_data_auth_error(msg: String) -> String {
 // ── Command idempotency classification ──────────────────────────────────────
 
 /// Returns true if the command is idempotent (safe to retry without risk of
-/// duplicate side effects). Read commands and some writes (SET, DEL) are idempotent.
+/// duplicate side effects). Read commands and converging writes are
+/// idempotent; option-sensitive commands such as `SET` classify false because
+/// the classifier cannot see options (design D3: worst-case form governs).
 pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
     matches!(
         cmd,
@@ -1544,19 +1744,39 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Hvals
             | RedisCommand::Hgetall
             | RedisCommand::Strlen
+            | RedisCommand::Getrange
             | RedisCommand::Xlen
             | RedisCommand::Ping
             | RedisCommand::Echo
+            | RedisCommand::Smismember
+            | RedisCommand::Sintercard
+            | RedisCommand::Zdiff
+            | RedisCommand::Zinter
+            | RedisCommand::Zunion
+            | RedisCommand::Zrangebylex
+            // ZRANDMEMBER/HRANDFIELD follow SRANDMEMBER: state untouched, a fresh draw on retry is acceptable
+            | RedisCommand::Zrandmember
+            | RedisCommand::Hrandfield
+            | RedisCommand::Lpos
+            // TOUCH only refreshes idle time
+            | RedisCommand::Touch
             // Idempotent writes (same result if retried)
-            | RedisCommand::Set
+            // SETRANGE re-writes the same bytes at a fixed offset; a retry converges
+            | RedisCommand::Setrange
             | RedisCommand::Del
+            // UNLINK mirrors DEL: a retry converges, the count reply 1→0 is the accepted deviation
+            | RedisCommand::Unlink
             | RedisCommand::Expire
             | RedisCommand::Expireat
             | RedisCommand::Pexpire
             | RedisCommand::Pexpireat
             | RedisCommand::Persist
     )
+    // SET is absent (reclassified): with CamelRedis.ReturnOldValue a retry reports the post-write value as the old value, and with NX it reports failure after an unconfirmed success. The classifier cannot see options, so the worst-case form governs.
+    // GETDEL/GETEX are absent: the reply carries a payload the first attempt consumed; a retry reports nil.
     // Rename/Renamenx/Move are deliberately absent: a retry after an unconfirmed success reports visible failure (RENAME: ERR no such key; RENAMENX/MOVE: 0).
+    // COPY is absent: without REPLACE a retry reports 0 after an unconfirmed success; with REPLACE the retry re-reads a possibly-changed source.
+    // The pop/move family (LMPOP/BLMPOP/ZMPOP/BZMPOP/LMOVE/BLMOVE) is absent: a retry reports an empty pop or a different item and silently loses the popped one. HINCRBYFLOAT mirrors INCRBY: the reply encodes cumulative state.
 }
 
 #[cfg(test)]
@@ -2282,6 +2502,107 @@ mod tests {
     }
 
     #[test]
+    fn new_string_commands_parse_roundtrip() {
+        let cases = [
+            ("GETDEL", RedisCommand::Getdel),
+            ("GETEX", RedisCommand::Getex),
+            ("SETRANGE", RedisCommand::Setrange),
+            ("GETRANGE", RedisCommand::Getrange),
+        ];
+        for (token, expected) in cases {
+            let parsed =
+                RedisCommand::from_str(token).unwrap_or_else(|e| panic!("{token} must parse: {e}"));
+            assert_eq!(parsed, expected, "{token} must parse to its variant");
+            assert_eq!(
+                parsed.as_str(),
+                token,
+                "{token} must round-trip through as_str"
+            );
+        }
+    }
+
+    #[test]
+    fn string_family_retry_classification() {
+        // Payload-consuming reads: the first attempt took the value.
+        assert!(!is_idempotent_command(&RedisCommand::Getdel));
+        assert!(!is_idempotent_command(&RedisCommand::Getex));
+        // Converging reads/writes.
+        assert!(is_idempotent_command(&RedisCommand::Setrange));
+        assert!(is_idempotent_command(&RedisCommand::Getrange));
+        // SET is reclassified false: its option forms break the rule and the
+        // classifier cannot see options (design D3).
+        assert!(!is_idempotent_command(&RedisCommand::Set));
+    }
+
+    #[test]
+    fn collection_commands_parse_roundtrip() {
+        let cases = [
+            ("LMPOP", RedisCommand::Lmpop),
+            ("BLMPOP", RedisCommand::Blmpop),
+            ("LMOVE", RedisCommand::Lmove),
+            ("BLMOVE", RedisCommand::Blmove),
+            ("LPOS", RedisCommand::Lpos),
+            ("SMISMEMBER", RedisCommand::Smismember),
+            ("SINTERCARD", RedisCommand::Sintercard),
+            ("ZMPOP", RedisCommand::Zmpop),
+            ("BZMPOP", RedisCommand::Bzmpop),
+            ("ZRANDMEMBER", RedisCommand::Zrandmember),
+            ("ZDIFF", RedisCommand::Zdiff),
+            ("ZINTER", RedisCommand::Zinter),
+            ("ZUNION", RedisCommand::Zunion),
+            ("ZRANGEBYLEX", RedisCommand::Zrangebylex),
+            ("HRANDFIELD", RedisCommand::Hrandfield),
+            ("HINCRBYFLOAT", RedisCommand::Hincrbyfloat),
+        ];
+        for (token, expected) in cases {
+            let parsed =
+                RedisCommand::from_str(token).unwrap_or_else(|e| panic!("{token} must parse: {e}"));
+            assert_eq!(parsed, expected, "{token} must parse to its variant");
+            assert_eq!(
+                parsed.as_str(),
+                token,
+                "{token} must round-trip through as_str"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_retry_classification() {
+        // Reads: retry-safe.
+        for cmd in [
+            RedisCommand::Smismember,
+            RedisCommand::Sintercard,
+            RedisCommand::Zdiff,
+            RedisCommand::Zinter,
+            RedisCommand::Zunion,
+            RedisCommand::Zrangebylex,
+            RedisCommand::Zrandmember,
+            RedisCommand::Hrandfield,
+            RedisCommand::Lpos,
+        ] {
+            assert!(
+                is_idempotent_command(&cmd),
+                "{cmd:?} is a read and must be retry-safe"
+            );
+        }
+        // Pop/move family and cumulative replies: a retry loses data.
+        for cmd in [
+            RedisCommand::Lmpop,
+            RedisCommand::Blmpop,
+            RedisCommand::Zmpop,
+            RedisCommand::Bzmpop,
+            RedisCommand::Lmove,
+            RedisCommand::Blmove,
+            RedisCommand::Hincrbyfloat,
+        ] {
+            assert!(
+                !is_idempotent_command(&cmd),
+                "{cmd:?} must not be classified retry-safe"
+            );
+        }
+    }
+
+    #[test]
     fn test_geo_command_from_str() {
         // Parsing is case-insensitive via to_uppercase()
         assert_eq!(
@@ -2907,7 +3228,7 @@ mod tests {
 
     #[test]
     fn test_is_idempotent_command_idempotent_writes() {
-        assert!(is_idempotent_command(&RedisCommand::Set));
+        assert!(!is_idempotent_command(&RedisCommand::Set));
         assert!(is_idempotent_command(&RedisCommand::Del));
         assert!(is_idempotent_command(&RedisCommand::Expire));
     }
@@ -2920,6 +3241,37 @@ mod tests {
         assert!(!is_idempotent_command(&RedisCommand::Sadd));
         assert!(!is_idempotent_command(&RedisCommand::Zadd));
         assert!(!is_idempotent_command(&RedisCommand::Publish));
+    }
+
+    #[test]
+    fn generic_key_commands_parse_and_classify() {
+        let cases = [
+            ("UNLINK", RedisCommand::Unlink),
+            ("COPY", RedisCommand::Copy),
+            ("TOUCH", RedisCommand::Touch),
+        ];
+        for (token, expected) in cases {
+            let parsed =
+                RedisCommand::from_str(token).unwrap_or_else(|e| panic!("{token} must parse: {e}"));
+            assert_eq!(parsed, expected, "{token} must parse to its variant");
+            assert_eq!(
+                parsed.as_str(),
+                token,
+                "{token} must round-trip through as_str"
+            );
+        }
+        assert!(
+            is_idempotent_command(&RedisCommand::Unlink),
+            "UNLINK must be classified idempotent"
+        );
+        assert!(
+            is_idempotent_command(&RedisCommand::Touch),
+            "TOUCH must be classified idempotent"
+        );
+        assert!(
+            !is_idempotent_command(&RedisCommand::Copy),
+            "COPY must not be classified idempotent"
+        );
     }
 
     // A retry after an unconfirmed success reports visible failure
@@ -3639,5 +3991,152 @@ mod tests {
         config.apply_topology_defaults(&cfg).unwrap();
 
         assert_eq!(config.topology_kind, TopologyKind::Standalone);
+    }
+    /// Every `RedisCommand` variant paired with its wire token.
+    ///
+    /// This is the drift guard for the `FromStr`/`as_str` pair: a new variant
+    /// needs a `FromStr` arm, an `as_str` arm, and a row here. The table is
+    /// hand-written (not derived from `as_str`) so a typo on either side of
+    /// the pair fails the round trip.
+    #[test]
+    fn as_str_roundtrip_all_variants() {
+        let cases = [
+            ("SET", RedisCommand::Set),
+            ("GET", RedisCommand::Get),
+            ("GETSET", RedisCommand::Getset),
+            ("GETDEL", RedisCommand::Getdel),
+            ("GETEX", RedisCommand::Getex),
+            ("SETRANGE", RedisCommand::Setrange),
+            ("GETRANGE", RedisCommand::Getrange),
+            ("SETNX", RedisCommand::Setnx),
+            ("SETEX", RedisCommand::Setex),
+            ("MGET", RedisCommand::Mget),
+            ("MSET", RedisCommand::Mset),
+            ("INCR", RedisCommand::Incr),
+            ("INCRBY", RedisCommand::Incrby),
+            ("DECR", RedisCommand::Decr),
+            ("DECRBY", RedisCommand::Decrby),
+            ("APPEND", RedisCommand::Append),
+            ("STRLEN", RedisCommand::Strlen),
+            ("EXISTS", RedisCommand::Exists),
+            ("DEL", RedisCommand::Del),
+            ("EXPIRE", RedisCommand::Expire),
+            ("EXPIREAT", RedisCommand::Expireat),
+            ("PEXPIRE", RedisCommand::Pexpire),
+            ("PEXPIREAT", RedisCommand::Pexpireat),
+            ("TTL", RedisCommand::Ttl),
+            ("KEYS", RedisCommand::Keys),
+            ("RENAME", RedisCommand::Rename),
+            ("RENAMENX", RedisCommand::Renamenx),
+            ("TYPE", RedisCommand::Type),
+            ("PERSIST", RedisCommand::Persist),
+            ("MOVE", RedisCommand::Move),
+            ("SORT", RedisCommand::Sort),
+            ("UNLINK", RedisCommand::Unlink),
+            ("COPY", RedisCommand::Copy),
+            ("TOUCH", RedisCommand::Touch),
+            ("LPUSH", RedisCommand::Lpush),
+            ("RPUSH", RedisCommand::Rpush),
+            ("LPUSHX", RedisCommand::Lpushx),
+            ("RPUSHX", RedisCommand::Rpushx),
+            ("LPOP", RedisCommand::Lpop),
+            ("RPOP", RedisCommand::Rpop),
+            ("BLPOP", RedisCommand::Blpop),
+            ("BRPOP", RedisCommand::Brpop),
+            ("LLEN", RedisCommand::Llen),
+            ("LRANGE", RedisCommand::Lrange),
+            ("LINDEX", RedisCommand::Lindex),
+            ("LINSERT", RedisCommand::Linsert),
+            ("LSET", RedisCommand::Lset),
+            ("LREM", RedisCommand::Lrem),
+            ("LTRIM", RedisCommand::Ltrim),
+            ("RPOPLPUSH", RedisCommand::Rpoplpush),
+            ("LMPOP", RedisCommand::Lmpop),
+            ("BLMPOP", RedisCommand::Blmpop),
+            ("LMOVE", RedisCommand::Lmove),
+            ("BLMOVE", RedisCommand::Blmove),
+            ("LPOS", RedisCommand::Lpos),
+            ("HSET", RedisCommand::Hset),
+            ("HGET", RedisCommand::Hget),
+            ("HSETNX", RedisCommand::Hsetnx),
+            ("HMSET", RedisCommand::Hmset),
+            ("HMGET", RedisCommand::Hmget),
+            ("HDEL", RedisCommand::Hdel),
+            ("HEXISTS", RedisCommand::Hexists),
+            ("HLEN", RedisCommand::Hlen),
+            ("HKEYS", RedisCommand::Hkeys),
+            ("HVALS", RedisCommand::Hvals),
+            ("HGETALL", RedisCommand::Hgetall),
+            ("HINCRBY", RedisCommand::Hincrby),
+            ("HRANDFIELD", RedisCommand::Hrandfield),
+            ("HINCRBYFLOAT", RedisCommand::Hincrbyfloat),
+            ("SADD", RedisCommand::Sadd),
+            ("SREM", RedisCommand::Srem),
+            ("SMEMBERS", RedisCommand::Smembers),
+            ("SCARD", RedisCommand::Scard),
+            ("SISMEMBER", RedisCommand::Sismember),
+            ("SPOP", RedisCommand::Spop),
+            ("SMOVE", RedisCommand::Smove),
+            ("SINTER", RedisCommand::Sinter),
+            ("SUNION", RedisCommand::Sunion),
+            ("SDIFF", RedisCommand::Sdiff),
+            ("SINTERSTORE", RedisCommand::Sinterstore),
+            ("SUNIONSTORE", RedisCommand::Sunionstore),
+            ("SDIFFSTORE", RedisCommand::Sdiffstore),
+            ("SRANDMEMBER", RedisCommand::Srandmember),
+            ("SMISMEMBER", RedisCommand::Smismember),
+            ("SINTERCARD", RedisCommand::Sintercard),
+            ("ZADD", RedisCommand::Zadd),
+            ("ZREM", RedisCommand::Zrem),
+            ("ZRANGE", RedisCommand::Zrange),
+            ("ZREVRANGE", RedisCommand::Zrevrange),
+            ("ZRANK", RedisCommand::Zrank),
+            ("ZREVRANK", RedisCommand::Zrevrank),
+            ("ZSCORE", RedisCommand::Zscore),
+            ("ZCARD", RedisCommand::Zcard),
+            ("ZINCRBY", RedisCommand::Zincrby),
+            ("ZCOUNT", RedisCommand::Zcount),
+            ("ZRANGEBYSCORE", RedisCommand::Zrangebyscore),
+            ("ZREVRANGEBYSCORE", RedisCommand::Zrevrangebyscore),
+            ("ZREMRANGEBYRANK", RedisCommand::Zremrangebyrank),
+            ("ZREMRANGEBYSCORE", RedisCommand::Zremrangebyscore),
+            ("ZUNIONSTORE", RedisCommand::Zunionstore),
+            ("ZINTERSTORE", RedisCommand::Zinterstore),
+            ("ZMPOP", RedisCommand::Zmpop),
+            ("BZMPOP", RedisCommand::Bzmpop),
+            ("ZRANDMEMBER", RedisCommand::Zrandmember),
+            ("ZDIFF", RedisCommand::Zdiff),
+            ("ZINTER", RedisCommand::Zinter),
+            ("ZUNION", RedisCommand::Zunion),
+            ("ZRANGEBYLEX", RedisCommand::Zrangebylex),
+            ("GEOADD", RedisCommand::Geoadd),
+            ("GEOPOS", RedisCommand::Geopos),
+            ("GEODIST", RedisCommand::Geodist),
+            ("GEOSEARCH", RedisCommand::Geosearch),
+            ("GEOHASH", RedisCommand::Geohash),
+            ("XADD", RedisCommand::Xadd),
+            ("XLEN", RedisCommand::Xlen),
+            ("XREADGROUP", RedisCommand::Xreadgroup),
+            ("PUBLISH", RedisCommand::Publish),
+            ("SUBSCRIBE", RedisCommand::Subscribe),
+            ("PSUBSCRIBE", RedisCommand::Psubscribe),
+            ("PING", RedisCommand::Ping),
+            ("ECHO", RedisCommand::Echo),
+        ];
+        assert_eq!(
+            cases.len(),
+            121,
+            "table must list every RedisCommand variant"
+        );
+        for (token, expected) in cases {
+            let parsed =
+                RedisCommand::from_str(token).unwrap_or_else(|e| panic!("{token} must parse: {e}"));
+            assert_eq!(parsed, expected, "{token} must parse to its variant");
+            assert_eq!(
+                parsed.as_str(),
+                token,
+                "{token} must round-trip through as_str"
+            );
+        }
     }
 }

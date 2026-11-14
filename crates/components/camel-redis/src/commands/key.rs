@@ -1,6 +1,6 @@
 use super::{
-    get_str_header, get_str_vec_header, get_u64_header, require_key, require_positive,
-    u64_to_i64_checked,
+    get_str_header, get_str_vec_header, get_u64_header, require_bool_header, require_key,
+    require_key_list, require_positive, require_str_header, u64_to_i64_checked,
 };
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -24,6 +24,9 @@ pub(crate) fn is_key_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Persist
             | RedisCommand::Move
             | RedisCommand::Sort
+            | RedisCommand::Unlink
+            | RedisCommand::Copy
+            | RedisCommand::Touch
     )
 }
 
@@ -98,6 +101,34 @@ pub(crate) fn resolve_rename_operands(exchange: &Exchange) -> Result<(String, St
 
 pub(crate) fn resolve_move_operands(exchange: &Exchange) -> Result<(String, i64), CamelError> {
     Ok((require_key(exchange)?, resolve_move_db(exchange)?))
+}
+
+/// Resolves the `COPY` operands and options.
+///
+/// `CamelRedis.Db` is optional and deliberately NOT routed through
+/// [`resolve_move_db`]: `MOVE` has no "current database" target, so an absent
+/// Db there defaults to `0`. For `COPY` an absent Db means "copy within the
+/// current database", so it stays `None` and no `DB` argument is sent —
+/// defaulting it to `0` would silently retarget the copy.
+///
+/// `CamelRedis.Replace` uses the strict resolver: a present-but-malformed
+/// value is a named error, never a silent "no REPLACE".
+pub(crate) fn resolve_copy_args(
+    exchange: &Exchange,
+) -> Result<(String, String, Option<i64>, bool), CamelError> {
+    const DB_HEADER: &str = "CamelRedis.Db";
+    let src = require_key(exchange)?;
+    let dst = require_str_header(exchange, "CamelRedis.Destination")?.to_string();
+    let db = match get_u64_header(exchange, DB_HEADER)? {
+        Some(db) => Some(u64_to_i64_checked(db, DB_HEADER)?),
+        None => None,
+    };
+    let replace = require_bool_header(exchange, "CamelRedis.Replace")?.unwrap_or(false);
+    Ok((src, dst, db, replace))
+}
+
+pub(crate) fn json_from_copy_result(result: i64) -> serde_json::Value {
+    serde_json::json!(result == 1)
 }
 
 pub(crate) fn json_from_move_result(result: i64) -> serde_json::Value {
@@ -202,6 +233,32 @@ pub(crate) fn build_redis_cmd(
             let key = require_key(exchange)?;
             let mut c = redis::cmd("SORT");
             c.arg(key);
+            c
+        }
+        RedisCommand::Unlink => {
+            let key = require_key(exchange)?;
+            let mut c = redis::cmd("UNLINK");
+            c.arg(key);
+            c
+        }
+        RedisCommand::Copy => {
+            let (src, dst, db, replace) = resolve_copy_args(exchange)?;
+            let mut c = redis::cmd("COPY");
+            c.arg(src).arg(dst);
+            if let Some(db) = db {
+                c.arg("DB").arg(db);
+            }
+            if replace {
+                c.arg("REPLACE");
+            }
+            c
+        }
+        RedisCommand::Touch => {
+            let keys = require_key_list(exchange, "TOUCH")?;
+            let mut c = redis::cmd("TOUCH");
+            for key in keys {
+                c.arg(key);
+            }
             c
         }
         _ => unreachable!("non-key commands rejected above"),
@@ -341,6 +398,40 @@ pub async fn dispatch(
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SORT", e))?;
             serde_json::json!(vals)
+        }
+        RedisCommand::Unlink => {
+            let key = require_key(exchange)?;
+            let n: i64 = conn
+                .unlink(&key)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("UNLINK", e))?;
+            serde_json::json!(n)
+        }
+        RedisCommand::Copy => {
+            let (src, dst, db, replace) = resolve_copy_args(exchange)?;
+            let mut c = redis::cmd("COPY");
+            c.arg(&src).arg(&dst);
+            if let Some(db) = db {
+                c.arg("DB").arg(db);
+            }
+            if replace {
+                c.arg("REPLACE");
+            }
+            let n: i64 = c
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("COPY", e))?;
+            json_from_copy_result(n)
+        }
+        RedisCommand::Touch => {
+            let keys = require_key_list(exchange, "TOUCH")?;
+            // TOUCH is not exposed in AsyncCommands, use raw command
+            let n: i64 = redis::cmd("TOUCH")
+                .arg(&keys)
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("TOUCH", e))?;
+            serde_json::json!(n)
         }
         _ => unreachable!("non-key commands rejected above"),
     };
@@ -1021,6 +1112,66 @@ mod tests {
     fn test_build_redis_cmd_sort_missing_key() {
         let ex = Exchange::new(Message::default());
         assert!(build_redis_cmd(&RedisCommand::Sort, &ex).is_err());
+    }
+
+    // ── 3.2: UNLINK / COPY / TOUCH ──────────────────────────────────────────
+
+    #[test]
+    fn copy_arg_resolution_domains() {
+        let full = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("src")),
+            ("CamelRedis.Destination", serde_json::json!("dst")),
+            ("CamelRedis.Replace", serde_json::json!(true)),
+            ("CamelRedis.Db", serde_json::json!(3u64)),
+        ]);
+        assert_eq!(
+            resolve_copy_args(&full).expect("full COPY options must resolve"),
+            ("src".to_string(), "dst".to_string(), Some(3), true)
+        );
+
+        let minimal = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("src")),
+            ("CamelRedis.Destination", serde_json::json!("dst")),
+        ]);
+        assert_eq!(
+            resolve_copy_args(&minimal).expect("COPY without optionals must resolve"),
+            ("src".to_string(), "dst".to_string(), None, false)
+        );
+
+        // The resolved `None` must actually spare the `DB` argument: an
+        // unconditional `DB 0` would retarget the copy to database 0.
+        let minimal_cmd =
+            build_redis_cmd(&RedisCommand::Copy, &minimal).expect("minimal COPY must build");
+        assert_eq!(cmd_name(&minimal_cmd), "COPY");
+        assert_eq!(cmd_args(&minimal_cmd), vec!["src", "dst"]);
+
+        let full_cmd = build_redis_cmd(&RedisCommand::Copy, &full).expect("full COPY must build");
+        assert_eq!(cmd_name(&full_cmd), "COPY");
+        assert_eq!(
+            cmd_args(&full_cmd),
+            vec!["src", "dst", "DB", "3", "REPLACE"]
+        );
+
+        let missing_destination = ex_with(&[("CamelRedis.Key", serde_json::json!("src"))]);
+        let err = resolve_copy_args(&missing_destination).expect_err("COPY requires a destination");
+        assert!(err.to_string().contains("CamelRedis.Destination"), "{err}");
+
+        let malformed_replace = ex_with(&[
+            ("CamelRedis.Key", serde_json::json!("src")),
+            ("CamelRedis.Destination", serde_json::json!("dst")),
+            ("CamelRedis.Replace", serde_json::json!("sometimes")),
+        ]);
+        let err = resolve_copy_args(&malformed_replace).expect_err("a malformed Replace must fail");
+        assert!(err.to_string().contains("CamelRedis.Replace"), "{err}");
+    }
+
+    #[test]
+    fn touch_requires_key_list() {
+        let ex = ex_with(&[("CamelRedis.Keys", serde_json::json!([]))]);
+        let err = require_key_list(&ex, "TOUCH").expect_err("an empty key list must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Keys"), "{msg}");
+        assert!(msg.contains("TOUCH"), "{msg}");
     }
 
     #[test]

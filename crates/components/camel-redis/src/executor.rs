@@ -140,7 +140,11 @@ pub async fn dispatch_command(
         | RedisCommand::Decr
         | RedisCommand::Decrby
         | RedisCommand::Append
-        | RedisCommand::Strlen => commands::string::dispatch(cmd, conn, exchange).await,
+        | RedisCommand::Strlen
+        | RedisCommand::Getdel
+        | RedisCommand::Getex
+        | RedisCommand::Setrange
+        | RedisCommand::Getrange => commands::string::dispatch(cmd, conn, exchange).await,
 
         // Key commands
         RedisCommand::Exists
@@ -156,7 +160,10 @@ pub async fn dispatch_command(
         | RedisCommand::Type
         | RedisCommand::Persist
         | RedisCommand::Move
-        | RedisCommand::Sort => commands::key::dispatch(cmd, conn, exchange).await,
+        | RedisCommand::Sort
+        | RedisCommand::Unlink
+        | RedisCommand::Copy
+        | RedisCommand::Touch => commands::key::dispatch(cmd, conn, exchange).await,
 
         // List commands
         RedisCommand::Lpush
@@ -174,7 +181,12 @@ pub async fn dispatch_command(
         | RedisCommand::Lset
         | RedisCommand::Lrem
         | RedisCommand::Ltrim
-        | RedisCommand::Rpoplpush => commands::list::dispatch(cmd, conn, exchange).await,
+        | RedisCommand::Rpoplpush
+        | RedisCommand::Lmpop
+        | RedisCommand::Blmpop
+        | RedisCommand::Lmove
+        | RedisCommand::Blmove
+        | RedisCommand::Lpos => commands::list::dispatch(cmd, conn, exchange).await,
 
         // Hash commands
         RedisCommand::Hset
@@ -188,7 +200,9 @@ pub async fn dispatch_command(
         | RedisCommand::Hkeys
         | RedisCommand::Hvals
         | RedisCommand::Hgetall
-        | RedisCommand::Hincrby => commands::hash::dispatch(cmd, conn, exchange).await,
+        | RedisCommand::Hincrby
+        | RedisCommand::Hrandfield
+        | RedisCommand::Hincrbyfloat => commands::hash::dispatch(cmd, conn, exchange).await,
 
         // Set commands
         RedisCommand::Sadd
@@ -204,7 +218,9 @@ pub async fn dispatch_command(
         | RedisCommand::Sinterstore
         | RedisCommand::Sunionstore
         | RedisCommand::Sdiffstore
-        | RedisCommand::Srandmember => commands::set::dispatch(cmd, conn, exchange).await,
+        | RedisCommand::Srandmember
+        | RedisCommand::Smismember
+        | RedisCommand::Sintercard => commands::set::dispatch(cmd, conn, exchange).await,
 
         // Sorted set commands
         RedisCommand::Zadd
@@ -222,7 +238,14 @@ pub async fn dispatch_command(
         | RedisCommand::Zremrangebyrank
         | RedisCommand::Zremrangebyscore
         | RedisCommand::Zunionstore
-        | RedisCommand::Zinterstore => commands::zset::dispatch(cmd, conn, exchange).await,
+        | RedisCommand::Zinterstore
+        | RedisCommand::Zmpop
+        | RedisCommand::Bzmpop
+        | RedisCommand::Zrandmember
+        | RedisCommand::Zdiff
+        | RedisCommand::Zinter
+        | RedisCommand::Zunion
+        | RedisCommand::Zrangebylex => commands::zset::dispatch(cmd, conn, exchange).await,
 
         // Geo commands
         RedisCommand::Geoadd
@@ -314,9 +337,9 @@ impl MultiplexedExecutor {
     /// awaits a Redis reply fails once `timeout` elapses. The default `None`
     /// keeps the redis driver default (500ms in 1.6.0).
     ///
-    /// A blocking endpoint command (`BLPOP`/`BRPOP`) always builds
-    /// deadline-free connections and ignores this seam value: its blocking
-    /// duration is governed by the Redis-side timeout, not by a driver
+    /// A blocking endpoint command (`BLPOP`/`BRPOP`/`BLMOVE`/`BLMPOP`/`BZMPOP`)
+    /// always builds deadline-free connections and ignores this seam value: its
+    /// blocking duration is governed by the Redis-side timeout, not by a driver
     /// deadline.
     ///
     /// This does not affect `connection_timeout_secs` (TCP connect only).
@@ -341,11 +364,16 @@ impl MultiplexedExecutor {
         }
     }
 
-    /// Whether this endpoint issues a blocking pop (`BLPOP`/`BRPOP`).
+    /// Whether this endpoint issues a blocking command (`BLPOP`, `BRPOP`,
+    /// `BLMOVE`, `BLMPOP`, `BZMPOP`).
     fn is_blocking_endpoint(&self) -> bool {
         matches!(
             self.config.command,
-            RedisCommand::Blpop | RedisCommand::Brpop
+            RedisCommand::Blpop
+                | RedisCommand::Brpop
+                | RedisCommand::Blmove
+                | RedisCommand::Blmpop
+                | RedisCommand::Bzmpop
         )
     }
 
@@ -690,6 +718,9 @@ mod tests {
             RedisCommand::Rename,
             RedisCommand::Renamenx,
             RedisCommand::Move,
+            // Reclassified (design D3): the option-blind classifier makes the
+            // worst-case SET option form govern.
+            RedisCommand::Set,
         ] {
             let executor = FakeExecutor::new(vec![transient_err("connection reset")]);
             let call_count = executor.call_count();
@@ -769,7 +800,7 @@ mod tests {
         let call_count = executor.call_count();
 
         let mut exchange = Exchange::default();
-        let cmd = RedisCommand::Set; // idempotent write
+        let cmd = RedisCommand::Setrange;
 
         let policy = NetworkRetryPolicy {
             max_attempts: 10,
@@ -778,8 +809,14 @@ mod tests {
             ..NetworkRetryPolicy::default()
         };
 
-        let result =
-            execute_with_retry(&mut { executor }, &cmd, &mut exchange, true, &policy).await;
+        let result = execute_with_retry(
+            &mut { executor },
+            &cmd,
+            &mut exchange,
+            is_idempotent_command(&cmd),
+            &policy,
+        )
+        .await;
 
         assert!(result.is_ok());
         // 1 initial + 2 retries = 3 calls
@@ -1148,6 +1185,44 @@ mod tests {
             get.effective_response_timeout(),
             Some(Duration::from_millis(100)),
             "a non-blocking endpoint must keep the seam value"
+        );
+    }
+
+    #[test]
+    fn blocking_endpoint_includes_new_blocking_commands() {
+        let executor_for = |command: &str| {
+            let config = RedisEndpointConfig::from_uri(&format!(
+                "redis://127.0.0.1:6379?command={command}&key=k"
+            ))
+            .unwrap_or_else(|e| panic!("{command} endpoint URI must parse: {e}"));
+            MultiplexedExecutor::new(
+                config,
+                Arc::new(FakeTopology::addrs(vec![
+                    "redis://127.0.0.1:6379".to_string(),
+                ])),
+            )
+        };
+
+        for command in ["BLMOVE", "BLMPOP", "BZMPOP"] {
+            let executor = executor_for(command);
+            assert!(
+                executor.is_blocking_endpoint(),
+                "{command} must be a blocking endpoint"
+            );
+            assert!(
+                matches!(executor.deadline(), Deadline::Free),
+                "{command} must build deadline-free connections"
+            );
+        }
+
+        let non_blocking = executor_for("LMOVE");
+        assert!(
+            !non_blocking.is_blocking_endpoint(),
+            "LMOVE is non-blocking and must keep the driver deadline"
+        );
+        assert!(
+            !matches!(non_blocking.deadline(), Deadline::Free),
+            "LMOVE must not get the blocking bypass"
         );
     }
 }

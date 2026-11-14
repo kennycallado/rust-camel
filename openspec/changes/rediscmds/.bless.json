@@ -1,0 +1,15 @@
+{
+  "kind": "plan",
+  "change": "rediscmds",
+  "verdict": "BLESS",
+  "hash": "sha256:c8a86a45e0db99e13699feb3e8c1ef2bc0a4e6249e4de6486675b55019e64576",
+  "expert": "experts/e_gpt",
+  "date": "2026-11-14",
+  "attempts": 2,
+  "notes": "Plan bless (supersedes spec bless hash 7633ba30). Attempt 1 BLESS-WITH-FIXES (private_interfaces visibility trap on Tasks 1.2/1.3; mission gates + closeout evidence missing from Task 3.5; GETEX unit-without-expiry conflict) — all applied, plus one GETEX scenario added to the delta spec. Attempt 2 BLESS. Reviewer loop before bless: r_glm Block (1 Critical routing gap, 3 Important, 5 Minor) then CLEAN.",
+  "spec_bless": {
+    "verdict": "BLESS",
+    "hash": "sha256:7633ba303e1c23efa69850181842b102e7a2de810f398948c9a694364958c5d2",
+    "attempts": 3
+  }
+}

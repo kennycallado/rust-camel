@@ -306,12 +306,12 @@ impl StreamFakeServer {
     }
 
     /// Port the server is bound to.
-    fn port(&self) -> u16 {
+    pub(crate) fn port(&self) -> u16 {
         self.addr.port()
     }
 
     /// How many connections have been accepted so far.
-    fn connection_count(&self) -> usize {
+    pub(crate) fn connection_count(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
     }
 

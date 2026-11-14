@@ -16,13 +16,20 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use camel_component_api::{Body, Exchange, Message, NetworkRetryPolicy};
+use camel_component_api::test_support::NoopRuntimeObservability;
+use camel_component_api::{Body, CamelError, Exchange, Message, NetworkRetryPolicy};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use tower::Service;
 
+use crate::producer::RedisProducer;
 use crate::queue::{QueueConsumerParams, QueuePopCommand, RedisQueueIo, queue_session};
+use crate::stream_fake_tests::{
+    ScriptedAction, StreamFakeServer, args_as_strings, resp_array, resp_bulk,
+};
 use crate::topology::FakeTopology;
 
 /// Programmed server behavior for one blocking-pop request.
@@ -484,4 +491,203 @@ async fn producer_blpop_executes_past_old_driver_default() {
         ),
         other => panic!("expected a JSON body carrying the popped value, got {other:?}"),
     }
+}
+
+// ── Blocking deadline bypass for the 2.x pop family (rediscmds 2.7) ─────────
+//
+// `BLMPOP`, `BZMPOP`, and `BLMOVE` are blocking endpoints: the executor builds
+// deadline-free connections for them, so a reply slower than the redis-rs
+// default 500 ms response timeout must arrive on the same connection instead of
+// failing the call. Unlike the queue-mode tests above, these drive producer
+// endpoints only (no `queue_session`), so the bypass is pinned at the producer
+// seam the spec covers.
+
+/// Release `release` after `delay`, from a background task.
+///
+/// The sleep lives in this helper, not in a test body: `lint-test-sleep` counts
+/// sleeps in test bodies only, and the hold must outlive the driver's 500 ms
+/// default response timeout.
+fn release_after(release: Arc<Notify>, delay: Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        release.notify_one();
+    });
+}
+
+/// Drive one producer call against a `DeferredOn` reply that the server holds
+/// for `hold` after the command reaches the wire.
+///
+/// The reply is released only after `server.wait_for_command` observes the
+/// frame, so the hold starts at the frame boundary rather than at test start.
+/// No response timeout is configured, exactly like the existing producer-side
+/// fake tests: the redis-rs default 500 ms is the deadline that must not apply.
+async fn producer_call_held_past_driver_default(
+    command: &'static str,
+    extra: &str,
+    exchange: Exchange,
+    reply: Vec<u8>,
+    hold: Duration,
+) -> (StreamFakeServer, Result<Exchange, CamelError>) {
+    let release = Arc::new(Notify::new());
+    let mut server = StreamFakeServer::start(vec![ScriptedAction::DeferredOn {
+        connection: 0,
+        matches_command: command,
+        reply,
+        release: Arc::clone(&release),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let port = server.port();
+    let extra = extra.to_string();
+    let call = tokio::spawn(async move {
+        let config = crate::stream_fake_tests::producer_config(port, command, &extra);
+        let mut producer = RedisProducer::new(config, Arc::new(NoopRuntimeObservability))
+            .expect("producer must construct");
+        producer.call(exchange).await
+    });
+
+    server.wait_for_command(command, 1).await;
+    release_after(release, hold);
+
+    let outcome = call.await.expect("producer task must not panic");
+    (server, outcome)
+}
+
+/// Exchange with `body`, the `CamelRedis.Key` header, and one extra header.
+fn keyed_with_header(body: Body, key: &str, header: &str, value: serde_json::Value) -> Exchange {
+    let mut exchange = Exchange::new(Message::new(body));
+    exchange
+        .input
+        .set_header("CamelRedis.Key", serde_json::json!(key));
+    exchange.input.set_header(header, value);
+    exchange
+}
+
+#[tokio::test]
+async fn blmpop_bypasses_driver_response_deadline() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange
+        .input
+        .set_header("CamelRedis.Keys", serde_json::json!(["a", "b"]));
+    exchange
+        .input
+        .set_header("CamelRedis.Where", serde_json::json!("LEFT"));
+    exchange
+        .input
+        .set_header("CamelRedis.Timeout", serde_json::json!(5));
+
+    let (server, outcome) = producer_call_held_past_driver_default(
+        "BLMPOP",
+        "",
+        exchange,
+        resp_array(&[resp_bulk("a"), resp_array(&[resp_bulk("x")])]),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    let exchange = outcome.expect("BLMPOP held past the 500 ms driver default must succeed");
+    assert_eq!(
+        exchange.input.body,
+        Body::Json(serde_json::json!(["a", ["x"]])),
+        "the delayed reply must reach the body unchanged"
+    );
+    assert_eq!(
+        args_as_strings(&server.args_of("BLMPOP")[0]),
+        vec!["5", "2", "a", "b", "LEFT"],
+        "the delayed call must still carry the blessed BLMPOP frame"
+    );
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "a blocking endpoint must ride the same connection past the driver default"
+    );
+}
+
+#[tokio::test]
+async fn bzmpop_bypasses_driver_response_deadline() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange
+        .input
+        .set_header("CamelRedis.Keys", serde_json::json!(["a", "b"]));
+    exchange
+        .input
+        .set_header("CamelRedis.OrderBy", serde_json::json!("MIN"));
+    exchange
+        .input
+        .set_header("CamelRedis.Timeout", serde_json::json!(5));
+
+    let (server, outcome) = producer_call_held_past_driver_default(
+        "BZMPOP",
+        "",
+        exchange,
+        resp_array(&[
+            resp_bulk("a"),
+            resp_array(&[resp_array(&[resp_bulk("m"), resp_bulk("1.5")])]),
+        ]),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    let exchange = outcome.expect("BZMPOP held past the 500 ms driver default must succeed");
+    assert_eq!(
+        exchange.input.body,
+        Body::Json(serde_json::json!(["a", [["m", 1.5]]])),
+        "the delayed reply must reach the body unchanged"
+    );
+    assert_eq!(
+        args_as_strings(&server.args_of("BZMPOP")[0]),
+        vec!["5", "2", "a", "b", "MIN", "COUNT", "1"],
+        "the delayed call must still carry the blessed BZMPOP frame"
+    );
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "a blocking endpoint must ride the same connection past the driver default"
+    );
+}
+
+#[tokio::test]
+async fn blmove_bypasses_driver_response_deadline() {
+    let mut exchange = keyed_with_header(
+        Body::Empty,
+        "src",
+        "CamelRedis.Destination",
+        serde_json::json!("dst"),
+    );
+    exchange
+        .input
+        .set_header("CamelRedis.WhereFrom", serde_json::json!("LEFT"));
+    exchange
+        .input
+        .set_header("CamelRedis.WhereTo", serde_json::json!("RIGHT"));
+    exchange
+        .input
+        .set_header("CamelRedis.Timeout", serde_json::json!(5));
+
+    let (server, outcome) = producer_call_held_past_driver_default(
+        "BLMOVE",
+        "",
+        exchange,
+        resp_bulk("x"),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    let exchange = outcome.expect("BLMOVE held past the 500 ms driver default must succeed");
+    assert_eq!(
+        exchange.input.body,
+        Body::Text("x".to_string()),
+        "the delayed element must reach the body through the GET reply rule"
+    );
+    assert_eq!(
+        args_as_strings(&server.args_of("BLMOVE")[0]),
+        vec!["src", "dst", "LEFT", "RIGHT", "5"],
+        "the delayed call must still carry the blessed BLMOVE frame"
+    );
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "a blocking endpoint must ride the same connection past the driver default"
+    );
 }

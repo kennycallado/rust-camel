@@ -1,6 +1,7 @@
+use super::string::encode_mget_reply_bytes;
 use super::{
-    body_value_bytes, encode_map_entries, get_i64_header, get_str_header, get_str_vec_header,
-    map_body_map, require_key,
+    body_value_bytes, encode_map_entries, get_f64_header, get_i64_header, get_str_header,
+    get_str_vec_header, map_body_map, reply_to_body, require_key, require_str_header,
 };
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -22,6 +23,8 @@ pub(crate) fn is_hash_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Hvals
             | RedisCommand::Hgetall
             | RedisCommand::Hincrby
+            | RedisCommand::Hrandfield
+            | RedisCommand::Hincrbyfloat
     )
 }
 
@@ -58,6 +61,40 @@ pub(crate) fn resolve_hmset_values(
 
 pub(crate) fn resolve_hash_increment(exchange: &Exchange) -> Result<i64, CamelError> {
     Ok(get_i64_header(exchange, "CamelRedis.Increment")?.unwrap_or(1))
+}
+
+/// Resolves the mandatory float increment for `HINCRBYFLOAT`.
+///
+/// Unlike the integer incremented by [`resolve_hash_increment`], there is no
+/// default: a missing header is a named error rather than a silent `1.0`.
+/// A present-but-invalid value is already a named error echoing the received
+/// value (the [`get_f64_header`] contract), so a misconfigured route never
+/// reaches Redis.
+pub(crate) fn resolve_float_increment(exchange: &Exchange) -> Result<f64, CamelError> {
+    get_f64_header(exchange, "CamelRedis.Increment")?
+        .ok_or_else(|| CamelError::ProcessorError("Missing CamelRedis.Increment".into()))
+}
+
+/// Maps a member-array reply to an exchange body per the `MGET` binary rule.
+///
+/// An all-UTF-8 array maps to a JSON string array; any binary member switches
+/// the whole reply to the RESP-encoded `Bytes` body so no member is mangled.
+/// Mirrors the private `zset::member_array_reply_to_body`; kept local because
+/// the helper is small and `zset` is otherwise untouched.
+fn member_array_reply_to_body(members: Vec<Vec<u8>>) -> Body {
+    let values: Vec<Option<Vec<u8>>> = members.into_iter().map(Some).collect();
+    let text: Option<Vec<String>> = values
+        .iter()
+        .map(|value| {
+            value
+                .as_ref()
+                .and_then(|bytes| String::from_utf8(bytes.clone()).ok())
+        })
+        .collect();
+    match text {
+        Some(text) => Body::Json(serde_json::json!(text)),
+        None => Body::Bytes(encode_mget_reply_bytes(&values).into()),
+    }
 }
 
 pub(crate) fn resolve_hash_field_operands(
@@ -199,6 +236,50 @@ pub async fn dispatch(
                 .map_err(|e| crate::transport_error::redis_error_to_camel("HINCRBY", e))?;
             serde_json::json!(n)
         }
+        RedisCommand::Hrandfield => {
+            let key = require_key(exchange)?;
+            match super::zset::resolve_optional_count(exchange)? {
+                Some(count) => {
+                    let members: Vec<Vec<u8>> = redis::cmd("HRANDFIELD")
+                        .arg(&key)
+                        .arg(count)
+                        .query_async(conn)
+                        .await
+                        .map_err(|e| {
+                            crate::transport_error::redis_error_to_camel("HRANDFIELD", e)
+                        })?;
+                    // Member-array reply: the body itself carries the payload.
+                    exchange.input.body = member_array_reply_to_body(members);
+                }
+                None => {
+                    let member: Option<Vec<u8>> = redis::cmd("HRANDFIELD")
+                        .arg(&key)
+                        .query_async(conn)
+                        .await
+                        .map_err(|e| {
+                            crate::transport_error::redis_error_to_camel("HRANDFIELD", e)
+                        })?;
+                    // Single bulk-string reply: the body itself carries the payload.
+                    exchange.input.body = reply_to_body(member.as_deref());
+                }
+            }
+            return Ok(());
+        }
+        RedisCommand::Hincrbyfloat => {
+            let key = require_key(exchange)?;
+            let field = require_str_header(exchange, "CamelRedis.Field")?;
+            let increment = resolve_float_increment(exchange)?;
+            // `f64::to_string` is the shortest round-trip form, so the
+            // increment reaches Redis without a lossy decimal re-render.
+            let reply: String = redis::cmd("HINCRBYFLOAT")
+                .arg(&key)
+                .arg(field)
+                .arg(increment.to_string())
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("HINCRBYFLOAT", e))?;
+            serde_json::json!(reply)
+        }
         _ => unreachable!("non-hash commands rejected above"),
     };
     exchange.input.body = Body::Json(result);
@@ -261,6 +342,8 @@ mod tests {
     fn test_hash_command_classification() {
         assert!(is_hash_command(&RedisCommand::Hset));
         assert!(is_hash_command(&RedisCommand::Hincrby));
+        assert!(is_hash_command(&RedisCommand::Hrandfield));
+        assert!(is_hash_command(&RedisCommand::Hincrbyfloat));
         assert!(!is_hash_command(&RedisCommand::Set));
     }
 
@@ -303,6 +386,35 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("CamelRedis.Increment"), "{text}");
         assert!(text.contains("abc"), "{text}");
+    }
+
+    #[test]
+    fn resolve_float_increment_domains() {
+        let float = ex_with(&[("CamelRedis.Increment", serde_json::json!(1.5))]);
+        assert_eq!(
+            resolve_float_increment(&float).expect("a float increment must resolve"),
+            1.5
+        );
+
+        let integer_string = ex_with(&[("CamelRedis.Increment", serde_json::json!("2"))]);
+        assert_eq!(
+            resolve_float_increment(&integer_string)
+                .expect("an integer-string increment must resolve"),
+            2.0
+        );
+
+        let garbage = ex_with(&[("CamelRedis.Increment", serde_json::json!("abc"))]);
+        let text = resolve_float_increment(&garbage)
+            .expect_err("a non-numeric increment must be refused")
+            .to_string();
+        assert!(text.contains("CamelRedis.Increment"), "{text}");
+        assert!(text.contains("abc"), "{text}");
+
+        let missing = Exchange::new(Message::default());
+        let text = resolve_float_increment(&missing)
+            .expect_err("a missing increment must be refused")
+            .to_string();
+        assert!(text.contains("CamelRedis.Increment"), "{text}");
     }
 
     #[test]

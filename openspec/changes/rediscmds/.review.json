@@ -1,0 +1,22 @@
+{
+  "kind": "holistic-review",
+  "change": "rediscmds",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "date": "2026-11-14",
+  "reviewed_head": "0942a9910",
+  "impl_hash": "sha256:37c52d836df9031cdb4a5454fc55430eea0a8ee2346afd103115587dcf3c3141",
+  "findings": [
+    {
+      "severity": "minor",
+      "finding": "Scalar-payload command enumeration in docs omitted LPOS (the only new body-payload command)",
+      "resolution": "Fixed in archive prep: 'the LPOS element' added to the enumeration; mdbook test exit 0"
+    },
+    {
+      "severity": "minor",
+      "finding": "Command-count prose said '80+' where the audit pins 121 variants",
+      "resolution": "Fixed in archive prep: '120+' in both places; mdbook test exit 0"
+    }
+  ],
+  "verification": "Fresh cargo test -p camel-component-redis --lib run by reviewer: 686 passed, 0 failed. Hard-constraint checklist clean (no value header, no options blob, blocking bypass proven for all three new blocking commands, per-command classification verified mechanically, no out-of-scope commands). Cross-phase consistency verified (wire frames verbatim, reply rules uniform, fail-closed everywhere, error phrasing uniform)."
+}

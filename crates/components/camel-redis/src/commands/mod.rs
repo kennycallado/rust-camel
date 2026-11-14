@@ -28,7 +28,7 @@ const MAX_INVALID_HEADER_VALUE_CHARS: usize = 64;
 /// Renders a header value for an error message, truncated at a UTF-8 scalar
 /// boundary to [`MAX_INVALID_HEADER_VALUE_CHARS`] characters with a trailing
 /// ellipsis only when truncation occurred. Short values stay intact.
-fn invalid_header_value_preview(value: &serde_json::Value) -> String {
+pub(crate) fn invalid_header_value_preview(value: &serde_json::Value) -> String {
     let rendered = value.to_string();
     match rendered.char_indices().nth(MAX_INVALID_HEADER_VALUE_CHARS) {
         Some((boundary, _)) => format!("{}…", &rendered[..boundary]),
@@ -155,6 +155,30 @@ pub fn get_bool_header(exchange: &Exchange, key: &str) -> Option<bool> {
     exchange.input.header(key).and_then(|v| v.as_bool())
 }
 
+/// Strict boolean header resolver for option flags.
+///
+/// [`get_bool_header`] maps a present-but-malformed value to `None`, which the
+/// callers cannot tell apart from an absent header: a route that sets a typo
+/// would silently run without the option. This helper keeps the two cases
+/// distinct — absent is `Ok(None)`, malformed is a named error that echoes a
+/// bounded value preview (ADR-0032: fail closed, never default untrusted
+/// exchange data into a Redis-side effect).
+pub(crate) fn require_bool_header(
+    exchange: &Exchange,
+    key: &str,
+) -> Result<Option<bool>, CamelError> {
+    let Some(value) = exchange.input.header(key) else {
+        return Ok(None);
+    };
+    match value {
+        serde_json::Value::Bool(b) => Ok(Some(*b)),
+        other => Err(CamelError::ProcessorError(format!(
+            "Invalid value for header {key}: expected a boolean, got {}",
+            invalid_header_value_preview(other)
+        ))),
+    }
+}
+
 pub fn get_str_vec_header(exchange: &Exchange, key: &str) -> Option<Vec<String>> {
     exchange.input.header(key).and_then(|v| {
         v.as_array().map(|arr| {
@@ -163,6 +187,59 @@ pub fn get_str_vec_header(exchange: &Exchange, key: &str) -> Option<Vec<String>>
                 .collect()
         })
     })
+}
+
+/// Strict resolver for a non-empty JSON array-of-strings header.
+///
+/// [`get_str_vec_header`] maps a malformed header to `None` and silently drops
+/// non-string entries, so a route with a typo would send a *shorter* list to
+/// Redis than configured — a wrong-result or data-loss trap. This resolver
+/// accepts only a non-empty JSON array of strings and fails closed, naming the
+/// header, the command, and (for a bad entry) its index plus a bounded value
+/// preview (ADR-0032: untrusted exchange data never silently becomes a
+/// Redis-side effect). `noun` names the list element in the empty-list
+/// diagnostic ("key", "member", ...).
+pub(crate) fn require_string_list(
+    exchange: &Exchange,
+    header: &str,
+    verb: &str,
+    noun: &str,
+) -> Result<Vec<String>, CamelError> {
+    let Some(value) = exchange.input.header(header) else {
+        return Err(CamelError::ProcessorError(format!(
+            "{verb}: missing required header {header}: expected a non-empty JSON array of strings"
+        )));
+    };
+    let Some(entries) = value.as_array() else {
+        return Err(CamelError::ProcessorError(format!(
+            "{verb}: invalid {header}: expected a non-empty JSON array of strings, got {}",
+            invalid_header_value_preview(value)
+        )));
+    };
+    if entries.is_empty() {
+        return Err(CamelError::ProcessorError(format!(
+            "{verb}: invalid {header}: the {noun} list must not be empty"
+        )));
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| match entry {
+            serde_json::Value::String(item) => Ok(item.clone()),
+            other => Err(CamelError::ProcessorError(format!(
+                "{verb}: invalid {header}: entry at index {index} is not a string: {}",
+                invalid_header_value_preview(other)
+            ))),
+        })
+        .collect()
+}
+
+/// Strict resolver for the multi-key commands' `CamelRedis.Keys`.
+///
+/// The key-list form of [`require_string_list`]; the `MGET` resolver is
+/// grandfathered and keeps [`get_str_vec_header`].
+pub(crate) fn require_key_list(exchange: &Exchange, verb: &str) -> Result<Vec<String>, CamelError> {
+    require_string_list(exchange, "CamelRedis.Keys", verb, "key")
 }
 
 /// Reads a raw JSON header value by name.
@@ -598,6 +675,49 @@ mod tests {
             get_str_vec_header(&ex, "CamelRedis.Keys"),
             Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
         );
+    }
+
+    // ── Strict multi-key resolver (rediscmds task 2.2) ──────────────────────
+
+    #[test]
+    fn require_key_list_strict_domains() {
+        let ok = make_exchange_with_header("CamelRedis.Keys", serde_json::json!(["a", "b"]));
+        assert_eq!(
+            require_key_list(&ok, "LMPOP").expect("a valid key list must resolve"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        let rejected = [
+            ("empty array", serde_json::json!([])),
+            ("non-array", serde_json::json!("a")),
+            ("malformed entry", serde_json::json!(["a", 42])),
+            ("null entry", serde_json::json!(["a", null])),
+        ];
+        for (label, value) in rejected {
+            let ex = make_exchange_with_header("CamelRedis.Keys", value);
+            let err = require_key_list(&ex, "LMPOP").expect_err(label);
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.Keys"), "{label}: {msg}");
+            assert!(msg.contains("LMPOP"), "{label}: {msg}");
+        }
+
+        let no_header = Exchange::new(Message::default());
+        let err = require_key_list(&no_header, "LMPOP").expect_err("absent header must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Keys"), "{msg}");
+        assert!(msg.contains("LMPOP"), "{msg}");
+
+        for (bad_entry, rendered) in [
+            (serde_json::json!(42), "42"),
+            (serde_json::Value::Null, "null"),
+        ] {
+            let ex =
+                make_exchange_with_header("CamelRedis.Keys", serde_json::json!(["a", bad_entry]));
+            let err = require_key_list(&ex, "LMPOP").expect_err("a non-string entry must fail");
+            let msg = err.to_string();
+            assert!(msg.contains("index 1"), "{msg}");
+            assert!(msg.contains(rendered), "{msg}");
+        }
     }
 
     #[test]

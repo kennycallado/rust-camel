@@ -1,4 +1,7 @@
-use super::{body_value_bytes, get_i64_header, get_str_header, get_str_vec_header, require_key};
+use super::{
+    body_value_bytes, get_i64_header, get_str_header, get_str_vec_header, require_key,
+    require_key_list, require_string_list,
+};
 use crate::HEADER_VALUE;
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
@@ -22,7 +25,25 @@ pub(crate) fn is_set_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Sunionstore
             | RedisCommand::Sdiffstore
             | RedisCommand::Srandmember
+            | RedisCommand::Smismember
+            | RedisCommand::Sintercard
     )
+}
+
+/// Strict resolver for `SMISMEMBER`'s `CamelRedis.Members`.
+pub(crate) fn resolve_members_list(exchange: &Exchange) -> Result<Vec<String>, CamelError> {
+    require_string_list(exchange, "CamelRedis.Members", "SMISMEMBER", "member")
+}
+
+/// Optional `SINTERCARD` `CamelRedis.Limit`; a negative value is a named
+/// pre-send error because Redis reads `LIMIT` as a result bound.
+pub(crate) fn resolve_sintercard_limit(exchange: &Exchange) -> Result<Option<i64>, CamelError> {
+    match get_i64_header(exchange, "CamelRedis.Limit")? {
+        Some(limit) if limit < 0 => Err(CamelError::ProcessorError(format!(
+            "SINTERCARD: invalid CamelRedis.Limit {limit}: LIMIT must be non-negative"
+        ))),
+        limit => Ok(limit),
+    }
 }
 
 pub(crate) fn resolve_set_keys(exchange: &Exchange) -> Result<Vec<String>, CamelError> {
@@ -196,6 +217,37 @@ pub async fn dispatch(
                 }
             }
         }
+        RedisCommand::Smismember => {
+            let key = require_key(exchange)?;
+            let members = resolve_members_list(exchange)?;
+            let mut command = redis::cmd("SMISMEMBER");
+            command.arg(&key);
+            for member in &members {
+                command.arg(member);
+            }
+            let flags: Vec<i64> = command
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SMISMEMBER", e))?;
+            serde_json::json!(flags.iter().map(|&flag| flag != 0).collect::<Vec<bool>>())
+        }
+        RedisCommand::Sintercard => {
+            let keys = require_key_list(exchange, "SINTERCARD")?;
+            let limit = resolve_sintercard_limit(exchange)?;
+            let mut command = redis::cmd("SINTERCARD");
+            command.arg(keys.len());
+            for key in &keys {
+                command.arg(key);
+            }
+            if let Some(limit) = limit {
+                command.arg("LIMIT").arg(limit);
+            }
+            let n: i64 = command
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("SINTERCARD", e))?;
+            serde_json::json!(n)
+        }
         _ => unreachable!("non-set commands rejected above"),
     };
     exchange.input.body = Body::Json(result);
@@ -328,6 +380,58 @@ mod tests {
         assert_eq!(
             json_from_members(vec!["a".to_string(), "b".to_string()]),
             serde_json::json!(["a", "b"])
+        );
+    }
+
+    // ── SMISMEMBER / SINTERCARD resolvers (rediscmds task 2.4) ──────────────
+
+    #[test]
+    fn resolve_members_list_strict() {
+        let ok = ex_with(&[("CamelRedis.Members", serde_json::json!(["a", "b"]))]);
+        assert_eq!(
+            resolve_members_list(&ok).expect("a valid member list must resolve"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        for (label, value) in [
+            ("empty array", serde_json::json!([])),
+            ("non-array", serde_json::json!("a")),
+        ] {
+            let ex = ex_with(&[("CamelRedis.Members", value)]);
+            let err = resolve_members_list(&ex).expect_err(label);
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.Members"), "{label}: {msg}");
+        }
+
+        let missing = ex_with(&[]);
+        let err = resolve_members_list(&missing).expect_err("an absent member list must fail");
+        assert!(err.to_string().contains("CamelRedis.Members"), "{err}");
+
+        let malformed = ex_with(&[("CamelRedis.Members", serde_json::json!(["a", 7]))]);
+        let err = resolve_members_list(&malformed).expect_err("a non-string entry must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Members"), "{msg}");
+        assert!(msg.contains("index 1"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_sintercard_limit_domain() {
+        let ok = ex_with(&[("CamelRedis.Limit", serde_json::json!(10))]);
+        assert_eq!(
+            resolve_sintercard_limit(&ok).expect("a non-negative limit must resolve"),
+            Some(10)
+        );
+
+        let negative = ex_with(&[("CamelRedis.Limit", serde_json::json!(-1))]);
+        let err = resolve_sintercard_limit(&negative).expect_err("a negative limit must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("CamelRedis.Limit"), "{msg}");
+        assert!(msg.contains("non-negative"), "{msg}");
+
+        let absent = ex_with(&[]);
+        assert_eq!(
+            resolve_sintercard_limit(&absent).expect("an absent limit is optional"),
+            None
         );
     }
 }

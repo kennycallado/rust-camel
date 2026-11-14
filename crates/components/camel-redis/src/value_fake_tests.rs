@@ -977,3 +977,1257 @@ async fn empty_string_body_is_accepted_and_empty_body_is_not() {
         "an empty JSON string body must send an empty value"
     );
 }
+
+// ── SET options, GETDEL/GETEX, SETRANGE/GETRANGE (rediscmds 1.5) ─────────────
+
+/// Exchange carrying `body`, the `CamelRedis.Key` header, and every option
+/// header of one case.
+fn keyed_with_headers(body: Body, key: &str, headers: &[(&str, serde_json::Value)]) -> Exchange {
+    let mut exchange = keyed_exchange(body, key);
+    for (header, value) in headers {
+        exchange.input.set_header(*header, value.clone());
+    }
+    exchange
+}
+
+/// Render expected wire arguments as recorded RESP argument bytes.
+fn expect_args(args: &[&str]) -> Vec<Vec<u8>> {
+    args.iter().map(|arg| arg.as_bytes().to_vec()).collect()
+}
+
+/// One wire case: the option headers to set plus the expected frame arguments.
+type WireCase<'a> = (Vec<(&'a str, serde_json::Value)>, Vec<&'a str>);
+
+#[tokio::test]
+async fn set_with_nx_and_xx_conditions_on_wire() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "SET",
+            reply: b"+OK\r\n".to_vec(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "SET",
+            reply: b"+OK\r\n".to_vec(),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let mut expected = Vec::new();
+    for condition in ["NX", "XX"] {
+        call_producer(
+            &server,
+            "SET",
+            "",
+            keyed_with_headers(
+                Body::Text("v".to_string()),
+                "k",
+                &[("CamelRedis.SetCondition", serde_json::json!(condition))],
+            ),
+        )
+        .await
+        .expect("a conditioned SET must succeed");
+        expected.push(expect_args(&["k", "v", condition]));
+    }
+
+    assert_eq!(
+        server.args_of("SET"),
+        expected,
+        "SET must render NX/XX right after the value"
+    );
+}
+
+#[tokio::test]
+async fn set_expiry_units_on_wire() {
+    let reply = ScriptedAction::Reply {
+        matches_command: "SET",
+        reply: b"+OK\r\n".to_vec(),
+    };
+    let server = StreamFakeServer::start(vec![
+        reply.clone(),
+        reply.clone(),
+        reply.clone(),
+        reply.clone(),
+        reply,
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let cases: Vec<WireCase> = vec![
+        // A bare Timeout means seconds, so the wire option is EX.
+        (
+            vec![("CamelRedis.Timeout", serde_json::json!(15u64))],
+            vec!["k", "v", "EX", "15"],
+        ),
+        // The unit discriminator switches the relative expiry to PX.
+        (
+            vec![
+                ("CamelRedis.Timeout", serde_json::json!(500u64)),
+                ("CamelRedis.ExpireUnit", serde_json::json!("MILLISECONDS")),
+            ],
+            vec!["k", "v", "PX", "500"],
+        ),
+        // A bare Timestamp means seconds, so the wire option is EXAT.
+        (
+            vec![("CamelRedis.Timestamp", serde_json::json!(1731000000i64))],
+            vec!["k", "v", "EXAT", "1731000000"],
+        ),
+        // The unit discriminator switches the absolute expiry to PXAT.
+        (
+            vec![
+                ("CamelRedis.Timestamp", serde_json::json!(1731000000000i64)),
+                ("CamelRedis.ExpireUnit", serde_json::json!("MILLISECONDS")),
+            ],
+            vec!["k", "v", "PXAT", "1731000000000"],
+        ),
+        // KEEPTTL stands alone and carries no value.
+        (
+            vec![("CamelRedis.KeepTtl", serde_json::json!(true))],
+            vec!["k", "v", "KEEPTTL"],
+        ),
+    ];
+
+    let mut expected = Vec::new();
+    for (headers, frame) in &cases {
+        call_producer(
+            &server,
+            "SET",
+            "",
+            keyed_with_headers(Body::Text("v".to_string()), "k", headers),
+        )
+        .await
+        .expect("an expiring SET must succeed");
+        expected.push(expect_args(frame));
+    }
+
+    assert_eq!(
+        server.args_of("SET"),
+        expected,
+        "each expiry header must render its own unit and value"
+    );
+}
+
+#[tokio::test]
+async fn set_with_get_returns_old_value_binary_safe() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "SET",
+        reply: resp_bulk_bytes(b"old"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "SET",
+        "",
+        keyed_with_headers(
+            Body::Text("new".to_string()),
+            "k",
+            &[("CamelRedis.ReturnOldValue", serde_json::json!(true))],
+        ),
+    )
+    .await
+    .expect("SET with ReturnOldValue must succeed");
+
+    let frames = server.args_of("SET");
+    assert_eq!(frames.len(), 1, "exactly one SET must reach the wire");
+    assert_eq!(
+        frames[0],
+        expect_args(&["k", "new", "GET"]),
+        "GET must be the last SET argument, after the value"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Text("old".to_string()),
+        "the bulk reply must reach the body through the GET reply path"
+    );
+}
+
+#[tokio::test]
+async fn set_conflicts_fail_before_any_wire_frame() {
+    // The server would answer SET, so an empty `args_of` proves the conflict
+    // was refused locally instead of being reported by the server.
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "SET",
+        reply: b"+OK\r\n".to_vec(),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let err = call_producer(
+        &server,
+        "SET",
+        "",
+        keyed_with_headers(
+            Body::Text("v".to_string()),
+            "k",
+            &[
+                ("CamelRedis.KeepTtl", serde_json::json!(true)),
+                ("CamelRedis.Timeout", serde_json::json!(15u64)),
+            ],
+        ),
+    )
+    .await
+    .expect_err("KEEPTTL with an expiry must fail before send");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("CamelRedis.KeepTtl") && msg.contains("CamelRedis.Timeout"),
+        "the conflict error must name both headers: {msg}"
+    );
+    assert!(
+        server.args_of("SET").is_empty(),
+        "a conflicting SET must not reach the wire: {:?}",
+        server.args_of("SET")
+    );
+}
+
+#[tokio::test]
+async fn getdel_sends_key_and_returns_binary_value() {
+    let payload = vec![0xFF, 0x00];
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "GETDEL",
+        reply: resp_bulk_bytes(&payload),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(&server, "GETDEL", "", keyed_exchange(Body::Empty, "k"))
+        .await
+        .expect("GETDEL must succeed");
+
+    assert_eq!(
+        server.args_of("GETDEL"),
+        vec![expect_args(&["k"])],
+        "GETDEL must send the key and no option argument"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Bytes(payload.into()),
+        "GETDEL must keep the reply bytes binary-safe"
+    );
+}
+
+#[tokio::test]
+async fn getex_expiry_and_persist_frames() {
+    let actions: Vec<ScriptedAction> = (0..6)
+        .map(|_| ScriptedAction::Reply {
+            matches_command: "GETEX",
+            reply: resp_nil(),
+        })
+        .collect();
+    let server = StreamFakeServer::start(actions)
+        .await
+        .expect("fake server must bind");
+
+    let cases: Vec<WireCase> = vec![
+        (
+            vec![("CamelRedis.Timeout", serde_json::json!(100u64))],
+            vec!["k", "EX", "100"],
+        ),
+        (
+            vec![
+                ("CamelRedis.Timeout", serde_json::json!(500u64)),
+                ("CamelRedis.ExpireUnit", serde_json::json!("MILLISECONDS")),
+            ],
+            vec!["k", "PX", "500"],
+        ),
+        (
+            vec![("CamelRedis.Timestamp", serde_json::json!(1731000000i64))],
+            vec!["k", "EXAT", "1731000000"],
+        ),
+        (
+            vec![
+                ("CamelRedis.Timestamp", serde_json::json!(1731000000000i64)),
+                ("CamelRedis.ExpireUnit", serde_json::json!("MILLISECONDS")),
+            ],
+            vec!["k", "PXAT", "1731000000000"],
+        ),
+        (
+            vec![("CamelRedis.Persist", serde_json::json!(true))],
+            vec!["k", "PERSIST"],
+        ),
+        // No option header at all: the frame is exactly `GETEX k`.
+        (Vec::new(), vec!["k"]),
+    ];
+
+    let mut expected = Vec::new();
+    for (headers, frame) in &cases {
+        call_producer(
+            &server,
+            "GETEX",
+            "",
+            keyed_with_headers(Body::Empty, "k", headers),
+        )
+        .await
+        .expect("GETEX must succeed");
+        expected.push(expect_args(frame));
+    }
+
+    assert_eq!(
+        server.args_of("GETEX"),
+        expected,
+        "each GETEX mapping must render its own option arguments"
+    );
+}
+
+#[tokio::test]
+async fn setrange_frame_and_length_reply() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "SETRANGE",
+            reply: resp_int(11),
+        },
+        ScriptedAction::Reply {
+            matches_command: "SETRANGE",
+            reply: resp_int(5),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "SETRANGE",
+        "",
+        keyed_with_headers(
+            Body::Text("world".to_string()),
+            "k",
+            &[("CamelRedis.Offset", serde_json::json!(6u64))],
+        ),
+    )
+    .await
+    .expect("SETRANGE at offset 6 must succeed");
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(11)),
+        "SETRANGE must keep the new-length reply as JSON"
+    );
+
+    // Offset zero is legal and must be sent as the literal `0`.
+    call_producer(
+        &server,
+        "SETRANGE",
+        "",
+        keyed_with_headers(
+            Body::Text("hello".to_string()),
+            "k",
+            &[("CamelRedis.Offset", serde_json::json!(0u64))],
+        ),
+    )
+    .await
+    .expect("SETRANGE at offset 0 must succeed");
+
+    assert_eq!(
+        server.args_of("SETRANGE"),
+        vec![
+            expect_args(&["k", "6", "world"]),
+            expect_args(&["k", "0", "hello"]),
+        ],
+        "SETRANGE must send the key, the offset, then the body"
+    );
+}
+
+#[tokio::test]
+async fn getrange_frame_and_binary_slice() {
+    let slice = vec![0x00, 0xFF, 0x80, b'h'];
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "GETRANGE",
+        reply: resp_bulk_bytes(&slice),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "GETRANGE",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "k",
+            &[
+                ("CamelRedis.Start", serde_json::json!(0i64)),
+                ("CamelRedis.End", serde_json::json!(3i64)),
+            ],
+        ),
+    )
+    .await
+    .expect("GETRANGE must succeed");
+
+    assert_eq!(
+        server.args_of("GETRANGE"),
+        vec![expect_args(&["k", "0", "3"])],
+        "GETRANGE must send the key and both range bounds"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Bytes(slice.into()),
+        "GETRANGE must keep the slice bytes binary-safe"
+    );
+}
+
+// ── Phase 2 command frames and reply shapes (rediscmds 2.7) ─────────────────
+
+/// Exchange carrying a `CamelRedis.Keys` list and any option headers.
+fn keys_with_headers(keys: serde_json::Value, headers: &[(&str, serde_json::Value)]) -> Exchange {
+    let mut exchange = body_exchange(Body::Empty);
+    exchange.input.set_header("CamelRedis.Keys", keys);
+    for (header, value) in headers {
+        exchange.input.set_header(*header, value.clone());
+    }
+    exchange
+}
+
+/// `LMPOP`/`BLMPOP` exchange: keys `a`,`b`, end `LEFT`, `COUNT 2`.
+fn pop_exchange(headers: &[(&str, serde_json::Value)]) -> Exchange {
+    let mut all: Vec<(&str, serde_json::Value)> = vec![
+        ("CamelRedis.Where", serde_json::json!("LEFT")),
+        ("CamelRedis.Count", serde_json::json!(2)),
+    ];
+    all.extend_from_slice(headers);
+    keys_with_headers(serde_json::json!(["a", "b"]), &all)
+}
+
+#[tokio::test]
+async fn lmpop_frame_and_reply_shape() {
+    let binary_reply = resp_array(&[resp_bulk("a"), resp_array(&[resp_bulk_bytes(b"\xff")])]);
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "LMPOP",
+            reply: resp_array(&[
+                resp_bulk("a"),
+                resp_array(&[resp_bulk("x"), resp_bulk("y")]),
+            ]),
+        },
+        ScriptedAction::Reply {
+            matches_command: "LMPOP",
+            reply: binary_reply.clone(),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let text = call_producer(&server, "LMPOP", "", pop_exchange(&[]))
+        .await
+        .expect("LMPOP with an all-UTF-8 reply must succeed");
+    assert_eq!(
+        text.input.body,
+        Body::Json(serde_json::json!(["a", ["x", "y"]])),
+        "an all-UTF-8 LMPOP reply keeps the JSON [key, [elements]] shape"
+    );
+
+    let binary = call_producer(&server, "LMPOP", "", pop_exchange(&[]))
+        .await
+        .expect("LMPOP with a binary element must succeed");
+    assert_eq!(
+        binary.input.body,
+        Body::Bytes(binary_reply.into()),
+        "a binary element switches the whole reply to the RESP-encoded Bytes body"
+    );
+
+    assert_eq!(
+        server.args_of("LMPOP"),
+        vec![expect_args(&["2", "a", "b", "LEFT", "COUNT", "2"]); 2],
+        "LMPOP must send numkeys, keys, the end, then COUNT n"
+    );
+}
+
+#[tokio::test]
+async fn blmpop_frame_with_timeout() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "BLMPOP",
+            reply: resp_nil(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "BLMPOP",
+            reply: resp_nil(),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let mut expected = Vec::new();
+    for (timeout, leading) in [(5u64, "5"), (0u64, "0")] {
+        let outcome = call_producer(
+            &server,
+            "BLMPOP",
+            "",
+            pop_exchange(&[("CamelRedis.Timeout", serde_json::json!(timeout))]),
+        )
+        .await
+        .expect("BLMPOP must succeed");
+        assert_eq!(
+            outcome.input.body,
+            Body::Json(serde_json::Value::Null),
+            "a nil BLMPOP reply must be JSON null"
+        );
+        expected.push(expect_args(&[leading, "2", "a", "b", "LEFT", "COUNT", "2"]));
+    }
+
+    assert_eq!(
+        server.args_of("BLMPOP"),
+        expected,
+        "BLMPOP must lead with the timeout, and a missing/zero timeout sends 0"
+    );
+}
+
+#[tokio::test]
+async fn lmove_frame_and_element_reply() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "LMOVE",
+        reply: resp_bulk("x"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "LMOVE",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "src",
+            &[
+                ("CamelRedis.Destination", serde_json::json!("dst")),
+                ("CamelRedis.WhereFrom", serde_json::json!("LEFT")),
+                ("CamelRedis.WhereTo", serde_json::json!("RIGHT")),
+            ],
+        ),
+    )
+    .await
+    .expect("LMOVE must succeed");
+
+    assert_eq!(
+        server.args_of("LMOVE"),
+        vec![expect_args(&["src", "dst", "LEFT", "RIGHT"])],
+        "LMOVE must send source, destination, then both directions"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Text("x".to_string()),
+        "the moved element follows the GET reply rule"
+    );
+}
+
+#[tokio::test]
+async fn blmove_frame() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "BLMOVE",
+        reply: resp_bulk("y"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "BLMOVE",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "src",
+            &[
+                ("CamelRedis.Destination", serde_json::json!("dst")),
+                ("CamelRedis.WhereFrom", serde_json::json!("LEFT")),
+                ("CamelRedis.WhereTo", serde_json::json!("RIGHT")),
+                ("CamelRedis.Timeout", serde_json::json!(1u64)),
+            ],
+        ),
+    )
+    .await
+    .expect("BLMOVE must succeed");
+
+    assert_eq!(
+        server.args_of("BLMOVE"),
+        vec![expect_args(&["src", "dst", "LEFT", "RIGHT", "1"])],
+        "BLMOVE must append the blocking timeout after both directions"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Text("y".to_string()),
+        "the moved element follows the GET reply rule"
+    );
+}
+
+#[tokio::test]
+async fn lpos_frame_from_body() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "LPOS",
+            reply: resp_int(2),
+        },
+        ScriptedAction::Reply {
+            matches_command: "LPOS",
+            reply: resp_nil(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "LPOS",
+            reply: resp_array(&[resp_int(0), resp_int(3)]),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let ranked = call_producer(
+        &server,
+        "LPOS",
+        "",
+        keyed_with_headers(
+            Body::Text("x".to_string()),
+            "k",
+            &[
+                ("CamelRedis.Rank", serde_json::json!(1i64)),
+                ("CamelRedis.Count", serde_json::json!(3i64)),
+            ],
+        ),
+    )
+    .await
+    .expect("LPOS with RANK and COUNT must succeed");
+    assert_eq!(
+        ranked.input.body,
+        Body::Json(serde_json::json!(2)),
+        "a scalar LPOS reply maps to a JSON index"
+    );
+
+    let bare = call_producer(
+        &server,
+        "LPOS",
+        "",
+        keyed_exchange(Body::Text("x".to_string()), "k"),
+    )
+    .await
+    .expect("LPOS with no options must succeed");
+    assert_eq!(
+        bare.input.body,
+        Body::Json(serde_json::Value::Null),
+        "a nil LPOS reply maps to JSON null"
+    );
+
+    let all_matches = call_producer(
+        &server,
+        "LPOS",
+        "",
+        keyed_with_headers(
+            Body::Text("x".to_string()),
+            "k",
+            &[("CamelRedis.Count", serde_json::json!(0i64))],
+        ),
+    )
+    .await
+    .expect("LPOS COUNT 0 must succeed");
+    assert_eq!(
+        all_matches.input.body,
+        Body::Json(serde_json::json!([0, 3])),
+        "an array LPOS reply maps to a JSON index array"
+    );
+
+    assert_eq!(
+        server.args_of("LPOS"),
+        vec![
+            expect_args(&["k", "x", "RANK", "1", "COUNT", "3"]),
+            expect_args(&["k", "x"]),
+            expect_args(&["k", "x", "COUNT", "0"]),
+        ],
+        "LPOS must read the element from the body and map RANK/COUNT after it"
+    );
+}
+
+#[tokio::test]
+async fn smismember_frame_and_bool_reply() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "SMISMEMBER",
+        reply: resp_array(&[resp_int(1), resp_int(0)]),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "SMISMEMBER",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "k",
+            &[("CamelRedis.Members", serde_json::json!(["a", "b"]))],
+        ),
+    )
+    .await
+    .expect("SMISMEMBER must succeed");
+
+    assert_eq!(
+        server.args_of("SMISMEMBER"),
+        vec![expect_args(&["k", "a", "b"])],
+        "SMISMEMBER must send the key and every member"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!([true, false])),
+        "the 1/0 reply array must map to JSON booleans"
+    );
+}
+
+#[tokio::test]
+async fn sintercard_frame_with_and_without_limit() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "SINTERCARD",
+            reply: resp_int(2),
+        },
+        ScriptedAction::Reply {
+            matches_command: "SINTERCARD",
+            reply: resp_int(1),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let limited = call_producer(
+        &server,
+        "SINTERCARD",
+        "",
+        keys_with_headers(
+            serde_json::json!(["a", "b"]),
+            &[("CamelRedis.Limit", serde_json::json!(10i64))],
+        ),
+    )
+    .await
+    .expect("SINTERCARD with LIMIT must succeed");
+    assert_eq!(
+        limited.input.body,
+        Body::Json(serde_json::json!(2)),
+        "the SINTERCARD integer reply is the JSON body"
+    );
+
+    call_producer(
+        &server,
+        "SINTERCARD",
+        "",
+        keys_with_headers(serde_json::json!(["a", "b"]), &[]),
+    )
+    .await
+    .expect("SINTERCARD without LIMIT must succeed");
+
+    assert_eq!(
+        server.args_of("SINTERCARD"),
+        vec![
+            expect_args(&["2", "a", "b", "LIMIT", "10"]),
+            expect_args(&["2", "a", "b"]),
+        ],
+        "SINTERCARD must send numkeys and keys, then LIMIT only when configured"
+    );
+}
+
+#[tokio::test]
+async fn zmpop_frame_and_reply_shape() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "ZMPOP",
+        reply: resp_array(&[
+            resp_bulk("a"),
+            resp_array(&[resp_array(&[resp_bulk("m"), resp_bulk("1.5")])]),
+        ]),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "ZMPOP",
+        "",
+        keys_with_headers(
+            serde_json::json!(["a", "b"]),
+            &[
+                ("CamelRedis.OrderBy", serde_json::json!("MAX")),
+                ("CamelRedis.Count", serde_json::json!(2u64)),
+            ],
+        ),
+    )
+    .await
+    .expect("ZMPOP must succeed");
+
+    assert_eq!(
+        server.args_of("ZMPOP"),
+        vec![expect_args(&["2", "a", "b", "MAX", "COUNT", "2"])],
+        "ZMPOP must send numkeys, keys, the score order, then COUNT n"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(["a", [["m", 1.5]]])),
+        "a UTF-8 ZMPOP reply keeps the JSON [key, [[member, score]]] shape with numeric scores"
+    );
+}
+
+#[tokio::test]
+async fn bzmpop_frame() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "BZMPOP",
+            reply: resp_nil(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "BZMPOP",
+            reply: resp_nil(),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "BZMPOP",
+        "",
+        keys_with_headers(
+            serde_json::json!(["a", "b"]),
+            &[
+                ("CamelRedis.OrderBy", serde_json::json!("MIN")),
+                ("CamelRedis.Timeout", serde_json::json!(0u64)),
+            ],
+        ),
+    )
+    .await
+    .expect("BZMPOP with the default count must succeed");
+
+    call_producer(
+        &server,
+        "BZMPOP",
+        "",
+        keys_with_headers(
+            serde_json::json!(["a", "b"]),
+            &[
+                ("CamelRedis.OrderBy", serde_json::json!("MIN")),
+                ("CamelRedis.Timeout", serde_json::json!(0u64)),
+                ("CamelRedis.Count", serde_json::json!(2u64)),
+            ],
+        ),
+    )
+    .await
+    .expect("BZMPOP with an explicit count must succeed");
+
+    assert_eq!(
+        server.args_of("BZMPOP"),
+        vec![
+            expect_args(&["0", "2", "a", "b", "MIN", "COUNT", "1"]),
+            expect_args(&["0", "2", "a", "b", "MIN", "COUNT", "2"]),
+        ],
+        "BZMPOP must lead with the timeout and always carry an explicit COUNT"
+    );
+}
+
+#[tokio::test]
+async fn zrandmember_frames_and_replies() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "ZRANDMEMBER",
+            reply: resp_bulk("m"),
+        },
+        ScriptedAction::Reply {
+            matches_command: "ZRANDMEMBER",
+            reply: resp_array(&[resp_bulk("m"), resp_bulk("n")]),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let single = call_producer(&server, "ZRANDMEMBER", "", keyed_exchange(Body::Empty, "k"))
+        .await
+        .expect("ZRANDMEMBER without COUNT must succeed");
+    assert_eq!(
+        single.input.body,
+        Body::Text("m".to_string()),
+        "the single-member reply follows the GET reply rule"
+    );
+
+    let counted = call_producer(
+        &server,
+        "ZRANDMEMBER",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "k",
+            &[("CamelRedis.Count", serde_json::json!(-5i64))],
+        ),
+    )
+    .await
+    .expect("ZRANDMEMBER with a negative COUNT must succeed");
+    assert_eq!(
+        counted.input.body,
+        Body::Json(serde_json::json!(["m", "n"])),
+        "the counted reply follows the MGET binary rule"
+    );
+
+    assert_eq!(
+        server.args_of("ZRANDMEMBER"),
+        vec![expect_args(&["k"]), expect_args(&["k", "-5"])],
+        "a negative COUNT must reach the wire verbatim (repeats allowed)"
+    );
+}
+
+#[tokio::test]
+async fn zdiff_zinter_zunion_frames() {
+    let reply = resp_array(&[resp_bulk("m1"), resp_bulk("m2")]);
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "ZDIFF",
+            reply: reply.clone(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "ZINTER",
+            reply: reply.clone(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "ZUNION",
+            reply: reply.clone(),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    for (command, keys) in [
+        ("ZDIFF", serde_json::json!(["a", "b"])),
+        ("ZINTER", serde_json::json!(["a", "b", "c"])),
+        ("ZUNION", serde_json::json!(["a", "b"])),
+    ] {
+        let outcome = call_producer(&server, command, "", keys_with_headers(keys, &[]))
+            .await
+            .unwrap_or_else(|err| panic!("{command} must succeed: {err}"));
+        assert_eq!(
+            outcome.input.body,
+            Body::Json(serde_json::json!(["m1", "m2"])),
+            "{command} must map the member array to a JSON array"
+        );
+    }
+
+    assert_eq!(
+        server.args_of("ZDIFF"),
+        vec![expect_args(&["2", "a", "b"])],
+        "ZDIFF must send numkeys then keys"
+    );
+    assert_eq!(
+        server.args_of("ZINTER"),
+        vec![expect_args(&["3", "a", "b", "c"])],
+        "ZINTER must send numkeys then keys"
+    );
+    assert_eq!(
+        server.args_of("ZUNION"),
+        vec![expect_args(&["2", "a", "b"])],
+        "ZUNION must send numkeys then keys"
+    );
+}
+
+#[tokio::test]
+async fn zrangebylex_frame() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "ZRANGEBYLEX",
+        reply: resp_array(&[resp_bulk("a"), resp_bulk("b")]),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "ZRANGEBYLEX",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "k",
+            &[
+                ("CamelRedis.Min", serde_json::json!("[a")),
+                ("CamelRedis.Max", serde_json::json!("+")),
+            ],
+        ),
+    )
+    .await
+    .expect("ZRANGEBYLEX must succeed");
+
+    assert_eq!(
+        server.args_of("ZRANGEBYLEX"),
+        vec![expect_args(&["k", "[a", "+"])],
+        "ZRANGEBYLEX must send the key and both lexicographic bounds"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(["a", "b"])),
+        "the member array must map to a JSON array per the binary rule"
+    );
+}
+
+#[tokio::test]
+async fn hrandfield_frame() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "HRANDFIELD",
+            reply: resp_bulk("m"),
+        },
+        ScriptedAction::Reply {
+            matches_command: "HRANDFIELD",
+            reply: resp_array(&[resp_bulk("f1"), resp_bulk("f2")]),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let single = call_producer(&server, "HRANDFIELD", "", keyed_exchange(Body::Empty, "k"))
+        .await
+        .expect("HRANDFIELD without COUNT must succeed");
+    assert_eq!(
+        single.input.body,
+        Body::Text("m".to_string()),
+        "the single-field reply follows the GET reply rule"
+    );
+
+    let counted = call_producer(
+        &server,
+        "HRANDFIELD",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "k",
+            &[("CamelRedis.Count", serde_json::json!(3i64))],
+        ),
+    )
+    .await
+    .expect("HRANDFIELD with COUNT must succeed");
+    assert_eq!(
+        counted.input.body,
+        Body::Json(serde_json::json!(["f1", "f2"])),
+        "the counted reply follows the MGET binary rule"
+    );
+
+    assert_eq!(
+        server.args_of("HRANDFIELD"),
+        vec![expect_args(&["k"]), expect_args(&["k", "3"])],
+        "HRANDFIELD must append COUNT only when configured"
+    );
+}
+
+#[tokio::test]
+async fn hincrbyfloat_frame_and_float_reply() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "HINCRBYFLOAT",
+        reply: resp_bulk("2.5"),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "HINCRBYFLOAT",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "k",
+            &[
+                ("CamelRedis.Field", serde_json::json!("balance")),
+                ("CamelRedis.Increment", serde_json::json!(1.5)),
+            ],
+        ),
+    )
+    .await
+    .expect("HINCRBYFLOAT must succeed");
+
+    assert_eq!(
+        server.args_of("HINCRBYFLOAT"),
+        vec![expect_args(&["k", "balance", "1.5"])],
+        "HINCRBYFLOAT must send the shortest round-trip increment form"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!("2.5")),
+        "the bulk-string float reply must stay a JSON string, not a Text body"
+    );
+}
+
+#[tokio::test]
+async fn lmpop_empty_keys_fails_before_send() {
+    let server = StreamFakeServer::start(Vec::new())
+        .await
+        .expect("fake server must bind");
+
+    let err = call_producer(
+        &server,
+        "LMPOP",
+        "",
+        keys_with_headers(
+            serde_json::json!([]),
+            &[("CamelRedis.Where", serde_json::json!("LEFT"))],
+        ),
+    )
+    .await
+    .expect_err("LMPOP with an empty key list must fail before send");
+    let text = err.to_string();
+    assert!(
+        text.contains("LMPOP") && text.contains("must not be empty"),
+        "the error must name LMPOP and the empty key list: {text}"
+    );
+    assert!(
+        server.args_of("LMPOP").is_empty(),
+        "an empty-key LMPOP must not reach the wire: {:?}",
+        server.args_of("LMPOP")
+    );
+    assert!(
+        server.recorded().is_empty(),
+        "no frame may reach the wire for an empty key list: {:?}",
+        server.recorded()
+    );
+}
+
+// ── 3.3: UNLINK / COPY / TOUCH wire proofs ──────────────────────────────────
+
+#[tokio::test]
+async fn unlink_frame_and_count_reply() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "UNLINK",
+        reply: resp_int(1),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(&server, "UNLINK", "", keyed_exchange(Body::Empty, "k"))
+        .await
+        .expect("UNLINK must succeed");
+
+    assert_eq!(
+        server.args_of("UNLINK"),
+        vec![expect_args(&["k"])],
+        "UNLINK must mirror the single-key DEL frame"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(1)),
+        "the UNLINK integer reply must stay a JSON number"
+    );
+}
+
+#[tokio::test]
+async fn copy_frames_with_and_without_options() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "COPY",
+            reply: resp_int(1),
+        },
+        ScriptedAction::Reply {
+            matches_command: "COPY",
+            reply: resp_int(1),
+        },
+        ScriptedAction::Reply {
+            matches_command: "COPY",
+            reply: resp_int(0),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    let full_headers: Vec<(&str, serde_json::Value)> = vec![
+        ("CamelRedis.Destination", serde_json::json!("dst")),
+        ("CamelRedis.Db", serde_json::json!(3u64)),
+        ("CamelRedis.Replace", serde_json::json!(true)),
+    ];
+    let full = call_producer(
+        &server,
+        "COPY",
+        "",
+        keyed_with_headers(Body::Empty, "src", &full_headers),
+    )
+    .await
+    .expect("a COPY with DB and REPLACE must succeed");
+
+    let minimal = call_producer(
+        &server,
+        "COPY",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "src",
+            &[("CamelRedis.Destination", serde_json::json!("dst"))],
+        ),
+    )
+    .await
+    .expect("a COPY without optionals must succeed");
+
+    let refused = call_producer(
+        &server,
+        "COPY",
+        "",
+        keyed_with_headers(
+            Body::Empty,
+            "src",
+            &[("CamelRedis.Destination", serde_json::json!("dst"))],
+        ),
+    )
+    .await
+    .expect("a COPY whose source is missing must succeed with a false result");
+
+    assert_eq!(
+        server.args_of("COPY"),
+        vec![
+            expect_args(&["src", "dst", "DB", "3", "REPLACE"]),
+            expect_args(&["src", "dst"]),
+            expect_args(&["src", "dst"]),
+        ],
+        "COPY must append DB before REPLACE, and send neither when unset"
+    );
+    assert_eq!(
+        full.input.body,
+        Body::Json(serde_json::json!(true)),
+        "a COPY 1 reply must map to a JSON boolean"
+    );
+    assert_eq!(
+        minimal.input.body,
+        Body::Json(serde_json::json!(true)),
+        "a COPY 1 reply must map to a JSON boolean"
+    );
+    assert_eq!(
+        refused.input.body,
+        Body::Json(serde_json::json!(false)),
+        "a COPY 0 reply must map to the false JSON boolean"
+    );
+}
+
+#[tokio::test]
+async fn touch_frame_and_count_reply() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "TOUCH",
+        reply: resp_int(2),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "TOUCH",
+        "",
+        keys_with_headers(serde_json::json!(["a", "b"]), &[]),
+    )
+    .await
+    .expect("TOUCH must succeed");
+
+    assert_eq!(
+        server.args_of("TOUCH"),
+        vec![expect_args(&["a", "b"])],
+        "TOUCH must send each key of the CamelRedis.Keys list in order"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(2)),
+        "the TOUCH integer reply must stay a JSON number"
+    );
+}
+
+#[tokio::test]
+async fn copy_missing_destination_fails_before_send() {
+    let server = StreamFakeServer::start(Vec::new())
+        .await
+        .expect("fake server must bind");
+
+    let err = call_producer(&server, "COPY", "", keyed_exchange(Body::Empty, "src"))
+        .await
+        .expect_err("COPY without a destination must fail before send");
+    let text = err.to_string();
+    assert!(
+        text.contains("CamelRedis.Destination"),
+        "the error must name CamelRedis.Destination: {text}"
+    );
+    assert!(
+        server.args_of("COPY").is_empty(),
+        "a destination-less COPY must not reach the wire: {:?}",
+        server.args_of("COPY")
+    );
+}

@@ -127,11 +127,33 @@ Redis reads a zero expiry argument as an immediate key deletion. `SETEX` rejects
 
 `CamelRedis.Timestamp` must fit in a signed 64-bit integer. A larger value would wrap to a negative number, which Redis reads as an already-past timestamp, so the component rejects it. A positive past timestamp keeps the Redis deletion semantics. Use a future timestamp for a real expiry. Use `DEL` to delete a key on purpose.
 
+### SET and GETEX options
+
+`SET` takes a write condition, an expiry, and a return-old-value flag from headers. `GETEX` takes an expiry and a persist flag. The Producer translates each header into the Redis argument of the same meaning.
+
+| Header | Values | Used by | Default | Rule |
+| --- | --- | --- | --- | --- |
+| `CamelRedis.SetCondition` | `NX` or `XX` (case-insensitive) | `SET` | none | one header holds one condition, so `NX` + `XX` is not expressible; any other value fails before send |
+| `CamelRedis.KeepTtl` | boolean | `SET` | `false` | conflict with `CamelRedis.Timeout` or `CamelRedis.Timestamp` fails before send |
+| `CamelRedis.ReturnOldValue` | boolean | `SET` | `false` | adds `GET`; the reply body is the old value |
+| `CamelRedis.ExpireUnit` | `SECONDS` or `MILLISECONDS` (case-insensitive) | `SET`, `GETEX` | `SECONDS` | requires `CamelRedis.Timeout` or `CamelRedis.Timestamp`; a unit header alone fails before send |
+| `CamelRedis.Persist` | boolean | `GETEX` | `false` | conflict with `CamelRedis.Timeout` or `CamelRedis.Timestamp` fails before send |
+
+`CamelRedis.Timeout` and `CamelRedis.Timestamp` are mutually exclusive. `Timeout` selects a relative expiry (`EX` or `PX`). `Timestamp` selects an absolute expiry (`EXAT` or `PXAT`). `CamelRedis.ExpireUnit` selects the unit for both and defaults to `SECONDS`, which matches the `SETEX` and `EXPIREAT` meaning of a bare value.
+
+`CamelRedis.KeepTtl` and any expiry header are mutually exclusive. `KEEPTTL` keeps the current expiry, and an expiry argument would replace it. `CamelRedis.Persist` is the `GETEX` opposite: it removes the expiry, so it cannot combine with an expiry header.
+
+`CamelRedis.ReturnOldValue` adds the `GET` argument. The reply body then carries the old value. A missing key or an unmet `NX`/`XX` condition yields a null body.
+
+A present but invalid boolean or enum value fails before send with a named error. The error names the header and the received value.
+
+`SET` is not retried after a transport error. The retry classifier works per command and cannot see the option headers. A retry of `SET ... GET` reports the post-write value as the old value. A retry of `SET ... NX` reports a failed condition after an unconfirmed success. The worst-case option form governs, so a plain `SET` loses the retry too. There is no per-route classifier override, because the Producer always consults the classifier. A route that needs retry for a plain `SET` must use route-level redelivery. Redelivery re-executes the whole exchange, so it can repeat other side effects.
+
 ### Blocking pops
 
-`BLPOP` and `BRPOP` accept an optional `CamelRedis.Timeout` in seconds. An absent value or `0` blocks indefinitely, which is the Redis command meaning. A non-numeric value fails with a named error.
+`BLPOP`, `BRPOP`, `BLMPOP`, `BZMPOP`, and `BLMOVE` are the blocking endpoints. Each one accepts an optional `CamelRedis.Timeout` in seconds. An absent value or `0` blocks indefinitely, which is the Redis command meaning. A non-numeric value fails with a named error. Their connections carry no driver response deadline, so a blocked call waits until Redis replies. See [Blocking pops and connection timeouts](#blocking-pops-and-connection-timeouts).
 
-On the Consumer, the URI `timeout` parameter sets the block duration and defaults to `1` second.
+On the Consumer, the URI `timeout` parameter sets the block duration and defaults to `1` second. Queue mode accepts only `BLPOP` and `BRPOP`.
 
 ### Sorted-set score bounds
 
@@ -157,22 +179,127 @@ For a computed value, use a Rhai expression. `parse_int` converts the string to 
 
 ## Commands
 
-The component exposes 80+ commands across ten groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
+The component exposes 120+ commands across ten groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
 
 | Group | Commands |
 | --- | --- |
-| String | `SET`, `GET`, `GETSET`, `SETNX`, `SETEX`, `MGET`, `MSET`, `INCR`, `INCRBY`, `DECR`, `DECRBY`, `APPEND`, `STRLEN` |
-| Key | `EXISTS`, `DEL`, `EXPIRE`, `EXPIREAT`, `PEXPIRE`, `PEXPIREAT`, `TTL`, `KEYS`, `RENAME`, `RENAMENX`, `TYPE`, `PERSIST`, `MOVE`, `SORT` |
-| List | `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP`, `RPOP`, `BLPOP`, `BRPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LINSERT`, `LSET`, `LREM`, `LTRIM`, `RPOPLPUSH` |
-| Hash | `HSET`, `HGET`, `HSETNX`, `HMSET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY` |
-| Set | `SADD`, `SREM`, `SMEMBERS`, `SCARD`, `SISMEMBER`, `SPOP`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SRANDMEMBER` |
-| Sorted set | `ZADD`, `ZREM`, `ZRANGE`, `ZREVRANGE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`, `ZINCRBY`, `ZCOUNT`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZUNIONSTORE`, `ZINTERSTORE` |
+| String | `SET`, `GET`, `GETDEL`, `GETEX`, `GETSET`, `SETNX`, `SETEX`, `SETRANGE`, `GETRANGE`, `MGET`, `MSET`, `INCR`, `INCRBY`, `DECR`, `DECRBY`, `APPEND`, `STRLEN` |
+| Key | `EXISTS`, `DEL`, `UNLINK`, `EXPIRE`, `EXPIREAT`, `PEXPIRE`, `PEXPIREAT`, `TTL`, `KEYS`, `RENAME`, `RENAMENX`, `COPY`, `TYPE`, `PERSIST`, `MOVE`, `TOUCH`, `SORT` |
+| List | `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP`, `RPOP`, `BLPOP`, `BRPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LINSERT`, `LSET`, `LREM`, `LTRIM`, `RPOPLPUSH`, `LMPOP`, `BLMPOP`, `LMOVE`, `BLMOVE`, `LPOS` |
+| Hash | `HSET`, `HGET`, `HSETNX`, `HMSET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY`, `HRANDFIELD`, `HINCRBYFLOAT` |
+| Set | `SADD`, `SREM`, `SMEMBERS`, `SCARD`, `SISMEMBER`, `SPOP`, `SMOVE`, `SINTER`, `SUNION`, `SDIFF`, `SINTERSTORE`, `SUNIONSTORE`, `SDIFFSTORE`, `SRANDMEMBER`, `SMISMEMBER`, `SINTERCARD` |
+| Sorted set | `ZADD`, `ZREM`, `ZRANGE`, `ZREVRANGE`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZCARD`, `ZINCRBY`, `ZCOUNT`, `ZRANGEBYSCORE`, `ZREVRANGEBYSCORE`, `ZREMRANGEBYRANK`, `ZREMRANGEBYSCORE`, `ZUNIONSTORE`, `ZINTERSTORE`, `ZMPOP`, `BZMPOP`, `ZRANDMEMBER`, `ZDIFF`, `ZINTER`, `ZUNION`, `ZRANGEBYLEX` |
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE` |
 | Stream | `XREADGROUP`, `XADD`, `XLEN` |
 | Geospatial | `GEOADD`, `GEOPOS`, `GEODIST`, `GEOSEARCH`, `GEOHASH` |
 | Other | `PING`, `ECHO` |
 
 Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLEN` are Producer commands. `XREADGROUP` is Consumer-only. The component does not expose `ACKED` or `IDMP`.
+
+### String command inputs
+
+These four string commands read their addressing operands from headers. `SETRANGE` takes its payload from the Exchange body, under the [value payload and reply rule](#value-payload-and-reply-rule).
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `GETDEL` | `CamelRedis.Key` | — | old value, binary-safe; null for a missing key |
+| `GETEX` | `CamelRedis.Key` | `CamelRedis.Timeout`, `CamelRedis.Timestamp`, `CamelRedis.ExpireUnit`, `CamelRedis.Persist` | value, binary-safe; null for a missing key |
+| `SETRANGE` | `CamelRedis.Key`, `CamelRedis.Offset` | — | new string length |
+| `GETRANGE` | `CamelRedis.Key` | `CamelRedis.Start`, `CamelRedis.End` | requested slice, binary-safe; empty when the range selects no bytes |
+
+`GETDEL` returns the value and then removes the key. `GETEX` applies its expiry options and leaves the key otherwise unchanged. Its options follow [SET and GETEX options](#set-and-getex-options).
+
+`CamelRedis.Offset` is a required non-negative byte offset. Offset `0` overwrites the string from the start, so the header has no default. A write past the end of the string pads the gap with zero bytes.
+
+`CamelRedis.Start` defaults to `0` and `CamelRedis.End` defaults to `-1`. A negative bound counts from the end of the string. A range with no overlap with the string returns an empty body.
+
+`GETDEL` and `GETEX` are not retried after a transport error. `GETDEL` consumes the key, so a retry reports a null body. A retry of `GETEX` reports a null body when the value lapses between attempts. The first reply is not reproducible, so the component does not repeat the command. `SETRANGE` and `GETRANGE` are retried.
+
+### Key command inputs
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `UNLINK` | `CamelRedis.Key` | — | integer count of unlinked keys |
+| `COPY` | `CamelRedis.Key`, `CamelRedis.Destination` | `CamelRedis.Db`, `CamelRedis.Replace` | JSON boolean; `true` when the key is copied, `false` when the destination exists and `Replace` is unset |
+| `TOUCH` | `CamelRedis.Keys` | — | integer count of keys that exist |
+
+`UNLINK` removes one key, like `DEL`. `DEL` also accepts `CamelRedis.Keys`, but `UNLINK` reads only `CamelRedis.Key`.
+
+`COPY` copies the key named by `CamelRedis.Key` to `CamelRedis.Destination`, which is required. `CamelRedis.Db` is optional: an absent value copies within the current database, and the component sends no `DB` argument. A `DB 0` default would retarget the copy. `CamelRedis.Replace` is a boolean that defaults to `false`. A present but malformed `Replace` value fails before send with an error that names the header.
+
+`CamelRedis.Keys` is a non-empty JSON array of strings. An empty array, a non-array value, or a malformed entry fails before send, with an error that names the header and the entry index.
+
+`COPY` is not retried after a transport error. Without `REPLACE`, a retry reports `false` after an unconfirmed success. With `REPLACE`, the retry re-reads the source, and the source can change between attempts. `UNLINK` and `TOUCH` are retried. A retry of `UNLINK` can report a count of `0` when the first attempt already removed the key. The state converges, so the component accepts the smaller count.
+
+### List command inputs
+
+`LMPOP` and `BLMPOP` pop from the first non-empty key. `LMOVE` and `BLMOVE` move one element between two lists. `LPOS` finds the index of an element in a list.
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `LMPOP` | `CamelRedis.Keys`, `CamelRedis.Where` | `CamelRedis.Count` | `[key, [elements]]`; null when every key is empty |
+| `BLMPOP` | `CamelRedis.Keys`, `CamelRedis.Where` | `CamelRedis.Count`, `CamelRedis.Timeout` | `[key, [elements]]`; null on a timeout |
+| `LMOVE` | `CamelRedis.Key`, `CamelRedis.Destination`, `CamelRedis.WhereFrom`, `CamelRedis.WhereTo` | — | moved element, binary-safe; null when the source key is empty |
+| `BLMOVE` | `CamelRedis.Key`, `CamelRedis.Destination`, `CamelRedis.WhereFrom`, `CamelRedis.WhereTo` | `CamelRedis.Timeout` | moved element, binary-safe; null on a timeout |
+| `LPOS` | `CamelRedis.Key`, and the element in the body | `CamelRedis.Rank`, `CamelRedis.Count` | index, null when the element is absent, or an array of indexes when `Count` is present |
+
+`CamelRedis.Keys` is a non-empty JSON array of strings. A malformed entry fails before send, with an error that names the header and the entry index.
+
+`CamelRedis.Where` is required for `LMPOP` and `BLMPOP`, and it accepts `LEFT` or `RIGHT` in any case. The component refuses a missing value, because a default would hide a route typo. `CamelRedis.Count` must be positive on both commands. Without a count, the command pops one element.
+
+`CamelRedis.WhereFrom` and `CamelRedis.WhereTo` are required for `LMOVE` and `BLMOVE`. Each one accepts `LEFT` or `RIGHT` in any case. `CamelRedis.Destination` names the target list.
+
+`LPOS` reads the element from the Exchange body, under the [value payload and reply rule](#value-payload-and-reply-rule). `CamelRedis.Rank` defaults to `1`, and the component rejects `0`. A negative rank searches from the tail. `CamelRedis.Count` must be non-negative, and `0` returns every match.
+
+`LMPOP`, `BLMPOP`, `LMOVE`, and `BLMOVE` are not retried after a transport error. A retry reports an empty pop or a different element, and it silently loses the element the first attempt moved. `LPOS` is a read and is retried.
+
+When a key or an element is not valid UTF-8, the body is `Body::Bytes` with the RESP encoding of the reply, per the [`MGET` rule](#value-payload-and-reply-rule).
+
+### Hash command inputs
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `HRANDFIELD` | `CamelRedis.Key` | `CamelRedis.Count` | field name as text; null for a missing key. With `Count`: an array of field names, empty for a missing key |
+| `HINCRBYFLOAT` | `CamelRedis.Key`, `CamelRedis.Field`, `CamelRedis.Increment` | — | new field value, as a decimal string |
+
+`HRANDFIELD` returns fields at random. A negative `CamelRedis.Count` is valid Redis semantics: the reply may repeat a field.
+
+`HINCRBYFLOAT` requires `CamelRedis.Increment`. It has no default, unlike `HINCRBY`, because a silent `1.0` would change the field value. A non-numeric increment fails before send.
+
+`HINCRBYFLOAT` is not retried after a transport error. The reply holds cumulative state, so a retry reports a different value. `HRANDFIELD` is retried, and a retry can return a different field.
+
+### Set command inputs
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `SMISMEMBER` | `CamelRedis.Key`, `CamelRedis.Members` | — | JSON array of booleans, parallel to the requested members |
+| `SINTERCARD` | `CamelRedis.Keys` | `CamelRedis.Limit` | integer cardinality of the intersection |
+
+`CamelRedis.Members` is a non-empty JSON array of member strings. `SISMEMBER` reads a single member from the body instead.
+
+`CamelRedis.Keys` is a non-empty JSON array of strings. `CamelRedis.Limit` must be non-negative, and `0` means no limit.
+
+### Sorted-set command inputs
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `ZMPOP` | `CamelRedis.Keys`, `CamelRedis.OrderBy` | `CamelRedis.Count` | `[key, [[member, score], ...]]`; null when every key is empty |
+| `BZMPOP` | `CamelRedis.Keys`, `CamelRedis.OrderBy` | `CamelRedis.Count` (default `1`), `CamelRedis.Timeout` | `[key, [[member, score], ...]]`; null on a timeout |
+| `ZRANDMEMBER` | `CamelRedis.Key` | `CamelRedis.Count` | member name as text; null for a missing key. With `Count`: an array of members, empty for a missing key |
+| `ZDIFF` | `CamelRedis.Keys` | — | array of member names |
+| `ZINTER` | `CamelRedis.Keys` | — | array of member names |
+| `ZUNION` | `CamelRedis.Keys` | — | array of member names |
+| `ZRANGEBYLEX` | `CamelRedis.Key`, `CamelRedis.Min`, `CamelRedis.Max` | — | array of member names |
+
+`CamelRedis.OrderBy` is required for `ZMPOP` and `BZMPOP`, and it accepts `MIN` or `MAX` in any case. A sorted-set pop orders by score, not by list end, so the component refuses a missing value instead of picking an order.
+
+`CamelRedis.Count` must be positive on `ZMPOP` and `BZMPOP`. `BZMPOP` sends `COUNT 1` when the header is absent. `ZMPOP` omits the count, and Redis also defaults it to `1`. On `ZRANDMEMBER`, a negative count is valid and may repeat a member.
+
+`ZRANGEBYLEX` requires both bounds. Here `CamelRedis.Min` and `CamelRedis.Max` are lexicographic strings, not scores. They use the Redis lexicographic syntax: `[a` includes `a`, `(a` excludes it, `-` is the minimum, and `+` is the maximum.
+
+`ZDIFF`, `ZINTER`, and `ZUNION` ship without `WEIGHTS` and `AGGREGATE`. `ZUNIONSTORE` and `ZINTERSTORE` also lack both options, and parity keeps the surface consistent (deferred per design.md D4). The bd follow-up tracks the two options.
+
+When a key or a member is not valid UTF-8, the body is `Body::Bytes` with the RESP encoding of the reply, per the [`MGET` rule](#value-payload-and-reply-rule).
 
 ### Geospatial
 
@@ -219,7 +346,7 @@ payload from the Exchange body. The Producer holds a single multiplexed
 connection per Endpoint. The connection opens lazily on the first call and
 stays open for the route lifetime.
 
-The `command` parameter picks one of the 80+ commands listed above. The
+The `command` parameter picks one of the 120+ commands listed above. The
 Exchange body, headers, and the URI parameters supply the command arguments.
 Different commands read different headers. For example, `HSET` reads
 `CamelRedis.Key` and `CamelRedis.Field`, and takes its value from the Exchange
@@ -251,10 +378,11 @@ The body codec is shared by every payload command.
 scalar rule, and a null entry fails before send. Binary map values are a
 documented limit, because the map body is JSON or UTF-8 text.
 
-The scalar payload commands are `SET`, `SETEX`, `SETNX`, `GETSET`, `APPEND`,
+The scalar payload commands are `SET`, `SETEX`, `SETNX`, `SETRANGE`, `GETSET`, `APPEND`,
 `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LINSERT`, `LSET`, `LREM`, `SADD`,
 `SREM`, `SISMEMBER`, `SMOVE`, the `ZADD` member, `ZREM`, `ZRANK`, `ZREVRANK`,
-`ZSCORE`, `ZINCRBY`, `HSET`, `HSETNX`, the `GEOADD` member, and `PUBLISH`.
+`ZSCORE`, `ZINCRBY`, `HSET`, `HSETNX`, the `GEOADD` member, the `LPOS`
+element, and `PUBLISH`.
 
 Three payload headers are removed: `CamelRedis.Value`, `CamelRedis.Values`,
 and `CamelRedis.Member` as the `GEOADD` payload. A route that still sets one
@@ -321,11 +449,11 @@ XADD is non-idempotent and the component never retries it. At-least-once deliver
 
 `redis://host:port?command=BLPOP&key=jobs&timeout=5` blocks on a list key and submits one Exchange per popped item. The `CamelRedis.Key` header carries the list key. The `timeout` parameter is the block duration in seconds, and `0` blocks indefinitely. Use `BLPOP` for left pop and `BRPOP` for right pop. A Producer `BLPOP`/`BRPOP` reads the timeout from the `CamelRedis.Timeout` header instead. See [Blocking pops](#blocking-pops).
 
-The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use Pub/Sub mode. `BLPOP` and `BRPOP` use queue mode. `XREADGROUP` uses Streams mode. A command that fits none of these returns an error at consumer creation. The component does not silently fall back to BLPOP (REDIS-003).
+The Consumer's mode comes from the URI command. `SUBSCRIBE` and `PSUBSCRIBE` use Pub/Sub mode. `BLPOP` and `BRPOP` use queue mode. `XREADGROUP` uses Streams mode. A command that fits none of these returns an error at consumer creation. `BLMPOP`, `BZMPOP`, and `BLMOVE` are Producer commands, not consumer modes. The component does not silently fall back to BLPOP (REDIS-003).
 
 ### Blocking pops and connection timeouts
 
-Queue-mode consumers pop on a connection built with `AsyncConnectionConfig::set_response_timeout(None)` and `set_connection_timeout(None)`. The driver sets no response deadline, so the pop `timeout`, the transient retry budget, and route cancellation are the only bounds on a blocking pop. `connection_timeout_secs` remains the TCP connect bound. Producer endpoints whose command is `BLPOP` or `BRPOP` build the same deadline-free connections and ignore the `with_response_timeout` seam. Blocking pops are never multiplexed over a short driver timeout, and the component has no polling fallback (REDIS-003).
+Queue-mode consumers pop on a connection built with `AsyncConnectionConfig::set_response_timeout(None)` and `set_connection_timeout(None)`. The driver sets no response deadline, so the pop `timeout`, the transient retry budget, and route cancellation are the only bounds on a blocking pop. `connection_timeout_secs` remains the TCP connect bound. Producer endpoints whose command is `BLPOP`, `BRPOP`, `BLMPOP`, `BZMPOP`, or `BLMOVE` build the same deadline-free connections and ignore the `with_response_timeout` seam. Blocking pops are never multiplexed over a short driver timeout, and the component has no polling fallback (REDIS-003).
 
 ### Streams consumer groups
 
