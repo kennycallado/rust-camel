@@ -1,0 +1,35 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "hash": "sha256:cdb30db0f7c53dc597db32f2e8397d8050cd3cd68fc37de4ed7a692b6e44ef62",
+  "expert": "experts/e_gpt",
+  "date": "2026-11-14",
+  "session": "ses_e2761c273ffeg1hGMqulazKwty",
+  "spec_bless": {
+    "verdict": "APPROVED",
+    "hash": "sha256:47338a8dfd7ad30869f159e73f78a3148883ecf5d6c4a5743b3a7554283c6cfb",
+    "session": "ses_e27754aa3ffe8lf9oHwaLrQSW7"
+  },
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:8f522d938fd82619488d57a4c6910cd81b4813bfdeff8f2e74bdd7b6a312b984",
+      "session": "ses_e277a0856ffe4Cqz6nI3LJe0OY",
+      "findings": 3
+    },
+    {
+      "kind": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:e4d171f95a5e54f6cc5262f6ed743851016136885f851254a78efe0ed4e9efc3",
+      "session": "ses_e2766ada7ffeU27XOB6Czza4Ew",
+      "findings": 4
+    },
+    {
+      "kind": "reviewer_loop",
+      "verdict": "FINDINGS->fixed",
+      "session": "ses_e27706a40ffebLH10pmgF9ihFi",
+      "findings": "2 critical, 2 important, 5 minor — all applied"
+    }
+  ]
+}

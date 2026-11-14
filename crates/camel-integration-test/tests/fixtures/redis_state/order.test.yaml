@@ -3,8 +3,6 @@ scenario:
 - send:
     to: direct:order
     body: order-value
-    headers:
-      CamelRedis.Value: order-value
 - validate:
     target:
       redis:

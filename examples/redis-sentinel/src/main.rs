@@ -50,10 +50,7 @@ async fn main() -> Result<(), CamelError> {
     let producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
         .route_id("redis-sentinel-producer")
         .set_header("CamelRedis.Key", Value::String("greeting".into()))
-        .set_header(
-            "CamelRedis.Value",
-            Value::String("hello via redis sentinel!".into()),
-        )
+        .set_body("hello via redis sentinel!")
         .to(format!("{sentinel_uri}?command=SET"))
         .to("log:info?showHeaders=true")
         .build()?;

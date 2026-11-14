@@ -1,7 +1,12 @@
 # redis-values Specification
 
 ## Purpose
-TBD - created by archiving change redisvalue. Update Purpose after archive.
+
+The Redis producer binds every value payload from the exchange body only. This
+capability defines that contract: the shared body codec, the scalar, map,
+stream-entry, and addressing-operand payload classes, and the tombstone error
+for each removed payload header.
+
 ## Requirements
 ### Requirement: Value source precedence
 
@@ -68,6 +73,3 @@ The Redis producer SHALL map a reply that replaces the body with a value payload
 - **GIVEN** a scripted fake RESP server answering MGET with, in order, a UTF-8 bulk string, a nil, and a non-UTF-8 bulk string
 - **WHEN** the exchange is processed
 - **THEN** the reply body is `Body::Bytes` whose RESP encoding decodes to exactly three elements in server order with byte-exact contents and the nil in position two
-
-GEOADD's member fallback MODIFIES the existing `redis-geo` requirement `GEOADD stores a member with coordinates`; that delta lives in `specs/redis-geo/spec.md` (targeting the capability it modifies).
-

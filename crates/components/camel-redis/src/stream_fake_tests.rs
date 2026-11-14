@@ -2369,3 +2369,58 @@ async fn xadd_text_roundtrip_byte_for_byte() {
         "cancelled stream session must end Ok: {joined:?}"
     );
 }
+
+#[tokio::test]
+async fn xadd_does_not_split_a_json_object_into_fields() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "XADD",
+            reply: resp_bulk("1-1"),
+        },
+        ScriptedAction::Reply {
+            matches_command: "XADD",
+            reply: resp_bulk("2-2"),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Json(serde_json::json!({"sensor": "s1", "temp": 21}))),
+    )
+    .await
+    .expect("XADD with a JSON object body must succeed");
+
+    let frames = server.args_of("XADD");
+    assert_eq!(frames.len(), 1, "exactly one XADD must reach the wire");
+    assert_eq!(
+        args_as_strings(&frames[0]),
+        vec!["s1", "*", "body", "{\"sensor\":\"s1\",\"temp\":21}"],
+        "a JSON object body must be one `body` field holding its compact text, \
+         never one field per object key"
+    );
+
+    call_producer(
+        &server,
+        "XADD",
+        "&key=s1",
+        body_exchange(Body::Json(serde_json::json!("abc"))),
+    )
+    .await
+    .expect("XADD with a JSON string body must succeed");
+
+    let frames = server.args_of("XADD");
+    assert_eq!(
+        frames.len(),
+        2,
+        "exactly two XADD frames must reach the wire"
+    );
+    assert_eq!(
+        args_as_strings(&frames[1]),
+        vec!["s1", "*", "body", "abc"],
+        "a JSON string body must contribute its raw characters, without quote bytes"
+    );
+}

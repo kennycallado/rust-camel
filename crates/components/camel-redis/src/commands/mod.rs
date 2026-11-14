@@ -9,7 +9,6 @@ pub mod stream;
 pub mod string;
 pub mod zset;
 
-use crate::HEADER_VALUE;
 use camel_component_api::Body;
 use camel_component_api::{CamelError, Exchange};
 
@@ -166,6 +165,12 @@ pub fn get_str_vec_header(exchange: &Exchange, key: &str) -> Option<Vec<String>>
     })
 }
 
+/// Reads a raw JSON header value by name.
+///
+/// Generic message infrastructure, not a payload path: the value-payload
+/// contract is body-only (ADR-0098), so nothing in the dispatch reads
+/// `CamelRedis.Value` / `CamelRedis.Values` / the GEOADD `CamelRedis.Member`
+/// through this helper — those headers are tombstoned before send.
 pub fn get_value_header(exchange: &Exchange, key: &str) -> Option<serde_json::Value> {
     exchange.input.header(key).cloned()
 }
@@ -177,19 +182,6 @@ pub fn require_str_header<'a>(exchange: &'a Exchange, key: &str) -> Result<&'a s
 
 pub fn require_key(exchange: &Exchange) -> Result<String, CamelError> {
     require_str_header(exchange, "CamelRedis.Key").map(|s| s.to_string())
-}
-
-pub fn require_value(exchange: &Exchange) -> Result<serde_json::Value, CamelError> {
-    get_value_header(exchange, HEADER_VALUE).ok_or_else(|| {
-        CamelError::ProcessorError(format!("Missing required header: {HEADER_VALUE}"))
-    })
-}
-
-pub(crate) fn value_to_redis_arg(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
 }
 
 // ── Value payload helpers ────────────────────────────────────────────────────
@@ -215,15 +207,110 @@ fn body_variant_name(body: &Body) -> String {
     rendered[..end].to_string()
 }
 
+/// Reads a JSON object map from an exchange body for map payload commands
+/// (`HMSET`, `MSET`).
+///
+/// A `Body::Json` object is used as-is; `Text` and UTF-8 `Bytes` bodies are
+/// parsed as a JSON object. Every other body form is rejected before any
+/// command reaches Redis, with an error naming `verb` and the rejected
+/// variant. Binary map values are a documented limit: a map body is JSON or
+/// UTF-8 text, so binary payloads cannot travel in a map entry.
+pub(crate) fn map_body_map(
+    body: &Body,
+    verb: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, CamelError> {
+    match body {
+        Body::Json(serde_json::Value::Object(map)) => Ok(map.clone()),
+        Body::Text(text) => parse_map_body(text, verb),
+        Body::Bytes(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => parse_map_body(text, verb),
+            Err(err) => Err(CamelError::ProcessorError(format!(
+                "{verb} value: the Bytes body is not valid UTF-8: {err}"
+            ))),
+        },
+        Body::Json(_) => Err(unencodable_map_body(verb, "Body::Json")),
+        Body::Xml(_) => Err(unencodable_map_body(verb, "Body::Xml")),
+        Body::Empty => Err(unencodable_map_body(verb, "Body::Empty")),
+        Body::Stream(_) => Err(unencodable_map_body(verb, "Body::Stream")),
+        other => Err(unencodable_map_body(verb, &body_variant_name(other))),
+    }
+}
+
+/// Parses a `Text`/`Bytes` body into the map payload.
+fn parse_map_body(
+    text: &str,
+    verb: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, CamelError> {
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).map_err(|e| {
+        CamelError::ProcessorError(format!(
+            "{verb} value: the exchange body is not a JSON object: {e}"
+        ))
+    })
+}
+
+/// Named error for a body form that cannot carry a map payload.
+fn unencodable_map_body(verb: &str, variant: &str) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "{verb} value: the exchange body is {variant}; provide a JSON object body"
+    ))
+}
+
+/// Encodes a JSON object map into the key/value pairs a map payload command
+/// (`HMSET`, `MSET`) sends to Redis.
+///
+/// This is the single home of the scalar rule for map entries: a JSON string
+/// contributes its raw characters, any other JSON value its compact
+/// serialization, and a `null` entry is a named `verb` pre-send error naming
+/// the rejected entry, so a null never reaches Redis as a payload.
+pub(crate) fn encode_map_entries(
+    map: &serde_json::Map<String, serde_json::Value>,
+    verb: &str,
+) -> Result<Vec<(String, Vec<u8>)>, CamelError> {
+    map.iter()
+        .map(|(key, value)| {
+            let encoded = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => {
+                    return Err(CamelError::ProcessorError(format!(
+                        "{verb} value: the JSON object entry {key:?} is null; a JSON null is not a valid payload"
+                    )));
+                }
+                other => serde_json::to_string(other).map_err(|e| {
+                    CamelError::ProcessorError(format!(
+                        "{verb} value: the JSON object entry {key:?} could not be serialized: {e}"
+                    ))
+                })?,
+            };
+            Ok((key.clone(), encoded.into_bytes()))
+        })
+        .collect()
+}
+
+/// Named error for a `Body::Json(null)` payload.
+///
+/// A nil `GET`/`MGET` reply becomes `Body::Json(null)`; without this rejection
+/// a route that forwards such a body to a write would store the literal bytes
+/// `null` where the caller meant "no value". JSON null carries no payload, so
+/// it is refused before the command reaches Redis.
+fn json_null_body(verb: &str) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "{verb} value: the exchange body is Body::Json(null); a JSON null body is not a valid payload"
+    ))
+}
+
 /// Encodes the exchange body into the raw bytes sent to Redis as a value.
 ///
-/// Codec table: `Text`/`Xml` contribute their UTF-8 bytes, `Json` its compact
-/// serialization, and `Bytes` pass through verbatim (binary-safe). `Empty`,
-/// `Stream`, and any future variant are rejected before any command reaches
-/// Redis, with an error naming `verb` and the rejected variant.
+/// Codec table: `Text`/`Xml` contribute their UTF-8 bytes; `Json` holding a
+/// string contributes the string's raw characters (no JSON quoting), and any
+/// other `Json` value its compact serialization; `Bytes` pass through verbatim
+/// (binary-safe). `Empty`, `Stream`, `Json(null)`, and any future variant are
+/// rejected before any command reaches Redis, with an error naming `verb` and
+/// the rejected variant.
 pub(crate) fn encode_body_value(body: &Body, verb: &str) -> Result<Vec<u8>, CamelError> {
     match body {
         Body::Text(s) => Ok(s.as_bytes().to_vec()),
+        Body::Json(serde_json::Value::String(s)) => Ok(s.as_bytes().to_vec()),
+        Body::Json(serde_json::Value::Null) => Err(json_null_body(verb)),
         Body::Json(v) => serde_json::to_string(v)
             .map(String::into_bytes)
             .map_err(|e| {
@@ -239,27 +326,26 @@ pub(crate) fn encode_body_value(body: &Body, verb: &str) -> Result<Vec<u8>, Came
     }
 }
 
-/// Resolves the value payload bytes for `verb` from the exchange.
+/// Resolves the value payload bytes for `verb` from the exchange body alone.
 ///
-/// Precedence: the `value_header` wins when present and is encoded exactly as
-/// before ([`value_to_redis_arg`] byte-identically: JSON strings stay raw
-/// characters, everything else compact JSON); otherwise the exchange body is
-/// used through [`encode_body_value`]. The body-path error appends a hint to
-/// set the header, which body-only callers (for example XADD) never see.
-pub(crate) fn resolve_value_bytes(
+/// `tombstones` names the headers removed in 0.69 that are still illegal for
+/// this command. A present tombstone header fails with a named error before
+/// the body is encoded, so a route that still sets the header never writes a
+/// silently different payload. The body is the only payload source, so the
+/// error never suggests a header as a fallback.
+pub(crate) fn body_value_bytes(
     exchange: &Exchange,
     verb: &str,
-    value_header: &str,
+    tombstones: &[&str],
 ) -> Result<Vec<u8>, CamelError> {
-    match get_value_header(exchange, value_header) {
-        Some(value) => Ok(value_to_redis_arg(&value).into_bytes()),
-        None => encode_body_value(&exchange.input.body, verb).map_err(|e| match e {
-            CamelError::ProcessorError(msg) => {
-                CamelError::ProcessorError(format!("{msg}; or set {value_header}"))
-            }
-            other => other,
-        }),
+    for name in tombstones {
+        if exchange.input.header(name).is_some() {
+            return Err(CamelError::ProcessorError(format!(
+                "{name} was removed in 0.69; put the value in the body"
+            )));
+        }
     }
+    encode_body_value(&exchange.input.body, verb)
 }
 
 /// Maps a Redis reply payload to an exchange body.
@@ -524,20 +610,6 @@ mod tests {
     fn test_require_str_header_missing_returns_err() {
         let ex = Exchange::new(Message::default());
         assert!(require_str_header(&ex, "CamelRedis.Key").is_err());
-    }
-
-    #[test]
-    fn test_value_to_redis_arg_preserves_string_content() {
-        assert_eq!(value_to_redis_arg(&serde_json::json!("hello")), "hello");
-    }
-
-    #[test]
-    fn test_value_to_redis_arg_serializes_non_strings() {
-        assert_eq!(
-            value_to_redis_arg(&serde_json::json!({"a": 1})),
-            r#"{"a":1}"#
-        );
-        assert_eq!(value_to_redis_arg(&serde_json::json!(42)), "42");
     }
 
     // ── Command wrap source preservation (rediserr task 2.1) ────────────────
@@ -820,7 +892,6 @@ mod tests {
             Some(serde_json::json!("0")),
         ] {
             let mut headers = key("k");
-            headers.push((crate::HEADER_VALUE, serde_json::json!("v")));
             if let Some(value) = &timeout {
                 headers.push(("CamelRedis.Timeout", value.clone()));
             }
@@ -841,7 +912,11 @@ mod tests {
                 .expect("stub completes the driver handshake");
 
             for case in cases {
-                let mut msg = Message::default();
+                let mut msg = if matches!(&case.cmd, RedisCommand::Setex) {
+                    Message::new(Body::Text("v".into()))
+                } else {
+                    Message::default()
+                };
                 for (k, v) in case.headers {
                     msg.set_header(k, v);
                 }
@@ -934,6 +1009,75 @@ mod value_helper_tests {
         assert_eq!(encoded, b"<a/>".to_vec());
     }
 
+    // ── Body-only codec and tombstone resolver (redisbodyonly 1.1) ─────────
+
+    #[test]
+    fn codec_json_string_yields_raw_characters() {
+        let ex = ex_with(Body::Json(serde_json::Value::String("abc".into())), &[]);
+        let encoded =
+            body_value_bytes(&ex, "SET", &[]).expect("a JSON string body must encode raw");
+        assert_eq!(encoded, b"abc".to_vec());
+        assert_eq!(
+            encoded.len(),
+            3,
+            "no JSON quote bytes may be added to a string body"
+        );
+    }
+
+    #[test]
+    fn codec_rejects_json_null_body() {
+        let ex = ex_with(Body::Json(serde_json::Value::Null), &[]);
+        let msg = processor_message(
+            body_value_bytes(&ex, "SET", &[]).expect_err("a JSON null body must be rejected"),
+        );
+        assert!(
+            msg.contains("Body::Json(null)"),
+            "error must name the rejected body form: {msg}"
+        );
+        assert!(msg.contains("SET"), "error must name the verb: {msg}");
+    }
+
+    #[test]
+    fn codec_accepts_empty_string_rejects_empty_body() {
+        let text = ex_with(Body::Text(String::new()), &[]);
+        assert_eq!(
+            body_value_bytes(&text, "SET", &[]).expect("an empty text body is a valid payload"),
+            Vec::<u8>::new()
+        );
+
+        let json_string = ex_with(Body::Json(serde_json::Value::String(String::new())), &[]);
+        assert_eq!(
+            body_value_bytes(&json_string, "SET", &[])
+                .expect("an empty JSON string body is a valid payload"),
+            Vec::<u8>::new()
+        );
+
+        let empty = ex_with(Body::Empty, &[]);
+        let msg = processor_message(
+            body_value_bytes(&empty, "SET", &[]).expect_err("an empty body must be rejected"),
+        );
+        assert!(
+            msg.contains("Body::Empty"),
+            "error must name the rejected variant: {msg}"
+        );
+    }
+
+    #[test]
+    fn tombstone_header_fails_before_encoding() {
+        let ex = ex_with(
+            Body::Text("body".into()),
+            &[(crate::HEADER_VALUE, serde_json::json!("v"))],
+        );
+        let msg = processor_message(
+            body_value_bytes(&ex, "SET", &[crate::HEADER_VALUE])
+                .expect_err("the removed value header must be rejected"),
+        );
+        assert!(
+            msg.contains("CamelRedis.Value was removed in 0.69"),
+            "error must name the tombstoned header: {msg}"
+        );
+    }
+
     #[test]
     fn encode_body_value_empty_and_stream_name_command_and_variant() {
         let stream = Body::Stream(StreamBody {
@@ -953,53 +1097,6 @@ mod value_helper_tests {
                 "error must name the rejected variant {variant}: {msg}"
             );
         }
-    }
-
-    #[test]
-    fn resolve_value_bytes_header_string_is_raw_chars() {
-        let ex = ex_with(
-            Body::Text("body".into()),
-            &[(HEADER_VALUE, serde_json::json!("hello"))],
-        );
-        assert_eq!(
-            resolve_value_bytes(&ex, "SET", HEADER_VALUE).expect("header must resolve"),
-            b"hello".to_vec()
-        );
-    }
-
-    #[test]
-    fn resolve_value_bytes_header_number_is_compact_json() {
-        let ex = ex_with(Body::Empty, &[(HEADER_VALUE, serde_json::json!(42))]);
-        assert_eq!(
-            resolve_value_bytes(&ex, "SET", HEADER_VALUE).expect("numeric header must resolve"),
-            b"42".to_vec()
-        );
-    }
-
-    #[test]
-    fn resolve_value_bytes_body_when_header_absent() {
-        let ex = ex_with(Body::Text("hello".into()), &[]);
-        assert_eq!(
-            resolve_value_bytes(&ex, "SET", HEADER_VALUE).expect("body must resolve"),
-            b"hello".to_vec()
-        );
-    }
-
-    #[test]
-    fn resolve_value_bytes_error_hints_the_header() {
-        let ex = ex_with(Body::Empty, &[]);
-        let msg = processor_message(
-            resolve_value_bytes(&ex, "SET", HEADER_VALUE).expect_err("empty body must be rejected"),
-        );
-        assert!(msg.contains("SET"), "error must name the verb: {msg}");
-        assert!(
-            msg.contains("Body::Empty"),
-            "error must name the rejected variant: {msg}"
-        );
-        assert!(
-            msg.contains(HEADER_VALUE),
-            "error must hint the value header: {msg}"
-        );
     }
 
     #[test]

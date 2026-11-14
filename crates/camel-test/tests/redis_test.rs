@@ -9,7 +9,6 @@
 #![cfg(feature = "integration-tests")]
 
 mod support;
-use support::REDIS_VALUE_HEADER;
 use support::install_crypto_provider;
 use support::redis::shared_redis;
 
@@ -49,7 +48,7 @@ async fn redis_string_commands() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("testkey".into()))
-        .set_header(REDIS_VALUE_HEADER, Value::String("testvalue".into()))
+        .set_body("testvalue")
         .to(format!("redis://{}?command=SET", conn_str))
         .to("mock:result")
         .route_id("redis-string-test")
@@ -107,7 +106,7 @@ async fn redis_list_commands() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("mylist".into()))
-        .set_header(REDIS_VALUE_HEADER, Value::String("item1".into()))
+        .set_body("item1")
         .to(format!("redis://{}?command=LPUSH", conn_str))
         .to("mock:result")
         .route_id("redis-list-test")
@@ -166,7 +165,7 @@ async fn redis_hash_commands() {
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myhash".into()))
         .set_header("CamelRedis.Field", Value::String("field1".into()))
-        .set_header(REDIS_VALUE_HEADER, Value::String("value1".into()))
+        .set_body("value1")
         .to(format!("redis://{}?command=HSET", conn_str))
         .to("mock:result")
         .route_id("redis-hash-test")
@@ -224,7 +223,7 @@ async fn redis_set_commands() {
 
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("myset".into()))
-        .set_header(REDIS_VALUE_HEADER, Value::String("member1".into()))
+        .set_body("member1")
         .to(format!("redis://{}?command=SADD", conn_str))
         .to("mock:result")
         .route_id("redis-set-test")
@@ -265,12 +264,35 @@ async fn redis_set_commands() {
 
 /// Sends one exchange with `headers` through the direct route bound to a GEO
 /// command and returns the JSON body the redis producer set as the reply.
+/// Commands that take no value payload send an empty body.
 async fn geo_exchange(
     h: &CamelTestContext,
     direct_uri: &str,
     headers: &[(&str, Value)],
 ) -> serde_json::Value {
+    send_geo_exchange(h, direct_uri, headers, None).await
+}
+
+/// Same as [`geo_exchange`] for `GEOADD`, whose member rides on the body.
+async fn geo_exchange_with_body(
+    h: &CamelTestContext,
+    direct_uri: &str,
+    headers: &[(&str, Value)],
+    body: Value,
+) -> serde_json::Value {
+    send_geo_exchange(h, direct_uri, headers, Some(body)).await
+}
+
+async fn send_geo_exchange(
+    h: &CamelTestContext,
+    direct_uri: &str,
+    headers: &[(&str, Value)],
+    body: Option<Value>,
+) -> serde_json::Value {
     let mut ex = Exchange::default();
+    if let Some(body) = body {
+        ex.input.body = Body::Json(body);
+    }
     for (name, value) in headers {
         ex.input.set_header(*name, value.clone());
     }
@@ -311,9 +333,10 @@ async fn redis_geo_commands() {
         .build()
         .await;
 
-    // One direct route per GEO command: every option (members, unit, radius
-    // or box, WithDist/WithCoord) rides on the exchange as CamelRedis.*
-    // headers, so the routes only pin the redis command.
+    // One direct route per GEO command: addressing operands (member(s), unit,
+    // radius or box, WithDist/WithCoord) ride on the exchange as CamelRedis.*
+    // headers while GEOADD takes its member from the body, so the routes only
+    // pin the redis command.
     for (id, command) in [
         ("geo-add", "GEOADD"),
         ("geo-pos", "GEOPOS"),
@@ -331,33 +354,34 @@ async fn redis_geo_commands() {
     h.start().await;
 
     // ── GEOADD ──
-    let added = geo_exchange(
+    // The member is the value payload: it rides on the body.
+    let added = geo_exchange_with_body(
         &h,
         "direct:geo-add",
         &[
             ("CamelRedis.Key", json!("geo:points")),
             ("CamelRedis.Longitude", json!(13.361389)),
             ("CamelRedis.Latitude", json!(38.115556)),
-            ("CamelRedis.Member", json!("Palermo")),
         ],
+        json!("Palermo"),
     )
     .await;
     assert_eq!(added, json!(1), "adding Palermo must report one new member");
 
-    let added = geo_exchange(
+    let added = geo_exchange_with_body(
         &h,
         "direct:geo-add",
         &[
             ("CamelRedis.Key", json!("geo:points")),
             ("CamelRedis.Longitude", json!(15.087269)),
             ("CamelRedis.Latitude", json!(37.502669)),
-            ("CamelRedis.Member", json!("Catania")),
         ],
+        json!("Catania"),
     )
     .await;
     assert_eq!(added, json!(1), "adding Catania must report one new member");
 
-    let added = geo_exchange(
+    let added = geo_exchange_with_body(
         &h,
         "direct:geo-add",
         &[
@@ -366,8 +390,8 @@ async fn redis_geo_commands() {
             // below valid for both the original and the stored position.
             ("CamelRedis.Longitude", json!(13.361390)),
             ("CamelRedis.Latitude", json!(38.115557)),
-            ("CamelRedis.Member", json!("Palermo")),
         ],
+        json!("Palermo"),
     )
     .await;
     assert_eq!(
@@ -376,15 +400,15 @@ async fn redis_geo_commands() {
         "updating Palermo must report no new member"
     );
 
-    let added = geo_exchange(
+    let added = geo_exchange_with_body(
         &h,
         "direct:geo-add",
         &[
             ("CamelRedis.Key", json!("geo:points")),
             ("CamelRedis.Longitude", json!(0.0)),
             ("CamelRedis.Latitude", json!(0.0)),
-            ("CamelRedis.Member", json!("Farpoint")),
         ],
+        json!("Farpoint"),
     )
     .await;
     assert_eq!(
@@ -757,8 +781,7 @@ async fn redis_pubsub_producer() {
     });
 
     // PUBLISH consumes the message BODY (commands/pubsub.rs
-    // extract_publish_message) and CamelRedis.Channel selects the channel;
-    // CamelRedis.Value is only consulted by key/value commands like SET.
+    // extract_publish_message) and CamelRedis.Channel selects the channel.
     let route = RouteBuilder::from("timer:tick?period=50&repeatCount=1")
         .set_header("CamelRedis.Channel", Value::String("mychannel".into()))
         .set_body("hello world")
@@ -837,7 +860,7 @@ async fn redis_consumer_queue_mode() {
 
     let producer_route = RouteBuilder::from("timer:push?period=100&repeatCount=1")
         .set_header("CamelRedis.Key", Value::String("queue-test".into()))
-        .set_header(REDIS_VALUE_HEADER, Value::String("queue-item".into()))
+        .set_body("queue-item")
         .to(format!("redis://{}?command=RPUSH", conn_str))
         .route_id("redis-queue-producer")
         .build()

@@ -1,12 +1,12 @@
 //! Wire-level value tests against the scripted RESP server.
 //!
 //! These tests drive the real [`crate::producer::RedisProducer`] so the value
-//! bytes of the `SET` family are asserted on the wire: the exchange body is
-//! the value source when the `CamelRedis.Value` header is absent, the header
-//! still wins when present (back-compat guard), and bodies that cannot carry
-//! a value are rejected before any command reaches the server. The reply side
-//! is covered too: `GET` and `MGET` keep binary payloads losslessly while
-//! text replies keep their `Text` / JSON-array shapes.
+//! bytes of the payload commands are asserted on the wire: the exchange body
+//! is the only value source, bodies that cannot carry a value are rejected
+//! before any command reaches the server, and the payload headers removed in
+//! 0.69 fail loudly instead of being silently ignored. The reply side is
+//! covered too: `GET` and `MGET` keep binary payloads losslessly while text
+//! replies keep their `Text` / JSON-array shapes.
 
 use std::sync::Arc;
 
@@ -16,12 +16,12 @@ use camel_component_api::Exchange;
 use camel_component_api::StreamBody;
 
 use crate::stream_fake_tests::{
-    ScriptedAction, StreamFakeServer, body_exchange, call_producer, keyed_exchange, resp_array,
-    resp_bulk, resp_int, resp_nil,
+    ScriptedAction, StreamFakeServer, args_as_strings, body_exchange, call_producer,
+    keyed_exchange, resp_array, resp_bulk, resp_int, resp_nil,
 };
 
 #[tokio::test]
-async fn set_takes_the_exchange_body_when_value_header_is_absent() {
+async fn set_carries_the_body_as_the_value() {
     let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
         matches_command: "SET",
         reply: b"+OK\r\n".to_vec(),
@@ -44,33 +44,6 @@ async fn set_takes_the_exchange_body_when_value_header_is_absent() {
         frames[0],
         vec![b"k".to_vec(), b"hello".to_vec()],
         "SET must send the key and the exchange body as its value"
-    );
-}
-
-#[tokio::test]
-async fn value_header_still_wins_over_the_body() {
-    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
-        matches_command: "SET",
-        reply: b"+OK\r\n".to_vec(),
-    }])
-    .await
-    .expect("fake server must bind");
-
-    let mut exchange = keyed_exchange(Body::Text("body-value".to_string()), "k");
-    exchange
-        .input
-        .set_header("CamelRedis.Value", "header-value");
-
-    call_producer(&server, "SET", "", exchange)
-        .await
-        .expect("SET must succeed");
-
-    let frames = server.args_of("SET");
-    assert_eq!(frames.len(), 1, "exactly one SET must reach the wire");
-    assert_eq!(
-        frames[0],
-        vec![b"k".to_vec(), b"header-value".to_vec()],
-        "CamelRedis.Value must keep precedence over the exchange body"
     );
 }
 
@@ -318,7 +291,7 @@ async fn mget_encodes_binary_elements_losslessly() {
 // ── List / hash value payloads (redisvalue 1.4) ─────────────────────────────
 
 #[tokio::test]
-async fn lpush_takes_the_exchange_body_when_value_header_is_absent() {
+async fn lpush_takes_the_value_from_the_body() {
     let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
         matches_command: "LPUSH",
         reply: b":1\r\n".to_vec(),
@@ -350,7 +323,7 @@ async fn lpush_takes_the_exchange_body_when_value_header_is_absent() {
 }
 
 #[tokio::test]
-async fn hmset_takes_a_json_object_body_when_values_header_is_absent() {
+async fn hmset_takes_a_json_object_body() {
     let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
         matches_command: "HMSET",
         reply: b"+OK\r\n".to_vec(),
@@ -373,7 +346,7 @@ async fn hmset_takes_a_json_object_body_when_values_header_is_absent() {
     );
 }
 
-// ── GEO member and PUBLISH message body fallback (redisvalue 1.5) ───────────
+// ── GEO member and PUBLISH message from the body (redisvalue 1.5) ───────────
 
 /// Exchange carrying `body`, the `CamelRedis.Key` header, and the coordinate
 /// headers GEOADD requires. The promoted harness builders only set body/Key.
@@ -455,51 +428,27 @@ async fn geoadd_missing_member_with_empty_body_fails_before_sending() {
 }
 
 #[tokio::test]
-async fn publish_prefers_the_value_header_and_takes_the_body_as_fallback() {
-    let server = StreamFakeServer::start(vec![
-        ScriptedAction::Reply {
-            matches_command: "PUBLISH",
-            reply: resp_int(0),
-        },
-        ScriptedAction::Reply {
-            matches_command: "PUBLISH",
-            reply: resp_int(0),
-        },
-    ])
+async fn publish_takes_the_message_from_the_body() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "PUBLISH",
+        reply: resp_int(0),
+    }])
     .await
     .expect("fake server must bind");
 
-    let mut header_exchange = body_exchange(Body::Text("from-body".to_string()));
-    header_exchange
-        .input
-        .set_header("CamelRedis.Channel", "news");
-    header_exchange
-        .input
-        .set_header("CamelRedis.Value", "from-header");
+    let mut exchange = body_exchange(Body::Text("from-body".to_string()));
+    exchange.input.set_header("CamelRedis.Channel", "news");
 
-    let mut body_only_exchange = body_exchange(Body::Text("from-body".to_string()));
-    body_only_exchange
-        .input
-        .set_header("CamelRedis.Channel", "news");
-
-    call_producer(&server, "PUBLISH", "", header_exchange)
+    call_producer(&server, "PUBLISH", "", exchange)
         .await
-        .expect("PUBLISH with a value header must succeed");
-    call_producer(&server, "PUBLISH", "", body_only_exchange)
-        .await
-        .expect("PUBLISH with a body fallback must succeed");
+        .expect("PUBLISH with a body message must succeed");
 
     let frames = server.args_of("PUBLISH");
-    assert_eq!(frames.len(), 2, "both PUBLISH calls must reach the wire");
+    assert_eq!(frames.len(), 1, "exactly one PUBLISH must reach the wire");
     assert_eq!(
         frames[0],
-        vec![b"news".to_vec(), b"from-header".to_vec()],
-        "CamelRedis.Value must win over the exchange body"
-    );
-    assert_eq!(
-        frames[1],
         vec![b"news".to_vec(), b"from-body".to_vec()],
-        "the exchange body must supply the message when the header is absent"
+        "PUBLISH must take the message from the exchange body"
     );
 }
 
@@ -545,5 +494,486 @@ async fn xadd_accepts_a_bytes_body() {
         outcome.input.body,
         Body::Bytes(payload.into()),
         "XADD must leave the exchange body unchanged"
+    );
+}
+
+// ── Body-only contract: tombstones, codec, binary, maps, empty strings ──────
+
+/// Exchange with `body`, the `CamelRedis.Key` header, and one extra header.
+fn keyed_with_header(body: Body, key: &str, header: &str, value: serde_json::Value) -> Exchange {
+    let mut exchange = keyed_exchange(body, key);
+    exchange.input.set_header(header, value);
+    exchange
+}
+
+#[tokio::test]
+async fn value_header_tombstone_fails_before_send() {
+    let server = StreamFakeServer::start(Vec::new())
+        .await
+        .expect("fake server must bind");
+
+    // Every removed payload header, on a command that used to honour it. The
+    // body is valid in all four rows, so only the tombstone can fail the call.
+    let matrix = [
+        (
+            "SET",
+            "CamelRedis.Value",
+            keyed_with_header(
+                Body::Text("body-value".to_string()),
+                "k",
+                "CamelRedis.Value",
+                serde_json::json!("header-value"),
+            ),
+        ),
+        (
+            "HMSET",
+            "CamelRedis.Values",
+            keyed_with_header(
+                Body::Json(serde_json::json!({"field": "value"})),
+                "h",
+                "CamelRedis.Values",
+                serde_json::json!({"field": "header"}),
+            ),
+        ),
+        (
+            "MSET",
+            "CamelRedis.Values",
+            keyed_with_header(
+                Body::Json(serde_json::json!({"k1": "v1"})),
+                "k",
+                "CamelRedis.Values",
+                serde_json::json!({"k1": "header"}),
+            ),
+        ),
+        ("GEOADD", "CamelRedis.Member", {
+            let mut exchange = geo_exchange(
+                Body::Text("Palermo".to_string()),
+                "sicily",
+                13.361389,
+                38.115556,
+            );
+            exchange
+                .input
+                .set_header("CamelRedis.Member", serde_json::json!("Palermo"));
+            exchange
+        }),
+    ];
+
+    for (command, header, exchange) in matrix {
+        let err = match call_producer(&server, command, "", exchange).await {
+            Err(err) => err,
+            Ok(_) => panic!("{command} must reject the removed {header} header before sending"),
+        };
+        let text = err.to_string();
+        assert!(
+            text.contains("was removed in 0.69"),
+            "{command} error must report the 0.69 removal: {text}"
+        );
+        assert!(
+            text.contains(header),
+            "{command} error must name {header}: {text}"
+        );
+        assert!(
+            text.contains("put the value in the body"),
+            "{command} error must point at the body: {text}"
+        );
+        let frames = server.args_of(command);
+        assert!(
+            frames.is_empty(),
+            "a tombstoned {command} must not reach the wire: {frames:?}"
+        );
+    }
+    assert!(
+        server.recorded().is_empty(),
+        "no command may reach the wire for a tombstoned exchange: {:?}",
+        server.recorded()
+    );
+}
+
+#[tokio::test]
+async fn json_string_body_contributes_raw_characters() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "SET",
+        reply: b"+OK\r\n".to_vec(),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "SET",
+        "",
+        keyed_exchange(Body::Json(serde_json::json!("abc")), "k"),
+    )
+    .await
+    .expect("SET with a JSON string body must succeed");
+
+    let frames = server.args_of("SET");
+    assert_eq!(frames.len(), 1, "exactly one SET must reach the wire");
+    assert_eq!(
+        frames[0],
+        vec![b"k".to_vec(), b"abc".to_vec()],
+        "a JSON string body must contribute its raw characters, without quote bytes"
+    );
+}
+
+#[tokio::test]
+async fn json_null_body_is_rejected() {
+    let server = StreamFakeServer::start(Vec::new())
+        .await
+        .expect("fake server must bind");
+
+    let err = match call_producer(
+        &server,
+        "SET",
+        "",
+        keyed_exchange(Body::Json(serde_json::Value::Null), "k"),
+    )
+    .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("SET with a JSON null body must be rejected before sending"),
+    };
+    let text = err.to_string();
+    assert!(text.contains("SET"), "the rejection must name SET: {text}");
+    assert!(
+        text.contains("null"),
+        "the rejection must name the JSON null body: {text}"
+    );
+    assert!(
+        server.args_of("SET").is_empty(),
+        "no SET frame may reach the wire: {:?}",
+        server.recorded()
+    );
+}
+
+#[tokio::test]
+async fn bytes_body_round_trips_zadd_then_zscore() {
+    let member = vec![0xFF, 0xFE, b'b', b'i', b'n'];
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "ZADD",
+            reply: resp_int(1),
+        },
+        ScriptedAction::Reply {
+            matches_command: "ZSCORE",
+            reply: resp_bulk("1.5"),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "ZADD",
+        "",
+        keyed_with_header(
+            Body::Bytes(member.clone().into()),
+            "z",
+            "CamelRedis.Score",
+            serde_json::json!(1.5),
+        ),
+    )
+    .await
+    .expect("ZADD with a Bytes body must succeed");
+
+    let outcome = call_producer(
+        &server,
+        "ZSCORE",
+        "",
+        keyed_exchange(Body::Bytes(member.clone().into()), "z"),
+    )
+    .await
+    .expect("ZSCORE with the same Bytes body must succeed");
+
+    let zadd_frames = server.args_of("ZADD");
+    assert_eq!(zadd_frames.len(), 1, "exactly one ZADD must reach the wire");
+    assert_eq!(
+        zadd_frames[0],
+        vec![b"z".to_vec(), b"1.5".to_vec(), member.clone()],
+        "ZADD must send the key, the score, and the member bytes verbatim"
+    );
+
+    let zscore_frames = server.args_of("ZSCORE");
+    assert_eq!(
+        zscore_frames.len(),
+        1,
+        "exactly one ZSCORE must reach the wire"
+    );
+    assert_eq!(
+        zscore_frames[0],
+        vec![b"z".to_vec(), member],
+        "ZSCORE must send the same member bytes verbatim"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(1.5)),
+        "the scripted score reply must reach the body as a JSON number"
+    );
+}
+
+#[tokio::test]
+async fn bytes_body_round_trips_sadd_then_sismember() {
+    let member = vec![0xFF, 0xFE, b'b', b'i', b'n'];
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "SADD",
+            reply: resp_int(1),
+        },
+        ScriptedAction::Reply {
+            matches_command: "SISMEMBER",
+            reply: resp_int(1),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "SADD",
+        "",
+        keyed_exchange(Body::Bytes(member.clone().into()), "s"),
+    )
+    .await
+    .expect("SADD with a Bytes body must succeed");
+
+    let outcome = call_producer(
+        &server,
+        "SISMEMBER",
+        "",
+        keyed_exchange(Body::Bytes(member.clone().into()), "s"),
+    )
+    .await
+    .expect("SISMEMBER with the same Bytes body must succeed");
+
+    let sadd_frames = server.args_of("SADD");
+    assert_eq!(sadd_frames.len(), 1, "exactly one SADD must reach the wire");
+    assert_eq!(
+        sadd_frames[0],
+        vec![b"s".to_vec(), member.clone()],
+        "SADD must send the member bytes verbatim"
+    );
+
+    let sismember_frames = server.args_of("SISMEMBER");
+    assert_eq!(
+        sismember_frames.len(),
+        1,
+        "exactly one SISMEMBER must reach the wire"
+    );
+    assert_eq!(
+        sismember_frames[0],
+        vec![b"s".to_vec(), member],
+        "SISMEMBER must send the same member bytes verbatim"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(true)),
+        "the scripted integer reply must reach the body as a JSON boolean"
+    );
+}
+
+#[tokio::test]
+async fn mset_takes_a_json_object_body() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "MSET",
+        reply: b"+OK\r\n".to_vec(),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "MSET",
+        "",
+        body_exchange(Body::Json(serde_json::json!({"k1": "v1", "k2": "v2"}))),
+    )
+    .await
+    .expect("MSET with a JSON object body must succeed");
+
+    let frames = server.args_of("MSET");
+    assert_eq!(frames.len(), 1, "exactly one MSET must reach the wire");
+    assert_eq!(
+        frames[0],
+        vec![
+            b"k1".to_vec(),
+            b"v1".to_vec(),
+            b"k2".to_vec(),
+            b"v2".to_vec()
+        ],
+        "MSET must send the map entries with raw, unquoted string values"
+    );
+}
+
+#[tokio::test]
+async fn hmset_map_values_follow_the_scalar_rule() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "HMSET",
+        reply: b"+OK\r\n".to_vec(),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "HMSET",
+        "",
+        keyed_exchange(
+            Body::Json(serde_json::json!({"n": 42, "s": "txt", "o": {"k": 1}})),
+            "h",
+        ),
+    )
+    .await
+    .expect("HMSET with a JSON object body must succeed");
+
+    let frames = server.args_of("HMSET");
+    assert_eq!(frames.len(), 1, "exactly one HMSET must reach the wire");
+    let args = args_as_strings(&frames[0]);
+    assert_eq!(args[0], "h", "HMSET must send the key first");
+    let mut entries: Vec<(String, String)> = args[1..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .collect();
+    entries.sort();
+    assert_eq!(
+        entries,
+        vec![
+            ("n".to_string(), "42".to_string()),
+            ("o".to_string(), "{\"k\":1}".to_string()),
+            ("s".to_string(), "txt".to_string()),
+        ],
+        "a JSON string keeps its raw characters, a number/object its compact text"
+    );
+
+    let err = match call_producer(
+        &server,
+        "HMSET",
+        "",
+        keyed_exchange(Body::Json(serde_json::json!({"bad": null})), "h"),
+    )
+    .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("HMSET with a null map entry must be rejected before sending"),
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("HMSET") && text.contains("null"),
+        "the rejection must name HMSET and the null entry: {text}"
+    );
+    assert_eq!(
+        server.args_of("HMSET").len(),
+        1,
+        "a rejected HMSET must not add a frame: {:?}",
+        server.args_of("HMSET")
+    );
+
+    let err = match call_producer(
+        &server,
+        "MSET",
+        "",
+        keyed_exchange(Body::Json(serde_json::json!({"bad": null})), "k"),
+    )
+    .await
+    {
+        Err(err) => err,
+        Ok(_) => panic!("MSET with a null map entry must be rejected before sending"),
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("MSET") && text.contains("null"),
+        "the rejection must name MSET and the null entry: {text}"
+    );
+    assert!(
+        server.args_of("MSET").is_empty(),
+        "a rejected MSET must not reach the wire: {:?}",
+        server.args_of("MSET")
+    );
+}
+
+#[tokio::test]
+async fn smove_destination_stays_a_header_member_comes_from_the_body() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "SMOVE",
+        reply: resp_int(1),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let mut exchange = keyed_exchange(Body::Text("member1".to_string()), "src");
+    exchange.input.set_header("CamelRedis.Destination", "dest");
+
+    call_producer(&server, "SMOVE", "", exchange)
+        .await
+        .expect("SMOVE must succeed");
+
+    let frames = server.args_of("SMOVE");
+    assert_eq!(frames.len(), 1, "exactly one SMOVE must reach the wire");
+    assert_eq!(
+        frames[0],
+        vec![b"src".to_vec(), b"dest".to_vec(), b"member1".to_vec()],
+        "SMOVE must send source, the header destination, then the body member"
+    );
+}
+
+#[tokio::test]
+async fn empty_string_body_is_accepted_and_empty_body_is_not() {
+    let server = StreamFakeServer::start(vec![
+        ScriptedAction::Reply {
+            matches_command: "SET",
+            reply: b"+OK\r\n".to_vec(),
+        },
+        ScriptedAction::Reply {
+            matches_command: "SET",
+            reply: b"+OK\r\n".to_vec(),
+        },
+    ])
+    .await
+    .expect("fake server must bind");
+
+    call_producer(
+        &server,
+        "SET",
+        "",
+        keyed_exchange(Body::Text(String::new()), "k"),
+    )
+    .await
+    .expect("an empty Text body must be a valid empty value");
+
+    call_producer(
+        &server,
+        "SET",
+        "",
+        keyed_exchange(Body::Json(serde_json::json!("")), "k"),
+    )
+    .await
+    .expect("an empty JSON string body must be a valid empty value");
+
+    let err = match call_producer(&server, "SET", "", keyed_exchange(Body::Empty, "k")).await {
+        Err(err) => err,
+        Ok(_) => panic!("SET with Body::Empty must be rejected before sending"),
+    };
+    let text = err.to_string();
+    assert!(
+        text.contains("SET") && text.contains("Body::Empty"),
+        "the rejection must name SET and Body::Empty: {text}"
+    );
+
+    let frames = server.args_of("SET");
+    assert_eq!(
+        frames.len(),
+        2,
+        "only the two empty-string SETs may reach the wire: {frames:?}"
+    );
+    assert_eq!(
+        frames[0],
+        vec![b"k".to_vec(), Vec::new()],
+        "an empty Text body must send an empty value"
+    );
+    assert_eq!(
+        frames[1],
+        vec![b"k".to_vec(), Vec::new()],
+        "an empty JSON string body must send an empty value"
     );
 }

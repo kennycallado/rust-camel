@@ -39,7 +39,6 @@ scenario:
     to: direct:order
     body: order-value
     headers:
-      CamelRedis.Value: order-value
       CamelRedis.Timeout: 30
 - validate:
     target:
@@ -65,7 +64,8 @@ routes:
 
 `datasource` and `key` are document-authored literals, not environment placeholders.
 `type` is required. It must be `string`, `hash`, `list`, `set`, or `zset`.
-`SETEX` reads expiry seconds from `CamelRedis.Timeout`.
+`SETEX` writes the exchange body and reads expiry seconds from `CamelRedis.Timeout`.
+The value never travels in a header ([ADR-0098](../adr/0098-redis-value-contract.md)).
 Omit `ttl` when expiry is not part of the assertion.
 
 ## Type projections

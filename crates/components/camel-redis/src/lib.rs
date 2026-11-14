@@ -61,8 +61,12 @@ pub use topology::{RedisTopology, ServerKind, StandaloneTopology, topology_from_
 
 // Header constants for redis operations
 
-/// Header key that carries the value payload for value-oriented commands
-/// (for example SET, GET, APPEND).
+/// Removed header that used to carry the value payload for value-oriented
+/// commands (for example SET, GET, APPEND).
+///
+/// Kept so the constant can name the tombstone: a route that still sets it is
+/// rejected with a named error instead of silently writing a different
+/// payload. Put the value in the exchange body.
 pub const HEADER_VALUE: &str = "CamelRedis.Value";
 
 pub struct RedisComponent {

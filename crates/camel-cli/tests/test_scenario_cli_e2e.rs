@@ -605,9 +605,7 @@ mod redis_cases {
         .expect("config");
         std::fs::write(dir.path().join("routes.yaml"), format!("routes:\n- id: redis-route\n  from: direct:start\n  steps:\n  - to: 'redis://127.0.0.1:{port}?command=SET&key={key}'\n")).expect("routes");
         let send_action = if send {
-            format!(
-                "- send:\n    to: direct:start\n    body: '{value}'\n    headers:\n      CamelRedis.Value: '{value}'\n"
-            )
+            format!("- send:\n    to: direct:start\n    body: '{value}'\n")
         } else {
             String::new()
         };

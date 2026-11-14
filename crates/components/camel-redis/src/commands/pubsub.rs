@@ -1,5 +1,4 @@
-use super::{require_str_header, resolve_value_bytes};
-use crate::HEADER_VALUE;
+use super::{body_value_bytes, require_str_header};
 use crate::config::RedisCommand;
 use camel_component_api::{Body, CamelError, Exchange};
 use redis::AsyncCommands;
@@ -73,7 +72,7 @@ pub async fn dispatch(
     let result: serde_json::Value = match cmd {
         RedisCommand::Publish => {
             let channel = extract_publish_channel(exchange)?;
-            let message = resolve_value_bytes(exchange, "PUBLISH", HEADER_VALUE)?;
+            let message = body_value_bytes(exchange, "PUBLISH", &[crate::HEADER_VALUE])?;
 
             let receivers: i64 = conn
                 .publish(&channel, &message)

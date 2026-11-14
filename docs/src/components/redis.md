@@ -10,14 +10,11 @@ use camel_component_redis::RedisComponent;
 
 ctx.register_component("redis", Box::new(RedisComponent::new()));
 
-// Producer: timer writes a key every 3s
+// Producer: timer writes a key every 3s; the body is the value
 let string_producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
     .route_id("redis-string-producer")
     .set_header("CamelRedis.Key", Value::String("greeting".into()))
-    .set_header(
-        "CamelRedis.Value",
-        Value::String("hello from rust-camel!".into()),
-    )
+    .set_body("hello from rust-camel!")
     .to("redis://127.0.0.1:6379?command=SET")
     .to("log:info?showHeaders=true")
     .build()?;
@@ -34,9 +31,7 @@ routes:
       - set_header:
           key: "CamelRedis.Key"
           value: "greeting"
-      - set_header:
-          key: "CamelRedis.Value"
-          value: "hello from rust-camel!"
+      - set_body: "hello from rust-camel!"
       - to: "redis://127.0.0.1:6379?command=SET"
       - to: "log:info?showHeaders=true"
 ```
@@ -109,7 +104,12 @@ The `command` parameter picks the Redis command at Endpoint creation. Exchange d
 
 ## Header values and timeouts
 
-The Producer reads command arguments from `CamelRedis.*` headers. A numeric header accepts a JSON number or a trimmed numeric string. The numeric-string form makes the natural `${env:...}` path work, because environment interpolation always yields a string.
+The Producer reads command arguments from `CamelRedis.*` headers. The payload
+of a writing command comes from the Exchange body (see
+[value payload and reply rule](#value-payload-and-reply-rule)). A numeric
+header accepts a JSON number or a trimmed numeric string. The numeric-string
+form makes the natural `${env:...}` path work, because environment
+interpolation always yields a string.
 
 A header that is present but invalid fails the step with a named error. The error names the header and the received value. An absent header keeps its documented default. The component never silently defaults a misconfigured numeric header to zero. A non-negative header rejects a negative value. A value above `i64::MAX` is never wrapped into a negative number.
 
@@ -176,11 +176,20 @@ Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLE
 
 ### Geospatial
 
-`GEOADD` stores one member with its coordinates. `GEOPOS` reads the stored positions of one or more members. `GEODIST` measures the distance between two members. `GEOSEARCH` queries members near a center point by radius or by bounding box. `GEOHASH` returns the standard base-32 geohash of one or more members. The arguments come from headers, except the `GEOADD` member, which falls back to the Exchange body. The Producer overwrites the Exchange body with the JSON result.
+`GEOADD` stores one member with its coordinates. The member comes from the
+Exchange body. `GEOPOS` reads the stored positions of one or more members.
+`GEODIST` measures the distance between two members. `GEOSEARCH` queries
+members near a center point by radius or by bounding box. `GEOHASH` returns the
+standard base-32 geohash of one or more members. The other arguments come from
+headers. `CamelRedis.Member`, `CamelRedis.Member2`, and `CamelRedis.Members`
+stay addressing operands on the read commands. `CamelRedis.Member` is not a
+payload source on `GEOADD`, and a route that sets it there fails with a
+tombstone error. The Producer overwrites the Exchange body with the JSON
+result.
 
-| Operation | Required headers | Optional headers |
+| Operation | Required inputs | Optional headers |
 | --- | --- | --- |
-| `GEOADD` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude` | `CamelRedis.Member` |
+| `GEOADD` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude`, and the member in the body | — |
 | `GEOPOS` | `CamelRedis.Key`, `CamelRedis.Members` | — |
 | `GEODIST` | `CamelRedis.Key`, `CamelRedis.Member`, `CamelRedis.Member2` | `CamelRedis.Unit` |
 | `GEOSEARCH` | `CamelRedis.Key`, `CamelRedis.Longitude`, `CamelRedis.Latitude`, and one shape | `CamelRedis.Unit`, `CamelRedis.WithDist`, `CamelRedis.WithCoord`, `CamelRedis.Count` |
@@ -205,23 +214,55 @@ The `member` field is a plain string. `distance` is a number in the requested un
 
 ## Producer
 
-The Producer sends the command named by `command=`. A value-writing command takes its payload from the value header or, when the header is absent, from the Exchange body. The Producer holds a single multiplexed connection per Endpoint. The connection opens lazily on the first call and stays open for the route lifetime.
+The Producer sends the command named by `command=`. A writing command takes its
+payload from the Exchange body. The Producer holds a single multiplexed
+connection per Endpoint. The connection opens lazily on the first call and
+stays open for the route lifetime.
 
-The `command` parameter picks one of the 80+ commands listed above. The Exchange body, headers, and the URI parameters supply the command arguments. Different commands read different headers. For example, `HSET` reads `CamelRedis.Key`, and takes its value from `CamelRedis.Value` or from the Exchange body. `LRANGE` reads `CamelRedis.Start` and `CamelRedis.End`. Missing required headers return `CamelError`. A send failure returns `Err` to the route `ErrorHandler`.
+The `command` parameter picks one of the 80+ commands listed above. The
+Exchange body, headers, and the URI parameters supply the command arguments.
+Different commands read different headers. For example, `HSET` reads
+`CamelRedis.Key` and `CamelRedis.Field`, and takes its value from the Exchange
+body. `LRANGE` reads `CamelRedis.Start` and `CamelRedis.End`. Missing required
+headers return `CamelError`. A send failure returns `Err` to the route
+`ErrorHandler`.
 
 The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step and reports per-route metrics.
 
-### Value source and reply rule
+### Value payload and reply rule
 
-A value-writing command reads its value payload from the command's value header when that header is present, and from the Exchange body otherwise. No other value source exists. The header wins over the body, so a route that sets the header keeps its wire bytes unchanged ([ADR-0098](../adr/0098-redis-value-contract.md)).
+A payload command takes its single payload argument from the Exchange body
+only. No value header exists. An addressing operand, such as the key, the
+destination, the score, or the timeout, never comes from the body
+([ADR-0098](../adr/0098-redis-value-contract.md)).
 
-| Header | Commands | Rule |
-| --- | --- | --- |
-| `CamelRedis.Value` | `SET`, `SETEX`, `SETNX`, `APPEND`, `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LINSERT`, `LSET`, `HSET`, `HSETNX`, `SADD`, the `ZADD` member, `PUBLISH` | Value payload. The header wins. The body is the fallback. |
-| `CamelRedis.Member` | `GEOADD` | Member payload. The header wins. The body is the fallback. |
-| `CamelRedis.Values` | `HMSET`, `MSET` | Field/value map header. `HMSET` accepts a JSON object body as fallback (Text or UTF-8 Bytes bodies that parse as JSON objects are also accepted). |
+The body codec is shared by every payload command.
 
-The body codec is shared by every value-writing command. `Body::Text` contributes UTF-8 bytes. `Body::Json` contributes compact JSON. `Body::Xml` contributes the XML text as UTF-8 bytes. `Body::Bytes` passes verbatim. `Body::Empty` and `Body::Stream` fail before any command is sent, with an error that names the command and the rejected variant.
+| Body variant | Payload bytes |
+| --- | --- |
+| `Body::Text`, `Body::Xml` | UTF-8 bytes |
+| `Body::Json` holding a string | the raw characters, with no JSON quoting |
+| `Body::Json` holding any other value | compact JSON |
+| `Body::Bytes` | the bytes verbatim |
+| `Body::Empty`, `Body::Stream`, `Body::Json(null)` | rejected before send, with an error that names the command and the rejected form |
+
+`HMSET` and `MSET` take a JSON-object body, or a `Body::Text`/UTF-8
+`Body::Bytes` body that parses as a JSON object. Each entry value follows the
+scalar rule, and a null entry fails before send. Binary map values are a
+documented limit, because the map body is JSON or UTF-8 text.
+
+The scalar payload commands are `SET`, `SETEX`, `SETNX`, `GETSET`, `APPEND`,
+`LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LINSERT`, `LSET`, `LREM`, `SADD`,
+`SREM`, `SISMEMBER`, `SMOVE`, the `ZADD` member, `ZREM`, `ZRANK`, `ZREVRANK`,
+`ZSCORE`, `ZINCRBY`, `HSET`, `HSETNX`, the `GEOADD` member, and `PUBLISH`.
+
+Three payload headers are removed: `CamelRedis.Value`, `CamelRedis.Values`,
+and `CamelRedis.Member` as the `GEOADD` payload. A route that still sets one
+fails before send with `"<header> was removed in 0.69; put the value in the
+body"`. The [component README](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-redis/README.md)
+lists the full tombstone scope and the migration steps.
+`CamelRedis.Member`, `CamelRedis.Member2`, and `CamelRedis.Members` remain
+addressing operands on `GEOPOS`, `GEODIST`, `GEOSEARCH`, and `GEOHASH`.
 
 `GET` replies with `Body::Text` when the value is valid UTF-8, `Body::Bytes` when it is not, and `Body::Json(null)` for a missing key. `MGET` keeps the JSON array of strings and nulls when every element is nil or valid UTF-8. When any element is binary, `MGET` replies with `Body::Bytes` that holds the RESP encoding of the reply array, which `redis::parse_redis_value` decodes. Every other getter keeps its JSON reply.
 
@@ -256,7 +297,7 @@ The break reaches Rust library consumers too. `RedisCommand` gained the `Xadd` a
 
 #### XADD
 
-`XADD` appends one entry. The entry carries exactly one field named `body`. Its value is `body.try_into_text()`: text stays as-is, a structured body becomes compact JSON, and UTF-8 bytes decode to text. `Body::Empty`, `Body::Stream`, and non-UTF-8 bytes fail with a named processor error before any command reaches Redis. The entry ID is always `*`, so Redis assigns it.
+`XADD` appends one entry. The entry carries exactly one field named `body`. Its value is the Exchange body through the shared codec: text and XML contribute UTF-8 bytes, a JSON string contributes its raw characters, any other JSON value contributes compact JSON, and bytes pass verbatim. A JSON-object body is one field value, not one field per key. `Body::Empty`, `Body::Stream`, and `Body::Json(null)` fail with a named processor error before any command reaches Redis. The entry ID is always `*`, so Redis assigns it.
 
 The Producer keeps the Exchange body unchanged. It reads one header and sets two:
 
@@ -410,10 +451,7 @@ master_name = "mymaster"
 let producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
     .route_id("redis-sentinel-producer")
     .set_header("CamelRedis.Key", Value::String("greeting".into()))
-    .set_header(
-        "CamelRedis.Value",
-        Value::String("hello via redis sentinel!".into()),
-    )
+    .set_body("hello via redis sentinel!")
     .to("redis-sentinel://127.0.0.1:26379/mymaster/0?command=SET")
     .to("log:info?showHeaders=true")
     .build()?;

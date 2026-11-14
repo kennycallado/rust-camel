@@ -813,10 +813,7 @@ components = true
             "CamelRedis.Key",
             serde_json::Value::String("emission-key".into()),
         )
-        .set_header(
-            support::REDIS_VALUE_HEADER,
-            serde_json::Value::String("not-a-number".into()),
-        )
+        .set_body("not-a-number")
         .to(format!("redis://{conn}?command=SET"))
         .build()
         .expect("seed route builds");

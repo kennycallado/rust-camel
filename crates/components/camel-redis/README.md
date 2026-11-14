@@ -85,9 +85,10 @@ use camel_component_redis::RedisComponent;
 let mut ctx = CamelContext::new();
 ctx.register_component("redis", Box::new(RedisComponent::new()));
 
-// SET: Store a value
+// SET: Store the exchange body under a key
 let set_route = RouteBuilder::from("direct:set")
     .set_header("CamelRedis.Key", Value::String("mykey".into()))
+    .set_body("hello")
     .to("redis://localhost:6379?command=SET")
     .build()?;
 
@@ -183,10 +184,11 @@ route dead-letter channel (`RouteBuilder::dead_letter_channel`) and send the
 failed exchange to a second route that pushes it onto a dead-letter list.
 
 The consumer sets the header `CamelRedis.Key` to the source list (`jobs`). The
-dead-letter route must set `CamelRedis.Key` and `CamelRedis.Value` itself;
-otherwise `LPUSH` would write the item back to the source list.
+dead-letter route must set `CamelRedis.Key` itself; otherwise `LPUSH` would
+write the item back to the source list. The value comes from the exchange body.
 
 ```rust
+use camel_api::Body;
 use camel_api::Value;
 use camel_builder::{RouteBuilder, StepAccumulator};
 
@@ -202,10 +204,9 @@ let jobs = RouteBuilder::from("redis://localhost:6379?command=BLPOP&key=jobs&tim
 let jobs_dead = RouteBuilder::from("direct:jobs-dead")
     .route_id("jobs-dead")
     .set_header("CamelRedis.Key", Value::String("jobs:dead".into()))
-    .set_header_fn("CamelRedis.Value", |ex| {
-        // Body is the popped item (Text). If the route rewrites the body,
-        // copy the item to a header first.
-        Value::String(ex.input.body.as_text().unwrap_or_default().to_string())
+    .set_body_fn(|ex| {
+        // The body is the popped item (Text). Build the value from it.
+        Body::Text(ex.input.body.as_text().unwrap_or_default().to_string())
     })
     .to("redis://localhost:6379?command=LPUSH")
     .build()?;
@@ -264,15 +265,15 @@ The [command handlers](src/commands/) define the inputs for each command.
 | Header | Description |
 |--------|-------------|
 | `CamelRedis.Key` | Redis key |
-| `CamelRedis.Value` | Value payload for value-writing commands. Falls back to the exchange body when absent |
-| `CamelRedis.Member` | `GEOADD` member payload. Falls back to the exchange body when absent |
-| `CamelRedis.Values` | Field/value map for `HMSET` and `MSET` |
 | `CamelRedis.Field` | Hash field (for H* commands) |
 | `CamelRedis.Channel` | Pub/Sub channel |
 | `CamelRedis.Score` | Sorted set score |
 | `CamelRedis.Start` | Range start |
 | `CamelRedis.End` | Range end |
 | `CamelRedis.Timeout` | Blocking timeout |
+
+The payload of a writing command comes from the exchange body, not from a
+header. See [Value payload](#value-payload).
 
 ### Command Results (from responses)
 
@@ -284,14 +285,67 @@ is nil or valid UTF-8. When any element is binary, `MGET` replies with
 `Body::Bytes` that holds the RESP encoding of the reply array. All other getters
 keep JSON replies.
 
-Value-oriented commands (`SET`, `APPEND`, `PUBLISH`, the `ZADD` member, the
-`GEOADD` member, and others) read the payload from `CamelRedis.Value` (or
-`CamelRedis.Member` for `GEOADD`) when the header is present, and from the
-exchange body otherwise. The body codec is `Body::Text` to UTF-8, `Body::Json`
-to compact JSON, `Body::Xml` to XML text, and `Body::Bytes` verbatim.
-`Body::Empty` and `Body::Stream` fail before any command is sent. `HMSET` reads
-`CamelRedis.Values` or a JSON object body. See
-[ADR-0098](../../../docs/adr/0098-redis-value-contract.md).
+See [Value payload](#value-payload) for the body codec, the map and stream
+rules, and the removed payload headers ([ADR-0098](../../../docs/adr/0098-redis-value-contract.md)).
+
+### Value payload
+
+A writing command takes its payload from the exchange body only. No value
+header exists.
+
+| Body variant | Payload bytes |
+|--------------|---------------|
+| `Body::Text`, `Body::Xml` | UTF-8 bytes |
+| `Body::Json` holding a string | the raw characters, with no JSON quoting |
+| `Body::Json` holding any other value | compact JSON |
+| `Body::Bytes` | the bytes verbatim |
+| `Body::Empty`, `Body::Stream`, `Body::Json(null)` | rejected before send |
+
+`HMSET` and `MSET` take a JSON-object body, or a `Body::Text`/UTF-8
+`Body::Bytes` body that parses as a JSON object. Each entry value follows the
+scalar rule. A null entry fails before send. Binary map values are a documented
+limit, because the map body is JSON or UTF-8 text.
+
+`XADD` keeps its one-`body`-field rule. A JSON-object body contributes one
+field value that holds the compact JSON of the object. It is never split into
+one field per key.
+
+#### Removed headers and migration
+
+These headers are removed. A route that still sets one fails before any frame
+is sent, on the command set in the table.
+
+| Removed header | Command set |
+|----------------|-------------|
+| `CamelRedis.Value` | `SET`, `SETEX`, `SETNX`, `GETSET`, `APPEND`, `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LINSERT`, `LSET`, `LREM`, `SADD`, `SREM`, `SISMEMBER`, `SMOVE`, `ZADD`, `ZREM`, `ZRANK`, `ZREVRANK`, `ZSCORE`, `ZINCRBY`, `HSET`, `HSETNX`, `PUBLISH` |
+| `CamelRedis.Values` | `HMSET`, `MSET` |
+| `CamelRedis.Member` | `GEOADD` (payload only) |
+
+The error text is `"<header> was removed in 0.69; put the value in the body"`.
+`CamelRedis.Member`, `CamelRedis.Member2`, and `CamelRedis.Members` keep their
+addressing-operand roles on `GEOPOS`, `GEODIST`, `GEOSEARCH`, and `GEOHASH`.
+
+To migrate, move the header value into the body before the Redis step:
+
+```rust
+// Before
+let route = RouteBuilder::from("direct:store")
+    .set_header("CamelRedis.Key", Value::String("mykey".into()))
+    .set_header("CamelRedis.Value", Value::String(payload.clone()))
+    .to("redis://localhost:6379?command=SET")
+    .build()?;
+
+// After
+let route = RouteBuilder::from("direct:store")
+    .set_header("CamelRedis.Key", Value::String("mykey".into()))
+    .set_body(payload)
+    .to("redis://localhost:6379?command=SET")
+    .build()?;
+```
+
+A route that needs a fixed value and the original body for logging keeps the
+body in a property, then sets the fixed value as the body. The `enrich` EIP is
+the alternative when the payload comes from a second source.
 
 ## Example: Caching Layer
 
@@ -335,9 +389,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Example: Job Queue
 
 ```rust
-// Producer: Push jobs
+// Producer: Push the job body onto the list
 let producer = RouteBuilder::from("direct:submit-job")
     .set_header("CamelRedis.Key", Value::String("jobs".into()))
+    .set_body("job-42")
     .to("redis://localhost:6379?command=RPUSH")
     .build()?;
 

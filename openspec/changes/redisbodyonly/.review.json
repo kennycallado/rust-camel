@@ -1,0 +1,33 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "impl_hash_head": "e8eff6284 (fix commit on top of reviewed 33dde9e15)",
+  "date": "2026-11-14",
+  "passes": [
+    {
+      "session": "ses_e2713da96ffe3fZFyI86ilX2gG",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": "1 absurd-minor (Values tombstone literal duplication — discarded, convention-consistent)"
+    },
+    {
+      "session": "ses_e271af561ffeO857qBqpyfR1Fn",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": "2 minor (stale back-compat test names; get_value_header zero-caller doc) + 1 absurd-minor (linsert fixture inert header)"
+    },
+    {
+      "session": "ses_e270e9d2fffearg4NfuiR6bbFX",
+      "verdict": "APPROVE",
+      "note": "targeted re-review of fix commit e8eff6284 — all three minors resolved, no regressions, 626 lib tests pass"
+    }
+  ],
+  "resolved_findings": [
+    "renamed lpush_takes_the_exchange_body_when_value_header_is_absent -> lpush_takes_the_value_from_the_body",
+    "renamed hmset_takes_a_json_object_body_when_values_header_is_absent -> hmset_takes_a_json_object_body",
+    "get_value_header doc comment: generic infrastructure, not a payload path",
+    "test_linsert_has_pivot_and_position no longer sets HEADER_VALUE"
+  ],
+  "discarded_absurd_minors": [
+    "CamelRedis.Values tombstone literal duplicated in string.rs/hash.rs (hand-coded header names are the local convention; both sites wire-tested identical)"
+  ]
+}

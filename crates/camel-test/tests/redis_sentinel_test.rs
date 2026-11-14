@@ -37,7 +37,7 @@ use camel_component_api::test_support::{TEST_LOCK_DEADLINE, acquire_deadline};
 use camel_component_redis::{RedisComponent, RedisSentinelComponent};
 use camel_test::CamelTestContext;
 use redis::Commands;
-use support::REDIS_VALUE_HEADER;
+
 use support::send_to_direct;
 use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
@@ -390,8 +390,7 @@ async fn received_bodies(h: &CamelTestContext, endpoint: &str) -> Vec<String> {
 async fn send_set(h: &CamelTestContext, value: &str) -> bool {
     let before = received_bodies(h, "set-done").await.len();
     let mut ex = Exchange::default();
-    ex.input
-        .set_header(REDIS_VALUE_HEADER, Value::String(value.to_string()));
+    ex.input.body = Body::Text(value.to_string());
     let _ = send_to_direct(h, "direct:sentinel-set", ex).await;
     support::wait::wait_until(
         "SET exchange delivered",
@@ -470,8 +469,8 @@ async fn producer_recovers_after_sentinel_failover() {
     let h = sentinel_harness().await;
     let uri = sentinel_uri();
 
-    // The route pins CamelRedis.Key; CamelRedis.Value rides on each exchange
-    // so every probe attempt writes a distinct value.
+    // The route pins CamelRedis.Key; the body rides on each exchange so every
+    // probe attempt writes a distinct value.
     let set_route = RouteBuilder::from("direct:sentinel-set")
         .set_header("CamelRedis.Key", Value::String("failover:probe".into()))
         .to(format!("{uri}?command=SET"))

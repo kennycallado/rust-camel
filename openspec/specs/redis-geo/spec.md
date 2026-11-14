@@ -1,10 +1,13 @@
 # redis-geo Specification
 
 ## Purpose
+
 Redis geospatial commands in the producer. GEOADD, GEOPOS, GEODIST, GEOSEARCH
 (radius and box), and GEOHASH are exposed with argument validation, correct
 resolution and retry classification, and a typed geo surface on the Redis
-cache repository.
+cache repository. GEOADD takes its member from the exchange body.
+`CamelRedis.Member`, `CamelRedis.Member2`, and `CamelRedis.Members` remain
+addressing operands on GEOPOS, GEODIST, GEOSEARCH, and GEOHASH.
 
 ## Requirements
 ### Requirement: GEOADD stores a member with coordinates

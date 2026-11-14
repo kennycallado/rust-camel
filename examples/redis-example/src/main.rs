@@ -64,10 +64,7 @@ async fn main() -> Result<(), CamelError> {
     let string_producer = RouteBuilder::from("timer:tick?period=3000&repeatCount=3")
         .route_id("redis-string-producer")
         .set_header("CamelRedis.Key", Value::String("greeting".into()))
-        .set_header(
-            "CamelRedis.Value",
-            Value::String("hello from rust-camel!".into()),
-        )
+        .set_body("hello from rust-camel!")
         .to(format!("redis://{conn_str}?command=SET"))
         .to("log:info?showHeaders=true")
         .build()?;
@@ -92,10 +89,7 @@ async fn main() -> Result<(), CamelError> {
     let pubsub_producer = RouteBuilder::from("timer:pub?period=3000&repeatCount=2")
         .route_id("redis-pubsub-producer")
         .set_header("CamelRedis.Channel", Value::String("demo-channel".into()))
-        .set_header(
-            "CamelRedis.Value",
-            Value::String("pubsub message from rust-camel!".into()),
-        )
+        .set_body("pubsub message from rust-camel!")
         .to(format!("redis://{conn_str}?command=PUBLISH"))
         .to("log:info?showHeaders=true")
         .build()?;
@@ -106,7 +100,7 @@ async fn main() -> Result<(), CamelError> {
         .set_header("CamelRedis.Key", Value::String("sicily".into()))
         .set_header("CamelRedis.Longitude", Value::from(13.361389_f64))
         .set_header("CamelRedis.Latitude", Value::from(38.115556_f64))
-        .set_header("CamelRedis.Member", Value::String("Palermo".into()))
+        .set_body("Palermo")
         .set_header("CamelRedis.Radius", Value::from(200.0_f64))
         .set_header("CamelRedis.Unit", Value::String("km".into()))
         .set_header("CamelRedis.WithDist", Value::Bool(true))
