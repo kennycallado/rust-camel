@@ -190,6 +190,10 @@ of `get_conn`, `refresh`, or `reconnect` SHALL change.
 - **THEN** they are served from the cache without contending the
   single-flight gate (steady-state behavior unchanged)
 
+<!-- openspec-scenario-ops
+renamed: sequential reconnect semantics unchanged -> sequential refresh and get_conn semantics unchanged
+-->
+
 #### Scenario: sequential refresh and get_conn semantics unchanged
 
 - **GIVEN** the existing executor tests for `refresh` re-resolution,
