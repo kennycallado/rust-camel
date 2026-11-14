@@ -10,8 +10,11 @@
 //!
 //! `wait_for` / `wait_for_validation` poll under bounded
 //! `tokio::time::timeout` chunks with `tokio::task::yield_now` — no sleeps.
-//! The watched tests wait on the observable validation outcome; generation
-//! counters are only checked afterwards.
+//! The watched tests wait on the observable validation outcome, then on the
+//! generation counter: `commit` publishes the descriptor and increments the
+//! generation counter as two separate steps, so the counter advance is awaited
+//! under the same bounded poll after the validation outcome, then asserted
+//! exactly.
 //!
 //! Route ids are unique per test because the reload registry is
 //! process-global.
@@ -349,8 +352,8 @@ async fn proto_edit_recompiles_validator_descriptor() {
         "the schema edit must make the newly added field validate"
     );
     assert!(
-        generation(route_id) > gen_before,
-        "schema edit must commit a new descriptor generation"
+        wait_for(|| generation(route_id) > gen_before, WAIT_BOUND).await,
+        "watcher must commit the reload generation for the edit"
     );
     assert_eq!(
         generation(route_id),
@@ -385,8 +388,8 @@ async fn import_edit_recompiles_validator_descriptor() {
         "the import edit must make the field added to the import validate"
     );
     assert!(
-        generation(route_id) > gen_before,
-        "import-only edit must commit a new descriptor generation"
+        wait_for(|| generation(route_id) > gen_before, WAIT_BOUND).await,
+        "watcher must commit the reload generation for the import edit"
     );
 
     harness.stop().await;

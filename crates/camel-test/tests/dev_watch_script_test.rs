@@ -182,8 +182,10 @@ async fn start_harness(project: tempfile::TempDir) -> Harness {
         .await
         .expect("context build");
     ctx.register_component(DirectComponent::new());
-    ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
-        .expect("rhai language registration");
+    if ctx.resolve_language("rhai").is_none() {
+        ctx.register_language("rhai", Box::new(RhaiLanguage::new()))
+            .expect("rhai language registration");
+    }
     for def in defs {
         ctx.add_route_definition(def)
             .await

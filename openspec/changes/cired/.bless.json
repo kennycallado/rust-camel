@@ -1,0 +1,25 @@
+{
+  "kind": "plan",
+  "change": "cired",
+  "verdict": "APPROVE",
+  "hash": "sha256:ceef501b9456e92a2dbbf236a3304b5f570caf533cb2e6b407d52a8b314081ce",
+  "expert": "experts/e_gpt",
+  "session": "ses_e2724bc29ffeWciCjSOEIkaDYA",
+  "date": "2026-11-14",
+  "history": [
+    {
+      "verdict": "APPROVE-WITH-FIXES",
+      "hash": "sha256:e93021047fe4bedae66dc05e2635dbbcfc9a2f7d09d88c14b163ca790a4e9f70",
+      "fixes": [
+        "add explicit closeout block: combined suite twice, workspace build, gates-local, executable scope allowlist check"
+      ]
+    },
+    {
+      "verdict": "APPROVE-WITH-FIXES",
+      "hash": "sha256:5ca3fdc2e3a8feb8b8ec519393b15fd8adc13d6e4c4bd8ea9dab66955b6585f5",
+      "fixes": [
+        "scope check made executable: clean-worktree precondition + violations pipeline that exits nonzero"
+      ]
+    }
+  ]
+}

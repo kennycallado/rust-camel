@@ -1,0 +1,20 @@
+{
+  "kind": "holistic-review",
+  "change": "cired",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e26ee84a2ffeO7Msi8eytWC1pF",
+  "impl_hash": "sha256:4b2b291a8020e5d7073141084b0ded42b046af10f37993108d07f6384ad0fc4a",
+  "base": "89c52e82d",
+  "head": "ac378478a",
+  "date": "2026-11-14",
+  "gate_table": {
+    "cargo fmt --check --all": 0,
+    "cargo clippy -p camel-test --all-targets -- -D warnings": 0,
+    "cargo test --workspace --test dev_watch_script_test --test dev_watch_proto_test --test route_example_parser_sweep (run 1)": 0,
+    "cargo test --workspace --test dev_watch_script_test --test dev_watch_proto_test --test route_example_parser_sweep (run 2)": 0,
+    "cargo build --workspace": 0,
+    "cd docs && mdbook test": 0,
+    "bash scripts/gates-local.sh": 0
+  }
+}
