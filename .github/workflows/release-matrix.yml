@@ -164,8 +164,13 @@ jobs:
         if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
         with:
           toolchain: stable
+      # Save only on release tags and manual dispatch. Dev builds run on
+      # every main push and would spend the shared 10 GB quota on a cache
+      # that is only read by the next dev build (bd rc-ve2ba).
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         if: ${{ !inputs.dev-profile || matrix.in-dev-profile }}
+        with:
+          save-if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
       - name: Install cmake (Windows)
         if: ${{ matrix.os == 'windows-latest' && (!inputs.dev-profile || matrix.in-dev-profile) }}
@@ -355,7 +360,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
+      # Release notes only need xtask; same quota rule as the build job (bd rc-ve2ba).
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          save-if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
       - name: Generate release notes
         id: notes

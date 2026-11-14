@@ -36,7 +36,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
+      # Restore-only: documentation is far below the CI critical path and its
+      # target cache would evict the jobs that set it (bd rc-ve2ba).
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          save-if: false
       - name: Install documentation tools
         uses: taiki-e/install-action@eba66cc6f87204a1e73f96e528e759b6c1fcf573 # cargo-binstall
         with:
