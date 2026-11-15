@@ -92,6 +92,7 @@ impl Component for SqlComponent {
         ctx: &dyn camel_component_api::ComponentContext,
     ) -> Result<Box<dyn Endpoint>, CamelError> {
         let mut config = SqlEndpointConfig::from_uri(uri)?;
+        config.validate_transaction_mode(uri)?;
 
         if config.datasource_name.is_some() && self.catalog.is_none() {
             return Err(CamelError::Config(
@@ -212,6 +213,65 @@ mod tests {
         let ctx = NoOpComponentContext;
         let ep = c.create_endpoint("redis://localhost", &ctx);
         assert!(ep.is_err());
+    }
+
+    #[test]
+    fn create_endpoint_rejects_managed_transaction_mode() {
+        let c = SqlComponent::new();
+        let ctx = NoOpComponentContext;
+        let Err(e) = c.create_endpoint(
+            "sql:select 1?db_url=postgres://user:s3cr3tpass@localhost/test&transactionMode=Managed",
+            &ctx,
+        ) else {
+            panic!("expected rejection");
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("Managed"), "message must name Managed: {msg}");
+        assert!(msg.contains("rc-qv2iz"), "message must cite bd: {msg}");
+        assert!(
+            msg.contains("sql:select 1"),
+            "message must name the endpoint: {msg}"
+        );
+        assert!(
+            !msg.contains("s3cr3tpass"),
+            "message must redact credentials: {msg}"
+        );
+    }
+
+    #[test]
+    fn create_endpoint_accepts_auto_transaction_mode() {
+        let c = SqlComponent::new();
+        let ctx = NoOpComponentContext;
+        let result = c.create_endpoint(
+            "sql:select 1?db_url=postgres://localhost/test&transactionMode=Auto",
+            &ctx,
+        );
+        assert!(result.is_ok(), "Auto must be accepted");
+    }
+
+    #[test]
+    fn managed_reject_is_config_error_not_parse_error() {
+        let c = SqlComponent::new();
+        let ctx = NoOpComponentContext;
+        let Err(e) = c.create_endpoint(
+            "sql:select 1?db_url=postgres://localhost/test&transactionMode=Managed",
+            &ctx,
+        ) else {
+            panic!("expected rejection");
+        };
+        assert!(
+            matches!(e, CamelError::Config(_)),
+            "reject must be a Config error, got: {e:?}"
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("transactionMode=Auto"),
+            "message must state the workaround: {msg}"
+        );
+        assert!(
+            msg.contains("multi-statement"),
+            "message must state the workaround shape: {msg}"
+        );
     }
 
     #[test]

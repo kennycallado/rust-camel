@@ -74,8 +74,10 @@ impl FromStr for SqlOutputType {
 /// Transaction mode for SQL operations.
 ///
 /// - `Auto`: Each statement auto-commits (default, current behavior).
-/// - `Managed`: Explicit transaction boundaries (future; currently logs a warning
-///   and falls back to Auto).
+/// - `Managed`: Explicit transaction boundaries (not implemented).
+///   `SqlComponent::create_endpoint` rejects this value with a `CamelError::Config`
+///   naming bd `rc-qv2iz`; direct `SqlEndpoint::new*` construction bypasses that
+///   validation, so the producer/consumer safety-net warn still applies there.
 ///
 // TODO(SQL-002): managed transaction mode — implement explicit transaction boundaries
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -725,6 +727,29 @@ impl SqlEndpointConfig {
     pub fn resolve_defaults(&mut self) {
         let defaults = SqlGlobalConfig::default();
         self.apply_defaults(&defaults);
+    }
+
+    /// Reject `transactionMode=Managed`, which is parsed but not implemented.
+    ///
+    /// `from_uri` accepts `"Managed"` so that the failure reads as a
+    /// deliberate reject with guidance instead of an unknown-value parse
+    /// error. Endpoint creation calls this before any catalog lookup or
+    /// health-check registration, so a Managed route fails at load with no
+    /// side effects.
+    ///
+    /// `uri` names the rejected endpoint in the error and is rendered through
+    /// [`camel_api::redact::redact_url`] — SQL URIs carry credentials in
+    /// `db_url`, and endpoint-creation errors can reach logs.
+    ///
+    /// Direct `SqlEndpoint::new*` construction bypasses this check.
+    pub fn validate_transaction_mode(&self, uri: &str) -> Result<(), CamelError> {
+        match self.transaction_mode {
+            TransactionMode::Auto => Ok(()),
+            TransactionMode::Managed => Err(CamelError::Config(format!(
+                "transactionMode=Managed is not implemented (bd rc-qv2iz); rejected endpoint '{}'. Use transactionMode=Auto with a single multi-statement sql: step: on statement failure the call is rolled back and the connection is reused; the connection is discarded only if the rollback itself fails or cleanup is cancelled.",
+                camel_api::redact::redact_url(uri)
+            ))),
+        }
     }
 
     /// Asynchronously read the SQL query from the file referenced by `source_path`.

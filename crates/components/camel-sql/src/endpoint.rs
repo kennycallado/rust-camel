@@ -17,6 +17,10 @@ pub(crate) struct SqlEndpoint {
     pub(crate) catalog: Option<Arc<dyn DatasourceCatalog>>,
 }
 
+// URI-surface construction validates `transactionMode` in
+// `SqlEndpointConfig::validate_transaction_mode` (called from
+// `SqlComponent::create_endpoint`); these constructors take a config by value and
+// cannot reject, so programmatic callers may still pass `Managed`.
 impl SqlEndpoint {
     #[cfg(test)]
     pub fn new(uri: String, config: SqlEndpointConfig) -> Self {

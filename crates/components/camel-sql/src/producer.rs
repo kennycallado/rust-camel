@@ -248,7 +248,10 @@ impl Service<Exchange> for SqlProducer {
             // Resolve query string
             let query_str = Self::resolve_query_source(&exchange, &config);
 
-            // SQL-002: warn if Managed transaction mode requested
+            // SQL-002: unreachable through the URI surface — `create_endpoint` rejects
+            // `transactionMode=Managed` first (`validate_transaction_mode`). Kept as a
+            // safety net for programmatic construction via `SqlEndpoint::new*`, which
+            // bypasses validation.
             if config.transaction_mode == crate::config::TransactionMode::Managed {
                 warn!("transactionManager not yet implemented; using Auto mode");
             }
