@@ -51,7 +51,7 @@ fn test_component_metrics() -> camel_api::ComponentMetrics {
 
 use super::*;
 use crate::config::TlsConfig;
-use crate::rest_match::PathSegment;
+use crate::rest_match::{SegmentPart, SegmentPattern};
 use crate::tls_harness::*;
 use camel_component_api::test_support::http::{
     HttpTestServer, Responder, Response, ResponseHeaders, serve_connection,
@@ -62,6 +62,25 @@ use std::time::Duration;
 
 fn test_producer_ctx() -> ProducerContext {
     ProducerContext::new()
+}
+
+/// REST template segment made of one literal part.
+fn literal_segment(text: &str) -> SegmentPattern {
+    SegmentPattern {
+        parts: vec![SegmentPart::Lit(text.to_string())],
+    }
+}
+
+/// REST template segment made of one `{name}` placeholder part.
+fn param_segment(name: &str) -> SegmentPattern {
+    SegmentPattern {
+        parts: vec![SegmentPart::Param(name.to_string())],
+    }
+}
+
+/// Parse a test REST template, panicking on a malformed fixture.
+fn test_rest_segments(template: &str) -> Vec<SegmentPattern> {
+    crate::rest_match::parse_path_template(template).expect("test template is well formed")
 }
 
 // -----------------------------------------------------------------------
@@ -4351,6 +4370,66 @@ async fn test_http_consumer_start_rejects_oversized_before_spawn() {
     token.cancel();
 }
 
+/// A malformed REST path template must fail during configuration
+/// validation, BEFORE `ServerRegistry::get_or_spawn` runs. Spawning first
+/// would leave a process-lifetime listener accepting connections on the
+/// port forever (`unregister` deliberately retains servers), so a failed
+/// start must leave the registry with nothing for that address.
+#[tokio::test]
+async fn malformed_template_start_neither_spawns_nor_retains_listener() {
+    use camel_component_api::ConsumerContext;
+
+    // ADR-0070 staged-listener law: stage the pre-bound listener instead
+    // of probing a port. The parse fails before the registry is touched, so
+    // the staged socket is never consumed — which is the point of the
+    // assertion below.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    ServerRegistry::global()
+        .stage_listener(listener)
+        .await
+        .expect("stage consumer test listener");
+
+    let consumer_cfg = HttpServerConfig {
+        scheme: "http".to_string(),
+        host: "127.0.0.1".to_string(),
+        port,
+        // Unterminated `{` placeholder: malformed REST template.
+        path: "/files/{id.xml".to_string(),
+        max_request_body: 2 * 1024 * 1024,
+        max_response_body: 10 * 1024 * 1024,
+        max_inflight_requests: 1024,
+        method: Some("GET".to_string()),
+        tls_config: None,
+    };
+    let mut consumer = HttpConsumer::new(consumer_cfg, test_rt());
+
+    let (tx, _rx) = tokio::sync::mpsc::channel::<camel_component_api::ExchangeEnvelope>(16);
+    let token = tokio_util::sync::CancellationToken::new();
+    let ctx = ConsumerContext::new(tx, token.clone(), "rest-malformed-route".to_string());
+
+    match consumer.start(ctx).await {
+        Err(CamelError::Config(msg)) => {
+            assert!(
+                msg.contains("malformed REST path template"),
+                "message was: {msg}"
+            );
+            assert!(msg.contains("/files/{id.xml"), "message was: {msg}");
+        }
+        other => panic!("expected CamelError::Config, got: {other:?}"),
+    }
+
+    // Parse failed before `get_or_spawn`: no listener was spawned (and
+    // therefore none is retained) for this address.
+    assert!(
+        ServerRegistry::global()
+            .bound_addr("127.0.0.1", port)
+            .is_none(),
+        "malformed template must not spawn a listener for 127.0.0.1:{port}"
+    );
+    token.cancel();
+}
+
 /// bd rc-ns3yc: defense-in-depth — `spawn_entry` must reject an
 /// oversized max_inflight_requests before any listener side effect and
 /// before `tokio::sync::Semaphore::new` is reached (which would panic).
@@ -8307,7 +8386,7 @@ async fn method_aware_dispatch_same_path_different_verbs() {
     registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![PathSegment::Literal("users".into())],
+            vec![literal_segment("users")],
             get_tx,
             test_component_metrics(),
         )
@@ -8318,7 +8397,7 @@ async fn method_aware_dispatch_same_path_different_verbs() {
     registry
         .register_rest_endpoint(
             "POST".into(),
-            vec![PathSegment::Literal("users".into())],
+            vec![literal_segment("users")],
             post_tx,
             test_component_metrics(),
         )
@@ -8366,10 +8445,7 @@ async fn method_aware_dispatch_templated_path_extracts_params() {
     registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![
-                PathSegment::Literal("users".into()),
-                PathSegment::Param("id".into()),
-            ],
+            vec![literal_segment("users"), param_segment("id")],
             tx,
             test_component_metrics(),
         )
@@ -8422,7 +8498,7 @@ async fn method_aware_dispatch_unmatched_method_falls_through() {
     _registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![PathSegment::Literal("users".into())],
+            vec![literal_segment("users")],
             get_tx,
             test_component_metrics(),
         )
@@ -8560,7 +8636,7 @@ async fn deregister_one_method_keeps_sibling_verbs() {
     registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![PathSegment::Literal("users".into())],
+            vec![literal_segment("users")],
             get_tx,
             test_component_metrics(),
         )
@@ -8571,7 +8647,7 @@ async fn deregister_one_method_keeps_sibling_verbs() {
     registry
         .register_rest_endpoint(
             "POST".into(),
-            vec![PathSegment::Literal("users".into())],
+            vec![literal_segment("users")],
             post_tx,
             test_component_metrics(),
         )
@@ -8632,10 +8708,7 @@ async fn dispatch_exact_legacy_beats_rest_template() {
     registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![
-                PathSegment::Literal("api".into()),
-                PathSegment::Param("resource".into()),
-            ],
+            vec![literal_segment("api"), param_segment("resource")],
             tpl_tx,
             test_component_metrics(),
         )
@@ -8691,10 +8764,7 @@ async fn ambiguous_rest_templates_return_500_not_silent_404() {
     registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![
-                PathSegment::Literal("users".into()),
-                PathSegment::Param("id".into()),
-            ],
+            vec![literal_segment("users"), param_segment("id")],
             a_tx,
             test_component_metrics(),
         )
@@ -8705,10 +8775,7 @@ async fn ambiguous_rest_templates_return_500_not_silent_404() {
     registry
         .register_rest_endpoint(
             "GET".into(),
-            vec![
-                PathSegment::Literal("users".into()),
-                PathSegment::Param("name".into()),
-            ],
+            vec![literal_segment("users"), param_segment("name")],
             b_tx,
             test_component_metrics(),
         )
@@ -11726,7 +11793,7 @@ async fn test_duplicate_registry_registration_is_atomic() {
                         registry
                             .register_rest_endpoint(
                                 "GET".into(),
-                                rest_match::parse_path_template("/users/{id}"),
+                                test_rest_segments("/users/{id}"),
                                 sender,
                                 test_component_metrics(),
                             )
@@ -11877,7 +11944,7 @@ async fn test_register_unregister_swap_visibility() {
     registry
         .register_rest_endpoint(
             "GET".to_string(),
-            rest_match::parse_path_template("/users/{id}"),
+            test_rest_segments("/users/{id}"),
             rest_tx.clone(),
             test_component_metrics(),
         )
@@ -13036,4 +13103,64 @@ async fn consume_switched_off_still_forwards_errors() {
     assert_eq!(recorder.errors(), vec![consume_error()]);
 
     token.cancel();
+}
+
+// ---------------------------------------------------------------------------
+// Task 1.3: CamelHttpPath_<param> header translation
+// ---------------------------------------------------------------------------
+
+/// Match `path` against the single `(method, template)` endpoint and translate
+/// the resulting captures through `path_param_headers`.
+fn path_headers_for_template(method: &str, template: &str, path: &str) -> Vec<(String, String)> {
+    let endpoint = crate::rest_match::RestEndpoint {
+        method: method.to_string(),
+        segments: crate::rest_match::parse_path_template(template)
+            .expect("test template is well formed"),
+        payload: (),
+    };
+    let outcome = crate::rest_match::match_endpoint(method, path, &[endpoint]);
+    match outcome {
+        crate::rest_match::MatchOutcome::Found(result) => path_param_headers(&result.path_params),
+        other => panic!("expected Found for {method} {path} against {template}, got {other:?}"),
+    }
+}
+
+#[test]
+fn camel_http_path_headers_from_mixed_segment() {
+    // Arrange / Act
+    let headers = path_headers_for_template("GET", "/files/{id}.xml", "/files/42.xml");
+
+    // Assert
+    assert!(
+        headers.contains(&("CamelHttpPath_id".to_string(), "42".to_string())),
+        "mixed-segment capture must become a CamelHttpPath_id header; got {headers:?}"
+    );
+}
+
+#[test]
+fn camel_http_path_headers_multi_param_segment() {
+    // Arrange / Act
+    let mut headers = path_headers_for_template("GET", "/{a}-{b}", "/1-2-3");
+
+    // Assert
+    headers.sort();
+    assert_eq!(
+        headers,
+        vec![
+            ("CamelHttpPath_a".to_string(), "1".to_string()),
+            ("CamelHttpPath_b".to_string(), "2-3".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn camel_http_path_headers_braces_are_values() {
+    // Arrange / Act
+    let headers = path_headers_for_template("GET", "/files/{id}.xml", "/files/{oops}.xml");
+
+    // Assert
+    assert!(
+        headers.contains(&("CamelHttpPath_id".to_string(), "{oops}".to_string())),
+        "request braces are data and must be forwarded verbatim; got {headers:?}"
+    );
 }

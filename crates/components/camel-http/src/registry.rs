@@ -117,11 +117,10 @@ impl Default for HttpRouteRegistry {
     }
 }
 
-/// Bench-only re-export so `benches/registry.rs` can build REST templates
-/// without access to the crate-private `rest_match` module. Not a stable
-/// API.
+/// Convenience re-export for `benches/registry.rs`, which builds REST
+/// templates through the registry module. Not a stable API.
 #[doc(hidden)]
-pub use crate::rest_match::PathSegment;
+pub use crate::rest_match::{SegmentPart, SegmentPattern};
 
 /// Outcome of the bench-only lookup probe. Mirrors `dispatch_handler`'s
 /// read path: exact legacy hit, REST hit, ambiguous template match, or miss.
@@ -193,7 +192,7 @@ impl HttpRouteRegistry {
     pub async fn register_rest_endpoint(
         &self,
         method: String,
-        segments: Vec<crate::rest_match::PathSegment>,
+        segments: Vec<crate::rest_match::SegmentPattern>,
         sender: mpsc::Sender<RequestEnvelope>,
         metrics: camel_api::ComponentMetrics,
     ) -> Result<(), CamelError> {
@@ -209,9 +208,15 @@ impl HttpRouteRegistry {
         {
             let template = segments
                 .iter()
-                .map(|segment| match segment {
-                    crate::rest_match::PathSegment::Literal(value) => value.clone(),
-                    crate::rest_match::PathSegment::Param(name) => format!("{{{name}}}"),
+                .map(|segment| {
+                    segment
+                        .parts
+                        .iter()
+                        .map(|part| match part {
+                            crate::rest_match::SegmentPart::Lit(value) => value.clone(),
+                            crate::rest_match::SegmentPart::Param(name) => format!("{{{name}}}"),
+                        })
+                        .collect::<String>()
                 })
                 .collect::<Vec<_>>()
                 .join("/");
@@ -237,7 +242,11 @@ impl HttpRouteRegistry {
     /// the `GET /users` consumer must not tear down the live `POST /users`
     /// endpoint (the core REST multi-verb use case). Fixes review C1.
     pub async fn unregister_rest_endpoint(&self, method: &str, path_template: &str) {
-        let target_segments = crate::rest_match::parse_path_template(path_template);
+        // A malformed template can never have been registered (the consumer
+        // start path parses and rejects it), so unregistering one is a no-op.
+        let Ok(target_segments) = crate::rest_match::parse_path_template(path_template) else {
+            return;
+        };
         let _gate = self
             .writer_gate
             .lock()

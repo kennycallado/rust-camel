@@ -1,0 +1,9 @@
+{
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_gpt",
+  "impl_hash": "4c9692ce32799ac380bb328e6048649d8d12b57d55c594569a26ea80eaf7d035",
+  "change": "restpath",
+  "kind": "holistic",
+  "rounds": "1 REJECT (listener-before-validation important; stale tie-doc minor) -> fixes -> APPROVE",
+  "date": "2026-11-15"
+}

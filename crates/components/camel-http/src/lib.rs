@@ -7,7 +7,7 @@ pub mod health;
 #[cfg(test)]
 mod health_wiring_tests;
 pub mod registry;
-pub(crate) mod rest_match;
+pub mod rest_match;
 pub(crate) mod ssrf;
 pub mod static_config;
 pub mod static_dispatch;
@@ -886,6 +886,22 @@ pub struct RequestEnvelope {
     /// `CamelHttpPath_<param>` headers on the Exchange (expert guidance E2).
     pub path_params: std::collections::HashMap<String, String>,
     pub reply_tx: tokio::sync::oneshot::Sender<HttpReply>,
+}
+
+/// Translate matched REST path parameters into `CamelHttpPath_<name>`
+/// Exchange headers.
+///
+/// Expert guidance E2: the consumer is responsible for translating the
+/// dispatcher's matched params (see [`RequestEnvelope::path_params`]) into
+/// `CamelHttpPath_<param>` headers, matching the convention used by Camel
+/// HTTP for templated routes. Returns `(header_name, value)` pairs in
+/// unspecified order; an empty map yields no headers.
+#[must_use]
+pub(crate) fn path_param_headers(path_params: &HashMap<String, String>) -> Vec<(String, String)> {
+    path_params
+        .iter()
+        .map(|(name, value)| (format!("CamelHttpPath_{name}"), value.clone()))
+        .collect()
 }
 
 /// The HTTP response that `HttpConsumer` sends back to the Axum handler.
@@ -2043,6 +2059,26 @@ impl Consumer for HttpConsumer {
         // reach Semaphore::new (panic).
         max_inflight_requests_limit(self.config.max_inflight_requests)?;
 
+        // Parse the REST path template BEFORE any registry interaction: a
+        // malformed template is a configuration error and must fail without
+        // spawning a listener. The registry keeps servers process-lifetime
+        // (`unregister` is a no-op), so spawning first and failing after
+        // would leave an orphan listener holding the port for the rest of
+        // the process.
+        let rest_endpoint = match &self.config.method {
+            Some(method) => {
+                let segments =
+                    rest_match::parse_path_template(&self.config.path).map_err(|err| {
+                        CamelError::Config(format!(
+                            "malformed REST path template '{}': {err}",
+                            self.config.path
+                        ))
+                    })?;
+                Some((method.clone(), segments))
+            }
+            None => None,
+        };
+
         let registry = ServerRegistry::global()
             .get_or_spawn(
                 &self.config.host,
@@ -2072,8 +2108,7 @@ impl Consumer for HttpConsumer {
         // Otherwise fall back to the legacy path-only api_routes
         // registry. The two registries never overlap for the same
         // route: each consumer registers in exactly one of them.
-        if let Some(method) = self.config.method.clone() {
-            let segments = rest_match::parse_path_template(&self.config.path);
+        if let Some((method, segments)) = rest_endpoint {
             registry
                 .register_rest_endpoint(method, segments, env_tx, route_metrics)
                 .await?;
@@ -2159,12 +2194,11 @@ impl Consumer for HttpConsumer {
                     // responsible for translating the dispatcher's
                     // matched params into `CamelHttpPath_<param>`
                     // headers on the Exchange, matching the convention
-                    // used by Camel HTTP for templated routes.
-                    for (param_name, param_value) in &envelope.path_params {
-                        msg.set_header(
-                            format!("CamelHttpPath_{param_name}"),
-                            serde_json::Value::String(param_value.clone()),
-                        );
+                    // used by Camel HTTP for templated routes. The
+                    // translation lives in `path_param_headers` so it is
+                    // testable without a running server.
+                    for (header_name, header_value) in path_param_headers(&envelope.path_params) {
+                        msg.set_header(header_name, serde_json::Value::String(header_value));
                     }
 
                     // Forward HTTP headers with Title-Case names (hyper lowercases them)

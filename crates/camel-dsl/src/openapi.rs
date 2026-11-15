@@ -105,8 +105,13 @@ fn build_operation(
     full_path: &str,
     warnings: &mut Vec<String>,
 ) -> Value {
-    let segments = parse_path_template(full_path);
-    let param_names = extract_param_names(&segments);
+    let param_names = match parse_path_template(full_path) {
+        Ok(segments) => extract_param_names(&segments),
+        Err(err) => {
+            warnings.push(format!("path '{full_path}': {err}"));
+            Vec::new()
+        }
+    };
 
     // I2: path-template params (inferred as string), with declared overrides
     let mut parameters: Vec<Value> = param_names

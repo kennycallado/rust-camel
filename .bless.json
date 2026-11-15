@@ -1,14 +1,8 @@
 {
-  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:abab50c358837b9fae116a9fa6c37731f6bda82df1982c45f47215d35afff242",
   "expert": "experts/e_gpt",
-  "verdict": "BLESSED",
-  "hash": "sha256:b505acb7547196253697a962fde071cf5eebcbd673b36051a1c85d305c1d4ef6",
-  "note": "Supersedes the spec-stage blessing (e5f6ef36..., commit 54007a925) per conductor flow. Plan history: r_glm review REJECT round 1 (stream-gating regression, camel-builder dev-dep, zip/tar placement, ByPattern arms, site-7 untested) -> all applied; r_glm APPROVE-WITH-FINDINGS round 2 (round-trip test rewrites, case-sensitive ByPattern remove, recorded-value read) -> applied verbatim; e_gpt plan-bless round 1 REJECT (six fix categories: api root exports, function-patch consumed vectors, WASM property-merge ordering, CXF/helper seams, site-13 restoration coverage, honest TDD) -> all applied; e_gpt plan-bless round 2 BLESSED (ses_e53aecdaaffeNf6oj05dWryjBH, evidence /tmp/nix-shell.9NGiG3/opencode/http-content-type-provenance-plan-grill-round2.md). Master authorization covered two plan-bless rounds; both consumed.",
-  "spec_trail": {
-    "final_spec_bless": "sha256:e5f6ef36dd85c6000f5faab15952964614e269604b699a4b132872df07932442",
-    "committed_as": "54007a925 spec(http-content-type-provenance): blessed",
-    "rounds": 6,
-    "round_1_to_3": "conductor autopilot (budget cap hit, see previous park)",
-    "round_4_to_6": "master conductor authorized"
-  }
+  "kind": "plan",
+  "change": "restpath",
+  "date": "2026-11-15"
 }

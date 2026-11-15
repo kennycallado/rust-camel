@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt;
 
 use camel_api::CamelError;
 
@@ -21,9 +22,11 @@ use crate::route_ast::{
 ///   (spec §6.3). With `operations` now a `Vec`, within-block collisions are
 ///   also possible and are caught by this same `registered` check.
 /// - **Ambiguous templates** — on the SAME listener, two templates of the SAME
-///   method, SAME segment count, SAME specificity (literal count), that could
-///   BOTH match some request are rejected at compile time. The canonical case
-///   is `/users/{id}` vs `/users/{name}`.
+///   method, SAME segment count, SAME `(L, C)` specificity, whose segment
+///   languages overlap at EVERY position are rejected at compile time, because
+///   some request could match both. The canonical case is `/users/{id}` vs
+///   `/users/{name}`; `/ab{x}` vs `/a{y}b` is ambiguous too (both match
+///   `/abb`).
 ///
 /// Different verbs on the same path (the normal REST `GET`/`DELETE`/…
 /// coexistence) are NOT ambiguous — ambiguity is per-method.
@@ -31,12 +34,13 @@ pub fn lower_all_rest_to_routes(
     rest_blocks: &[RouteDslRest],
 ) -> Result<Vec<RouteDslRoute>, CamelError> {
     let mut routes = Vec::new();
-    // `(host, port, method_upper, segments)` accumulator for duplicate +
-    // ambiguity checks. Detection is scoped per listener (host, port):
-    // different host:port combinations are independent servers, so the same
-    // (method, path) on two different listeners is NOT a duplicate. Only the
-    // same (host, port, method, path) collides (spec §6.3).
-    let mut registered: Vec<(String, u16, String, Vec<PathSegment>)> = Vec::new();
+    // Per-listener accumulator for duplicate + ambiguity checks. Detection is
+    // scoped per listener (host, port): different host:port combinations are
+    // independent servers, so the same (method, path) on two different
+    // listeners is NOT a duplicate. Only the same (host, port, method, path)
+    // collides (spec §6.3). The first operation's label and full path ride
+    // along so the ambiguity diagnostic can name BOTH sides.
+    let mut registered: Vec<RegisteredPath> = Vec::new();
 
     for rest in rest_blocks {
         validate_rest_block(rest)?;
@@ -45,12 +49,19 @@ pub fn lower_all_rest_to_routes(
             let verb_upper = op.method.to_uppercase();
             let verb_lc = op.method.to_lowercase();
             let full_path = build_full_path(&rest.path, &op.path);
-            let segs = parse_path_template(&full_path);
             let op_label = op.operation_id.as_deref().unwrap_or(&verb_lc);
+            let segs = parse_path_template(&full_path).map_err(|err| {
+                CamelError::RouteError(format!(
+                    "rest operation '{op_label}': path '{full_path}': {err}"
+                ))
+            })?;
 
             // Duplicate (host, port, method, path) tuple on the SAME listener?
-            if registered.iter().any(|(h, p, m, s)| {
-                h == &rest.host && *p == rest.port && m == &verb_upper && *s == segs
+            if registered.iter().any(|other| {
+                other.host == rest.host
+                    && other.port == rest.port
+                    && other.verb == verb_upper
+                    && other.segments == segs
             }) {
                 return Err(CamelError::RouteError(format!(
                     "rest operation '{op_label}': duplicate (method, path) tuple \
@@ -60,28 +71,46 @@ pub fn lower_all_rest_to_routes(
                 )));
             }
             // Ambiguous template (same listener, same method, overlapping
-            // shape, equal specificity)?
-            for (h, p, m, s) in &registered {
-                if h == &rest.host
-                    && *p == rest.port
-                    && m == &verb_upper
-                    && templates_ambiguous(s, &segs)
+            // shape, equal (L, C) specificity)?
+            for other in &registered {
+                if other.host == rest.host
+                    && other.port == rest.port
+                    && other.verb == verb_upper
+                    && templates_ambiguous(&other.segments, &segs)
                 {
                     return Err(CamelError::RouteError(format!(
                         "rest operation '{op_label}': path '{full_path}' is ambiguous \
-                         with an existing template of equal specificity for method \
-                         {verb_upper} on listener {}:{} (spec §7.2) — disambiguate by \
-                         making one path more specific",
-                        rest.host, rest.port
+                         with operation '{}' path '{}' of equal specificity for \
+                         method {verb_upper}",
+                        other.op_label, other.full_path
                     )));
                 }
             }
-            registered.push((rest.host.clone(), rest.port, verb_upper, segs));
+            registered.push(RegisteredPath {
+                host: rest.host.clone(),
+                port: rest.port,
+                verb: verb_upper,
+                segments: segs,
+                op_label: op_label.to_string(),
+                full_path,
+            });
             routes.push(route);
         }
     }
 
     Ok(routes)
+}
+
+/// One already-lowered operation, kept for the per-listener duplicate and
+/// ambiguity checks. Carrying the first operation's label and full path lets
+/// the ambiguity error name both operations.
+struct RegisteredPath {
+    host: String,
+    port: u16,
+    verb: String,
+    segments: Vec<SegmentPattern>,
+    op_label: String,
+    full_path: String,
 }
 
 /// Expand REST blocks into route entries and append them to `routes`.
@@ -165,21 +194,19 @@ fn seam_error_mapping(table: Option<&HttpErrorMappingTable>) -> camel_api::HttpE
     }
 }
 
-/// Validate a path template: reject empty `{}` param segments and duplicate
+/// Validate a path template: reject malformed brace syntax and duplicate
 /// param names within one path. Uses the path-template helpers so they earn
 /// their keep in production (review I1) rather than existing only for tests.
 fn validate_path_template(full_path: &str, op_label: &str) -> Result<(), CamelError> {
-    let segs = parse_path_template(full_path);
-    for seg in &segs {
-        if let PathSegment::Param(name) = seg
-            && name.is_empty()
-        {
-            return Err(CamelError::RouteError(format!(
-                "rest operation '{op_label}': path '{full_path}' contains an empty \
-                 parameter '{{}}' — parameter names are required"
-            )));
-        }
-    }
+    let segs = parse_path_template(full_path).map_err(|err| {
+        CamelError::RouteError(match err {
+            TemplateParseError::EmptyPlaceholder { .. } => format!(
+                "rest operation '{op_label}': path '{full_path}': {err} — parameter names \
+                 are required"
+            ),
+            _ => format!("rest operation '{op_label}': path '{full_path}': {err}"),
+        })
+    })?;
     let param_names = extract_param_names(&segs);
     let mut seen = std::collections::HashSet::new();
     for name in &param_names {
@@ -193,27 +220,117 @@ fn validate_path_template(full_path: &str, op_label: &str) -> Result<(), CamelEr
     Ok(())
 }
 
-/// Two templates are ambiguous iff they could BOTH match at least one
-/// request with equal specificity: same length, same literal count, and at
-/// every position the segments are compatible (both params, both equal
-/// literals, or one literal + one param). Differing literals at any position
-/// mean no single request can match both, so they are not ambiguous.
-/// Used by [`lower_all_rest_to_routes`] (review C3 + I1).
-fn templates_ambiguous(a: &[PathSegment], b: &[PathSegment]) -> bool {
+/// Two templates are ambiguous iff some single request could match BOTH with
+/// equal specificity: same segment count, same `(L, C)` specificity, and the
+/// segment languages intersect at every position. Differing literals that no
+/// single path can satisfy mean no such request exists, so they are not
+/// ambiguous. Used by [`lower_all_rest_to_routes`] (review C3 + I1).
+fn templates_ambiguous(a: &[SegmentPattern], b: &[SegmentPattern]) -> bool {
     if a.len() != b.len() {
         return false;
     }
     if template_specificity(a) != template_specificity(b) {
         return false;
     }
-    for (sa, sb) in a.iter().zip(b.iter()) {
-        if let (PathSegment::Literal(x), PathSegment::Literal(y)) = (sa, sb)
-            && x != y
-        {
-            return false;
+    a.iter()
+        .zip(b.iter())
+        .all(|(sa, sb)| segment_patterns_overlap(sa, sb))
+}
+
+/// Decide whether two segment patterns' languages intersect.
+///
+/// A segment pattern is literal text joined by placeholder holes matching any
+/// substring, the empty one included, so its language is regular. The decision
+/// is exact: a product-automaton search over `(part index, literal offset)`
+/// pairs on both sides. Matching literal characters advance both sides, a
+/// literal character consumed against a placeholder is absorbed by the hole,
+/// and a placeholder may always end without consuming anything. Free
+/// characters are never needed (a hole can match the empty string), so the
+/// search space is finite and every accepted path is a common witness.
+///
+/// This subsumes positional compatibility: `/ab{x}` and `/a{y}b` overlap at
+/// `/abb` even though their part lists differ.
+pub fn segment_patterns_overlap(a: &SegmentPattern, b: &SegmentPattern) -> bool {
+    type State = (usize, usize, usize, usize);
+
+    // `parts` is a public field, so an empty `Lit` — which the parser never
+    // emits — can appear anywhere. It adds nothing to the language and must
+    // not be mistaken for a placeholder position, so drop it up front.
+    let a_parts = non_empty_parts(&a.parts);
+    let b_parts = non_empty_parts(&b.parts);
+    let mut visited = std::collections::HashSet::new();
+    let mut stack: Vec<State> = vec![(0, 0, 0, 0)];
+
+    while let Some((ai, ao, bi, bo)) = stack.pop() {
+        if !visited.insert((ai, ao, bi, bo)) {
+            continue;
+        }
+        if ai >= a_parts.len() && bi >= b_parts.len() {
+            return true;
+        }
+        // A placeholder always matches the empty string, so it can end here.
+        if ai < a_parts.len() && matches!(a_parts[ai], SegmentPart::Param(_)) {
+            stack.push((ai + 1, 0, bi, bo));
+        }
+        if bi < b_parts.len() && matches!(b_parts[bi], SegmentPart::Param(_)) {
+            stack.push((ai, ao, bi + 1, 0));
+        }
+        match (
+            literal_char(&a_parts, ai, ao),
+            literal_char(&b_parts, bi, bo),
+        ) {
+            // Both sides are at literal characters: only a shared character
+            // can label the edge.
+            (Some(x), Some(y)) if x == y => {
+                let (a_next, a_off) = advance(&a_parts, ai, ao);
+                let (b_next, b_off) = advance(&b_parts, bi, bo);
+                stack.push((a_next, a_off, b_next, b_off));
+            }
+            // Literal against placeholder: the hole absorbs the character.
+            (Some(_), None) if bi < b_parts.len() => {
+                let (a_next, a_off) = advance(&a_parts, ai, ao);
+                stack.push((a_next, a_off, bi, bo));
+            }
+            (None, Some(_)) if ai < a_parts.len() => {
+                let (b_next, b_off) = advance(&b_parts, bi, bo);
+                stack.push((ai, ao, b_next, b_off));
+            }
+            _ => {}
         }
     }
-    true
+    false
+}
+
+/// The pattern's parts that constrain the language, in order: an empty `Lit`
+/// contributes nothing and is dropped.
+fn non_empty_parts(parts: &[SegmentPart]) -> Vec<&SegmentPart> {
+    parts
+        .iter()
+        .filter(|part| !matches!(part, SegmentPart::Lit(text) if text.is_empty()))
+        .collect()
+}
+
+/// The byte at literal offset `off` of part `idx`, or `None` when the position
+/// is not inside a literal (a placeholder, or past the end of the parts).
+fn literal_char(parts: &[&SegmentPart], idx: usize, off: usize) -> Option<u8> {
+    match parts.get(idx).copied() {
+        Some(SegmentPart::Lit(text)) => text.as_bytes().get(off).copied(),
+        _ => None,
+    }
+}
+
+/// Consume one literal byte at `(idx, off)`, normalized to the next part when
+/// the literal is exhausted.
+fn advance(parts: &[&SegmentPart], mut idx: usize, mut off: usize) -> (usize, usize) {
+    off += 1;
+    while let Some(SegmentPart::Lit(text)) = parts.get(idx).copied() {
+        if off < text.len() {
+            return (idx, off);
+        }
+        idx += 1;
+        off = 0;
+    }
+    (idx, off)
 }
 
 fn lower_operation(
@@ -555,44 +672,175 @@ pub fn verb_has_body(verb: &str) -> bool {
 // Path template parser (Task 4)
 // ---------------------------------------------------------------------------
 
-/// A segment of a REST path template.
+/// One piece of a path-template segment: literal text or a `{name}`
+/// placeholder.
+///
+/// This is a deliberate duplicate of `camel_component_http::rest_match`'s
+/// grammar — the two crates are independent (no dependency), and the
+/// cross-crate corpus test pins them byte-for-byte.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PathSegment {
-    Literal(String),
+pub enum SegmentPart {
+    /// Literal text that must match exactly, e.g. `users`.
+    Lit(String),
+    /// A `{name}` placeholder.
     Param(String),
 }
 
-/// Parse a path like `/users/{id}/posts` into segments.
-pub fn parse_path_template(path: &str) -> Vec<PathSegment> {
-    path.trim_start_matches('/')
+/// One parsed segment of a path template, made of ordered parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentPattern {
+    /// Ordered literal and placeholder parts of the segment.
+    pub parts: Vec<SegmentPart>,
+}
+
+/// Why a path template could not be parsed.
+///
+/// Every variant carries the offending `segment` text so the caller can name
+/// the malformation in its route-load diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use]
+pub enum TemplateParseError {
+    /// A `{` placeholder was not terminated by `}`.
+    UnclosedPlaceholder {
+        /// The segment containing the unclosed placeholder.
+        segment: String,
+    },
+    /// A `}` appeared outside a placeholder.
+    StrayCloseBrace {
+        /// The segment containing the stray `}`.
+        segment: String,
+    },
+    /// A placeholder had an empty name (`{}`).
+    EmptyPlaceholder {
+        /// The segment containing the empty placeholder.
+        segment: String,
+    },
+}
+
+impl fmt::Display for TemplateParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnclosedPlaceholder { segment } => write!(
+                f,
+                "unclosed placeholder in segment '{segment}': a '{{' must be closed by '}}'"
+            ),
+            Self::StrayCloseBrace { segment } => write!(
+                f,
+                "stray '}}' in segment '{segment}': '}}' outside a placeholder is not allowed"
+            ),
+            Self::EmptyPlaceholder { segment } => {
+                write!(f, "empty placeholder name in segment '{segment}'")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TemplateParseError {}
+
+/// Parse a path like `/users/{id}/posts` into segment patterns.
+///
+/// Grammar (identical to `camel-component-http`): split on `/`, dropping the
+/// leading slash and empty segments; a `{` starts a placeholder whose name is
+/// the maximal run excluding braces and which must be terminated by `}`; a
+/// `}` outside a placeholder is an error; an empty name is an error. Literal
+/// text between placeholders becomes `Lit` parts; a segment without
+/// placeholders is one `Lit` part.
+pub fn parse_path_template(template: &str) -> Result<Vec<SegmentPattern>, TemplateParseError> {
+    template
+        .trim_start_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(|seg| {
-            if seg.starts_with('{') && seg.ends_with('}') {
-                PathSegment::Param(seg[1..seg.len() - 1].to_string())
-            } else {
-                PathSegment::Literal(seg.to_string())
-            }
-        })
+        .map(parse_segment)
         .collect()
 }
 
-/// Count literal (non-param) segments for specificity comparison.
-/// More literal segments = more specific.
-pub fn template_specificity(segments: &[PathSegment]) -> usize {
-    segments
-        .iter()
-        .filter(|s| matches!(s, PathSegment::Literal(_)))
-        .count()
+/// Parse one `/`-delimited segment into its ordered parts.
+///
+/// The scan is byte-wise, but only the ASCII braces `{` / `}` are
+/// significant, so every slice boundary is a `char` boundary.
+fn parse_segment(segment: &str) -> Result<SegmentPattern, TemplateParseError> {
+    let bytes = segment.as_bytes();
+    let mut parts = Vec::new();
+    let mut cursor = 0;
+    let mut literal_start = 0;
+
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' => {
+                let name_start = cursor + 1;
+                let mut name_end = name_start;
+                while name_end < bytes.len() && bytes[name_end] != b'{' && bytes[name_end] != b'}' {
+                    name_end += 1;
+                }
+                if name_end >= bytes.len() || bytes[name_end] != b'}' {
+                    return Err(TemplateParseError::UnclosedPlaceholder {
+                        segment: segment.to_string(),
+                    });
+                }
+                if name_end == name_start {
+                    return Err(TemplateParseError::EmptyPlaceholder {
+                        segment: segment.to_string(),
+                    });
+                }
+                if literal_start < cursor {
+                    parts.push(SegmentPart::Lit(segment[literal_start..cursor].to_string()));
+                }
+                parts.push(SegmentPart::Param(
+                    segment[name_start..name_end].to_string(),
+                ));
+                cursor = name_end + 1;
+                literal_start = cursor;
+            }
+            b'}' => {
+                return Err(TemplateParseError::StrayCloseBrace {
+                    segment: segment.to_string(),
+                });
+            }
+            _ => cursor += 1,
+        }
+    }
+
+    if literal_start < bytes.len() {
+        parts.push(SegmentPart::Lit(segment[literal_start..].to_string()));
+    }
+    Ok(SegmentPattern { parts })
 }
 
-/// Extract param names from a template path.
-pub fn extract_param_names(segments: &[PathSegment]) -> Vec<String> {
+/// Rank a parsed template's specificity as `(L, C)`.
+///
+/// `L` is the number of segments carrying at least one literal part and `C`
+/// is the total number of literal characters across the whole template. Pairs
+/// are compared lexicographically (mirroring
+/// `camel_component_http::rest_match::template_specificity`), so a template
+/// with more literal-bearing segments wins first, then one with more literal
+/// text: `/users/me` is `(2, 7)` and beats `/users/{id}` `(1, 5)`.
+#[must_use]
+pub fn template_specificity(segments: &[SegmentPattern]) -> (usize, usize) {
+    let mut literal_segments = 0;
+    let mut literal_chars = 0;
+    for pattern in segments {
+        let mut has_literal = false;
+        for part in &pattern.parts {
+            if let SegmentPart::Lit(text) = part {
+                has_literal = true;
+                literal_chars += text.chars().count();
+            }
+        }
+        if has_literal {
+            literal_segments += 1;
+        }
+    }
+    (literal_segments, literal_chars)
+}
+
+/// Extract param names from a template path, in order of appearance.
+pub fn extract_param_names(segments: &[SegmentPattern]) -> Vec<String> {
     segments
         .iter()
-        .filter_map(|s| match s {
-            PathSegment::Param(name) => Some(name.clone()),
-            _ => None,
+        .flat_map(|pattern| pattern.parts.iter())
+        .filter_map(|part| match part {
+            SegmentPart::Param(name) => Some(name.clone()),
+            SegmentPart::Lit(_) => None,
         })
         .collect()
 }
@@ -825,38 +1073,46 @@ mod tests {
 
     #[test]
     fn parse_path_template_segments() {
-        let segments = parse_path_template("/users/{id}/posts/{postId}");
+        let segments =
+            parse_path_template("/users/{id}/posts/{postId}").expect("template is well formed");
         assert_eq!(segments.len(), 4);
-        assert!(matches!(segments[0], PathSegment::Literal(ref s) if s == "users"));
-        assert!(matches!(segments[1], PathSegment::Param(ref s) if s == "id"));
-        assert!(matches!(segments[2], PathSegment::Literal(ref s) if s == "posts"));
-        assert!(matches!(segments[3], PathSegment::Param(ref s) if s == "postId"));
+        assert_eq!(segments[0].parts, vec![SegmentPart::Lit("users".into())]);
+        assert_eq!(segments[1].parts, vec![SegmentPart::Param("id".into())]);
+        assert_eq!(segments[2].parts, vec![SegmentPart::Lit("posts".into())]);
+        assert_eq!(segments[3].parts, vec![SegmentPart::Param("postId".into())]);
     }
 
     #[test]
     fn path_template_specificity_count() {
-        let s1 = parse_path_template("/users/me");
-        let s2 = parse_path_template("/users/{id}");
+        let s1 = parse_path_template("/users/me").expect("template is well formed");
+        let s2 = parse_path_template("/users/{id}").expect("template is well formed");
         assert!(template_specificity(&s1) > template_specificity(&s2));
     }
 
     #[test]
     fn parse_path_template_empty() {
-        let segments = parse_path_template("");
+        let segments = parse_path_template("").expect("empty template is well formed");
         assert!(segments.is_empty());
     }
 
     #[test]
     fn parse_path_template_root() {
-        let segments = parse_path_template("/");
+        let segments = parse_path_template("/").expect("root template is well formed");
         assert!(segments.is_empty());
     }
 
     #[test]
     fn extract_param_names_from_template() {
-        let segments = parse_path_template("/users/{id}/posts/{postId}");
+        let segments =
+            parse_path_template("/users/{id}/posts/{postId}").expect("template is well formed");
         let params = extract_param_names(&segments);
         assert_eq!(params, vec!["id", "postId"]);
+    }
+
+    #[test]
+    fn extract_multi_param_segment_names() {
+        let segments = parse_path_template("/{a}-{b}.json").expect("template is well formed");
+        assert_eq!(extract_param_names(&segments), vec!["a", "b"]);
     }
 
     #[test]
@@ -1130,6 +1386,67 @@ mod tests {
         let rest = make_rest_with_base("op", "get", "/users", "/{id}/{id}", "bean:svc");
         let err = lower_all_rest_to_routes(&[rest]).err();
         assert!(err.is_some(), "duplicate path param must be rejected");
+    }
+
+    #[test]
+    fn validate_rejects_unclosed_placeholder_naming_path() {
+        let err = validate_path_template("/files/{id.xml", "get")
+            .expect_err("unclosed placeholder must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("/files/{id.xml"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_stray_close_brace_naming_path() {
+        let err = validate_path_template("/files/id}.xml", "get")
+            .expect_err("stray close brace must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("/files/id}.xml"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_placeholder_name() {
+        let err = validate_path_template("/files/{}.xml", "get")
+            .expect_err("empty placeholder name must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("/files/{}.xml"), "got: {msg}");
+        assert!(msg.contains("parameter names are required"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_names_across_mixed_segments() {
+        let err = validate_path_template("/{id}.xml/{id}", "get")
+            .expect_err("duplicate names across mixed segments must be rejected");
+        assert!(err.to_string().contains("more than once"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_legacy_names() {
+        assert!(validate_path_template("/users/{user-id}", "get").is_ok());
+    }
+
+    #[test]
+    fn lowering_rejects_malformed_templates_naming_path() {
+        for (op_path, needle, extra) in [
+            ("/{id.xml", "/files/{id.xml", None),
+            ("/id}.xml", "/files/id}.xml", None),
+            (
+                "/{}.xml",
+                "/files/{}.xml",
+                Some("parameter names are required"),
+            ),
+        ] {
+            let rest = make_rest_with_base("getFile", "get", "/files", op_path, "bean:svc");
+            let err = lower_all_rest_to_routes(&[rest])
+                .err()
+                .expect("malformed template must be rejected");
+            assert!(matches!(err, CamelError::RouteError(_)), "got: {err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains(needle), "got: {msg}");
+            if let Some(extra) = extra {
+                assert!(msg.contains(extra), "got: {msg}");
+            }
+        }
     }
 
     // ── Shared helpers used by YAML + JSON parsers (review I2) ──
@@ -2462,6 +2779,227 @@ rest:
             }
             other => panic!("expected SetHeaderIfAbsent last, got {other:?}"),
         }
+    }
+
+    // ── Task 2.2: (L, C) specificity + overlap-based ambiguity ──
+
+    fn segments_of(template: &str) -> Vec<SegmentPattern> {
+        parse_path_template(template).expect("test template is well formed")
+    }
+
+    fn rest_block(base: &str, ops: Vec<RouteDslRestOperation>) -> RouteDslRest {
+        RouteDslRest {
+            error_mapping: None,
+            host: "0.0.0.0".to_string(),
+            port: 8080,
+            path: base.to_string(),
+            security_policy: None,
+            operations: ops,
+        }
+    }
+
+    fn op_on(operation_id: &str, verb: &str, path: &str) -> RouteDslRestOperation {
+        RouteDslRestOperation {
+            method: verb.to_string(),
+            path: path.to_string(),
+            ..make_op(operation_id)
+        }
+    }
+
+    fn assert_names_both(err: &CamelError, needles: [&str; 4]) {
+        let msg = err.to_string();
+        for needle in needles {
+            assert!(
+                msg.contains(needle),
+                "message must contain {needle:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_equal_specificity_mixed_pair() {
+        assert!(
+            templates_ambiguous(&segments_of("/{id}.xml"), &segments_of("/{name}.xml")),
+            "mixed templates of equal (L, C) that share a request must be ambiguous"
+        );
+    }
+
+    #[test]
+    fn ambiguous_despite_part_order() {
+        assert!(
+            templates_ambiguous(&segments_of("/ab{x}"), &segments_of("/a{y}b")),
+            "both templates match /abb, so part order must not hide the overlap"
+        );
+    }
+
+    #[test]
+    fn ambiguous_prefix_suffix_forms() {
+        assert!(
+            templates_ambiguous(&segments_of("/a{x}"), &segments_of("/{y}a")),
+            "both templates match /aa"
+        );
+    }
+
+    #[test]
+    fn ambiguous_mirrored_segment_literals() {
+        assert!(
+            templates_ambiguous(&segments_of("/x/{id}"), &segments_of("/{a}/y")),
+            "both templates match /x/y"
+        );
+    }
+
+    #[test]
+    fn not_ambiguous_different_specificity() {
+        assert!(
+            !templates_ambiguous(&segments_of("/{p}y"), &segments_of("/{q}xy")),
+            "specificity (1, 1) vs (1, 2): the longer literal wins"
+        );
+    }
+
+    #[test]
+    fn not_ambiguous_disjoint_literals() {
+        assert!(
+            !templates_ambiguous(&segments_of("/a{x}"), &segments_of("/b{y}")),
+            "no request can match both"
+        );
+    }
+
+    #[test]
+    fn overlap_normalizes_empty_literal_parts() {
+        let empty = SegmentPattern {
+            parts: vec![SegmentPart::Lit(String::new())],
+        };
+        assert!(
+            segment_patterns_overlap(&empty, &empty),
+            "two empty-literal patterns both accept the empty string"
+        );
+
+        let with_holes = SegmentPattern {
+            parts: vec![
+                SegmentPart::Lit(String::new()),
+                SegmentPart::Param("x".to_string()),
+                SegmentPart::Lit(String::new()),
+            ],
+        };
+        let bare_param = SegmentPattern {
+            parts: vec![SegmentPart::Param("y".to_string())],
+        };
+        assert!(
+            segment_patterns_overlap(&with_holes, &bare_param),
+            "empty literals around a placeholder vanish, leaving one bare hole"
+        );
+    }
+
+    #[test]
+    fn lowering_rejects_cross_block_same_listener_ambiguity() {
+        let a = make_rest_with_base("get_xml", "get", "/", "/{id}.xml", "bean:a");
+        let b = make_rest_with_base("get_xml2", "get", "/", "/{name}.xml", "bean:b");
+        let err = lower_all_rest_to_routes(&[a, b])
+            .err()
+            .expect("ambiguous templates across blocks must be rejected");
+        assert_names_both(&err, ["/{id}.xml", "/{name}.xml", "get_xml2", "get_xml"]);
+    }
+
+    #[test]
+    fn lowering_error_names_both_operations_same_block() {
+        let block = rest_block(
+            "/",
+            vec![
+                op_on("getAbx", "get", "/ab{x}"),
+                op_on("getAyb", "get", "/a{y}b"),
+            ],
+        );
+        let err = lower_all_rest_to_routes(&[block])
+            .err()
+            .expect("overlapping mixed templates with distinct op ids must be rejected");
+        assert_names_both(&err, ["/ab{x}", "/a{y}b", "getAbx", "getAyb"]);
+    }
+
+    #[test]
+    fn lowering_rejects_prefix_suffix_ambiguity() {
+        let block = rest_block(
+            "/",
+            vec![
+                op_on("getAx", "get", "/a{x}"),
+                op_on("getYa", "get", "/{y}a"),
+            ],
+        );
+        let err = lower_all_rest_to_routes(&[block])
+            .err()
+            .expect("prefix/suffix forms both matching /aa must be rejected");
+        assert_names_both(&err, ["/a{x}", "/{y}a", "getAx", "getYa"]);
+    }
+
+    #[test]
+    fn lowering_rejects_mirrored_segments_ambiguity() {
+        let block = rest_block(
+            "/",
+            vec![
+                op_on("getXId", "get", "/x/{id}"),
+                op_on("getAY", "get", "/{a}/y"),
+            ],
+        );
+        let err = lower_all_rest_to_routes(&[block])
+            .err()
+            .expect("mirrored segment literals both matching /x/y must be rejected");
+        assert_names_both(&err, ["/x/{id}", "/{a}/y", "getXId", "getAY"]);
+    }
+
+    #[test]
+    fn lowering_accepts_mixed_templates() {
+        let block = rest_block(
+            "/",
+            vec![
+                op_on("getFileXml", "get", "/files/{id}.xml"),
+                op_on("postReportJson", "post", "/report-{date}.json"),
+            ],
+        );
+        let routes = lower_all_rest_to_routes(&[block]).expect("valid mixed templates must load");
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn lowering_allows_different_listener_and_method() {
+        let a = make_rest_on_listener(
+            "0.0.0.0",
+            8080,
+            "get_xml",
+            "get",
+            "/",
+            "/{id}.xml",
+            "bean:a",
+        );
+        let b = make_rest_on_listener(
+            "0.0.0.0",
+            9090,
+            "get_xml2",
+            "get",
+            "/",
+            "/{name}.xml",
+            "bean:b",
+        );
+        let routes =
+            lower_all_rest_to_routes(&[a, b]).expect("different listeners are independent");
+        assert_eq!(routes.len(), 2);
+
+        let get = make_rest_with_base("get_xml", "get", "/", "/{id}.xml", "bean:g");
+        let post = make_rest_with_base("post_xml", "post", "/", "/{name}.xml", "bean:p");
+        let routes = lower_all_rest_to_routes(&[get, post]).expect("ambiguity is per method");
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn lowering_accepts_resolvable_overlap_pairs() {
+        let block = rest_block(
+            "/",
+            vec![
+                op_on("getAxy", "get", "/a/{x}/{y}"),
+                op_on("getUbc", "get", "/{u}/b/c"),
+            ],
+        );
+        let routes =
+            lower_all_rest_to_routes(&[block]).expect("differing specificity resolves the overlap");
+        assert_eq!(routes.len(), 2);
     }
 
     #[test]

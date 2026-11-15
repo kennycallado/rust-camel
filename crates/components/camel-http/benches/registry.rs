@@ -17,7 +17,7 @@ use camel_api::ComponentMetrics;
 use camel_api::NoOpMetrics;
 use camel_component_http::RequestEnvelope;
 use camel_component_http::registry::{
-    HttpRouteRegistry, MountMode, PathSegment, ProbeLookup, StaticMount,
+    HttpRouteRegistry, MountMode, ProbeLookup, SegmentPart, SegmentPattern, StaticMount,
 };
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
@@ -58,8 +58,12 @@ fn registry_with_rest(rt: &Runtime, n: usize) -> HttpRouteRegistry {
                 .register_rest_endpoint(
                     "GET".to_string(),
                     vec![
-                        PathSegment::Literal("api".to_string()),
-                        PathSegment::Literal(format!("r{i}")),
+                        SegmentPattern {
+                            parts: vec![SegmentPart::Lit("api".to_string())],
+                        },
+                        SegmentPattern {
+                            parts: vec![SegmentPart::Lit(format!("r{i}"))],
+                        },
                     ],
                     tx,
                     bench_metrics(),
