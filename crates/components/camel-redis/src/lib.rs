@@ -36,6 +36,7 @@ pub mod producer;
 pub(crate) mod pubsub;
 pub(crate) mod queue;
 pub(crate) mod retry;
+mod script;
 pub mod sentinel_component;
 pub mod sentinel_config;
 pub(crate) mod streams;

@@ -1,0 +1,8 @@
+{
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_gpt",
+  "impl_hash": "sha256:16d1a2eca732c12ef0a809d1e77eba5301b42ac45981d65903381e808c01b1f9",
+  "head": "5eda471e0eee1f2de691ebfe6f62a69f51000117",
+  "merge_base": "16780f05de159892e86dbcb9c248d2d0f099f7ac",
+  "holistic_review": "final verdict APPROVE after 1 REJECT round (queue-time READONLY transaction invalidation, scalar batch payload slots, scoped trust claims) fixed in 26fcb7262 + 5eda471e0"
+}

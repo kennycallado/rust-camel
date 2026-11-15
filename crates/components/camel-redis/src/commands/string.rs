@@ -124,7 +124,7 @@ enum SetExpiry {
 
 /// Resolved `SET` option arguments, in wire order.
 #[derive(Debug, Default)]
-struct SetOptions {
+pub(crate) struct SetOptions {
     condition: Option<SetCondition>,
     expiry: Option<SetExpiry>,
     return_old_value: bool,
@@ -151,7 +151,7 @@ fn resolve_set_condition(exchange: &Exchange) -> Result<Option<SetCondition>, Ca
 /// are refused locally, before any command byte is written:
 /// `Timeout` + `Timestamp` (relative vs absolute expiry), `KeepTtl` with
 /// either expiry header, and `ExpireUnit` with no expiry header at all.
-fn resolve_set_options(exchange: &Exchange) -> Result<SetOptions, CamelError> {
+pub(crate) fn resolve_set_options(exchange: &Exchange) -> Result<SetOptions, CamelError> {
     let condition = resolve_set_condition(exchange)?;
     let keep_ttl = require_bool_header(exchange, HEADER_KEEP_TTL)?.unwrap_or(false);
     let return_old_value = require_bool_header(exchange, HEADER_RETURN_OLD_VALUE)?.unwrap_or(false);
@@ -226,9 +226,22 @@ enum GetexExpiry {
 
 /// Resolved `GETEX` option arguments, in wire order.
 #[derive(Debug, Default)]
-struct GetexOptions {
+pub(crate) struct GetexOptions {
     expiry: Option<GetexExpiry>,
     persist: bool,
+}
+
+impl GetexOptions {
+    /// Options for a batch `GETEX` entry: a relative expiry in seconds.
+    ///
+    /// The batch field contract exposes only `timeout`; an absolute timestamp
+    /// or `PERSIST` remain single-command options.
+    pub(crate) fn relative_expiry(seconds: u64) -> Self {
+        Self {
+            expiry: Some(GetexExpiry::Ex(seconds)),
+            persist: false,
+        }
+    }
 }
 
 /// Resolves the `GETEX` option headers, failing closed on any conflict.
@@ -364,6 +377,154 @@ fn mget_reply_to_body(values: Vec<Option<Vec<u8>>>) -> Body {
     }
 }
 
+// ── Pure command encoders (redisfc 3.2) ─────────────────────────────────────
+
+// These build the wire command from already-resolved operands: the single
+// dispatch path below resolves them from headers and the body, while the
+// batch path resolves them from validated entry fields. Both call the same
+// `encode_*` function, so the two paths cannot drift. Payloads arrive as
+// arguments; an encoder never reads the exchange.
+
+/// Builds `SET key value [NX|XX] [EX|PX|EXAT|PXAT n|KEEPTTL] [GET]`.
+pub(crate) fn encode_set(key: &str, value: &[u8], options: &SetOptions) -> redis::Cmd {
+    let mut command = redis::cmd("SET");
+    command.arg(key).arg(value);
+    match options.condition {
+        Some(SetCondition::Nx) => {
+            command.arg("NX");
+        }
+        Some(SetCondition::Xx) => {
+            command.arg("XX");
+        }
+        None => {}
+    }
+    match options.expiry {
+        Some(SetExpiry::Ex(seconds)) => {
+            command.arg("EX").arg(seconds);
+        }
+        Some(SetExpiry::Px(millis)) => {
+            command.arg("PX").arg(millis);
+        }
+        Some(SetExpiry::Exat(timestamp)) => {
+            command.arg("EXAT").arg(timestamp);
+        }
+        Some(SetExpiry::Pxat(timestamp)) => {
+            command.arg("PXAT").arg(timestamp);
+        }
+        Some(SetExpiry::KeepTtl) => {
+            command.arg("KEEPTTL");
+        }
+        None => {}
+    }
+    if options.return_old_value {
+        command.arg("GET");
+    }
+    command
+}
+
+/// Builds `GET key`.
+pub(crate) fn encode_get(key: &str) -> redis::Cmd {
+    let mut command = redis::cmd("GET");
+    command.arg(key);
+    command
+}
+
+/// Builds `GETDEL key`.
+pub(crate) fn encode_getdel(key: &str) -> redis::Cmd {
+    let mut command = redis::cmd("GETDEL");
+    command.arg(key);
+    command
+}
+
+/// Builds `GETEX key [EX|PX|EXAT|PXAT n | PERSIST]`.
+pub(crate) fn encode_getex(key: &str, options: &GetexOptions) -> redis::Cmd {
+    let mut command = redis::cmd("GETEX");
+    command.arg(key);
+    match options.expiry {
+        Some(GetexExpiry::Ex(seconds)) => {
+            command.arg("EX").arg(seconds);
+        }
+        Some(GetexExpiry::Px(millis)) => {
+            command.arg("PX").arg(millis);
+        }
+        Some(GetexExpiry::Exat(timestamp)) => {
+            command.arg("EXAT").arg(timestamp);
+        }
+        Some(GetexExpiry::Pxat(timestamp)) => {
+            command.arg("PXAT").arg(timestamp);
+        }
+        None => {}
+    }
+    if options.persist && options.expiry.is_none() {
+        command.arg("PERSIST");
+    }
+    command
+}
+
+/// Builds `SETRANGE key offset value`.
+pub(crate) fn encode_setrange(key: &str, offset: u64, value: &[u8]) -> redis::Cmd {
+    let mut command = redis::cmd("SETRANGE");
+    command.arg(key).arg(offset).arg(value);
+    command
+}
+
+/// Builds `GETRANGE key start end`.
+pub(crate) fn encode_getrange(key: &str, start: i64, end: i64) -> redis::Cmd {
+    let mut command = redis::cmd("GETRANGE");
+    command.arg(key).arg(start).arg(end);
+    command
+}
+
+/// Builds `INCRBY key 1`.
+///
+/// This mirrors `AsyncCommands::incr(key, 1)`, which redis-rs issues as
+/// `INCRBY key 1`, so the extracted encoder is byte-identical to the
+/// pre-refactor dispatch.
+pub(crate) fn encode_incr(key: &str) -> redis::Cmd {
+    let mut command = redis::cmd("INCRBY");
+    command.arg(key).arg(1i64);
+    command
+}
+
+/// Builds `INCRBY key by`.
+pub(crate) fn encode_incrby(key: &str, by: i64) -> redis::Cmd {
+    let mut command = redis::cmd("INCRBY");
+    command.arg(key).arg(by);
+    command
+}
+
+/// Builds `DECRBY key 1`.
+///
+/// Mirrors `AsyncCommands::decr(key, 1)`, which issues `DECRBY key 1`.
+pub(crate) fn encode_decr(key: &str) -> redis::Cmd {
+    let mut command = redis::cmd("DECRBY");
+    command.arg(key).arg(1i64);
+    command
+}
+
+/// Builds `DECRBY key by`.
+pub(crate) fn encode_decrby(key: &str, by: i64) -> redis::Cmd {
+    let mut command = redis::cmd("DECRBY");
+    command.arg(key).arg(by);
+    command
+}
+
+/// Builds `APPEND key value`.
+pub(crate) fn encode_append(key: &str, value: &[u8]) -> redis::Cmd {
+    let mut command = redis::cmd("APPEND");
+    command.arg(key).arg(value);
+    command
+}
+
+/// Builds `MGET key [key ...]`.
+pub(crate) fn encode_mget(keys: &[String]) -> redis::Cmd {
+    let mut command = redis::cmd("MGET");
+    for key in keys {
+        command.arg(key);
+    }
+    command
+}
+
 pub async fn dispatch(
     cmd: &RedisCommand,
     conn: &mut MultiplexedConnection,
@@ -378,41 +539,9 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let value = body_value_bytes(exchange, "SET", &[HEADER_VALUE])?;
             let options = resolve_set_options(exchange)?;
-
-            // Canonical wire order: SET key value [NX|XX]
-            // [EX|PX|EXAT|PXAT|KEEPTTL] [GET].
-            let mut command = redis::cmd("SET");
-            command.arg(&key).arg(&value);
-            match options.condition {
-                Some(SetCondition::Nx) => {
-                    command.arg("NX");
-                }
-                Some(SetCondition::Xx) => {
-                    command.arg("XX");
-                }
-                None => {}
-            }
-            match options.expiry {
-                Some(SetExpiry::Ex(seconds)) => {
-                    command.arg("EX").arg(seconds);
-                }
-                Some(SetExpiry::Px(millis)) => {
-                    command.arg("PX").arg(millis);
-                }
-                Some(SetExpiry::Exat(timestamp)) => {
-                    command.arg("EXAT").arg(timestamp);
-                }
-                Some(SetExpiry::Pxat(timestamp)) => {
-                    command.arg("PXAT").arg(timestamp);
-                }
-                Some(SetExpiry::KeepTtl) => {
-                    command.arg("KEEPTTL");
-                }
-                None => {}
-            }
+            let command = encode_set(&key, &value, &options);
 
             if options.return_old_value {
-                command.arg("GET");
                 let old: Option<Vec<u8>> = command
                     .query_async(conn)
                     .await
@@ -431,8 +560,7 @@ pub async fn dispatch(
         }
         RedisCommand::Get => {
             let key = require_key(exchange)?;
-            let val: Option<Vec<u8>> = redis::cmd("GET")
-                .arg(&key)
+            let val: Option<Vec<u8>> = encode_get(&key)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("GET", e))?;
@@ -443,8 +571,7 @@ pub async fn dispatch(
         }
         RedisCommand::Getdel => {
             let key = require_key(exchange)?;
-            let val: Option<Vec<u8>> = redis::cmd("GETDEL")
-                .arg(&key)
+            let val: Option<Vec<u8>> = encode_getdel(&key)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("GETDEL", e))?;
@@ -456,28 +583,7 @@ pub async fn dispatch(
         RedisCommand::Getex => {
             let key = require_key(exchange)?;
             let options = resolve_getex_options(exchange)?;
-
-            // Canonical wire order: GETEX key [EX|PX|EXAT|PXAT n | PERSIST].
-            let mut command = redis::cmd("GETEX");
-            command.arg(&key);
-            match options.expiry {
-                Some(GetexExpiry::Ex(seconds)) => {
-                    command.arg("EX").arg(seconds);
-                }
-                Some(GetexExpiry::Px(millis)) => {
-                    command.arg("PX").arg(millis);
-                }
-                Some(GetexExpiry::Exat(timestamp)) => {
-                    command.arg("EXAT").arg(timestamp);
-                }
-                Some(GetexExpiry::Pxat(timestamp)) => {
-                    command.arg("PXAT").arg(timestamp);
-                }
-                None => {}
-            }
-            if options.persist && options.expiry.is_none() {
-                command.arg("PERSIST");
-            }
+            let command = encode_getex(&key, &options);
 
             let val: Option<Vec<u8>> = command
                 .query_async(conn)
@@ -492,10 +598,7 @@ pub async fn dispatch(
             let key = require_key(exchange)?;
             let offset = resolve_range_offset(exchange)?;
             let value = body_value_bytes(exchange, "SETRANGE", &[HEADER_VALUE])?;
-            let n: i64 = redis::cmd("SETRANGE")
-                .arg(&key)
-                .arg(offset)
-                .arg(&value)
+            let n: i64 = encode_setrange(&key, offset, &value)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("SETRANGE", e))?;
@@ -504,10 +607,7 @@ pub async fn dispatch(
         RedisCommand::Getrange => {
             let key = require_key(exchange)?;
             let (start, end) = list::resolve_range_bounds(exchange)?;
-            let slice: Option<Vec<u8>> = redis::cmd("GETRANGE")
-                .arg(&key)
-                .arg(start)
-                .arg(end)
+            let slice: Option<Vec<u8>> = encode_getrange(&key, start as i64, end as i64)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("GETRANGE", e))?;
@@ -547,8 +647,7 @@ pub async fn dispatch(
         }
         RedisCommand::Mget => {
             let keys = resolve_mget_keys(exchange)?;
-            let vals: Vec<Option<Vec<u8>>> = redis::cmd("MGET")
-                .arg(&keys)
+            let vals: Vec<Option<Vec<u8>>> = encode_mget(&keys)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("MGET", e))?;
@@ -566,8 +665,8 @@ pub async fn dispatch(
         }
         RedisCommand::Incr => {
             let key = require_key(exchange)?;
-            let n: i64 = conn
-                .incr(&key, 1i64)
+            let n: i64 = encode_incr(&key)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("INCR", e))?;
             serde_json::json!(n)
@@ -575,16 +674,16 @@ pub async fn dispatch(
         RedisCommand::Incrby => {
             let key = require_key(exchange)?;
             let by = resolve_increment(exchange)?;
-            let n: i64 = conn
-                .incr(&key, by)
+            let n: i64 = encode_incrby(&key, by)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("INCRBY", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Decr => {
             let key = require_key(exchange)?;
-            let n: i64 = conn
-                .decr(&key, 1i64)
+            let n: i64 = encode_decr(&key)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("DECR", e))?;
             serde_json::json!(n)
@@ -592,8 +691,8 @@ pub async fn dispatch(
         RedisCommand::Decrby => {
             let key = require_key(exchange)?;
             let by = resolve_increment(exchange)?;
-            let n: i64 = conn
-                .decr(&key, by)
+            let n: i64 = encode_decrby(&key, by)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("DECRBY", e))?;
             serde_json::json!(n)
@@ -601,8 +700,8 @@ pub async fn dispatch(
         RedisCommand::Append => {
             let key = require_key(exchange)?;
             let value = body_value_bytes(exchange, "APPEND", &[HEADER_VALUE])?;
-            let n: i64 = conn
-                .append(&key, &value)
+            let n: i64 = encode_append(&key, &value)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("APPEND", e))?;
             serde_json::json!(n)

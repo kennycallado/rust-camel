@@ -4,6 +4,7 @@ use camel_component_api::parse_uri;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::sentinel_config::{SentinelConfig, TopologyKind};
@@ -146,6 +147,13 @@ pub enum RedisCommand {
     Publish,
     Subscribe,
     Psubscribe,
+
+    // Script operations
+    Eval,
+    Fcall,
+
+    // Batch operations
+    Multi,
 
     // Other operations
     Ping,
@@ -294,6 +302,13 @@ impl FromStr for RedisCommand {
             "SUBSCRIBE" => Ok(RedisCommand::Subscribe),
             "PSUBSCRIBE" => Ok(RedisCommand::Psubscribe),
 
+            // Script operations
+            "EVAL" => Ok(RedisCommand::Eval),
+            "FCALL" => Ok(RedisCommand::Fcall),
+
+            // Batch operations
+            "MULTI" => Ok(RedisCommand::Multi),
+
             // Other operations
             "PING" => Ok(RedisCommand::Ping),
             "ECHO" => Ok(RedisCommand::Echo),
@@ -307,11 +322,14 @@ impl FromStr for RedisCommand {
 }
 
 impl RedisCommand {
-    /// Returns the uppercase wire token for this command.
+    /// Returns the stable token for this command.
     ///
     /// The inverse of [`RedisCommand::from_str`]: for every variant `v`,
     /// `v.as_str().parse::<RedisCommand>() == Ok(v)`. New variants must add a
-    /// `FromStr` arm and an arm here in the same change.
+    /// `FromStr` arm and an arm here in the same change. Script and batch
+    /// commands (`eval`, `fcall`, `multi`) render lowercase, matching their
+    /// `command=` URI spelling; every other command renders its uppercase
+    /// Redis verb.
     pub fn as_str(&self) -> &'static str {
         match self {
             // String operations
@@ -450,6 +468,13 @@ impl RedisCommand {
             RedisCommand::Publish => "PUBLISH",
             RedisCommand::Subscribe => "SUBSCRIBE",
             RedisCommand::Psubscribe => "PSUBSCRIBE",
+
+            // Script operations
+            RedisCommand::Eval => "eval",
+            RedisCommand::Fcall => "fcall",
+
+            // Batch operations (lowercase, like the other pseudo-commands).
+            RedisCommand::Multi => "multi",
 
             // Other operations
             RedisCommand::Ping => "PING",
@@ -797,6 +822,8 @@ impl GroupStart {
 /// - `password` - Redis password for authentication (default: None)
 /// - `db` - Redis database number, 0-16383 (default: 0)
 /// - `ssl` - Use TLS connection. `None` means not set (falls back to global config or false).
+/// - `atomic` - Run batch commands inside one `MULTI`/`EXEC` transaction
+///   (default: true)
 #[derive(Clone)]
 pub struct RedisEndpointConfig {
     /// Redis server hostname. `None` if not set in URI.
@@ -888,6 +915,28 @@ pub struct RedisEndpointConfig {
     /// Topology kind: Standalone, Sentinel, or Cluster.
     /// Defaults to `TopologyKind::Standalone`.
     pub topology_kind: TopologyKind,
+
+    /// Inline server-side script source (`script=`), Lua for `command=eval`.
+    ///
+    /// Script text is operator config only (ADR-0032): it never comes from an
+    /// exchange header or body. Mutually exclusive with [`Self::script_file`].
+    pub script: Option<String>,
+
+    /// Path to a server-side script file (`scriptFile=`). Mutually exclusive
+    /// with [`Self::script`].
+    pub script_file: Option<PathBuf>,
+
+    /// The invoked Redis function name (`function=`), required for
+    /// `command=fcall` and rejected for every other command.
+    pub function: Option<String>,
+
+    /// Replay opt-in for outcome-unknown script failures (`idempotent=`).
+    /// Default: false, because a script can perform arbitrary side effects.
+    pub idempotent: bool,
+
+    /// Run a batch header's commands inside one `MULTI`/`EXEC` transaction
+    /// (`atomic=`). Default: true.
+    pub atomic: bool,
 }
 
 impl std::fmt::Debug for RedisEndpointConfig {
@@ -919,6 +968,11 @@ impl std::fmt::Debug for RedisEndpointConfig {
             .field("reconnect", &self.reconnect)
             .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field("topology_kind", &self.topology_kind)
+            .field("script", &self.script)
+            .field("script_file", &self.script_file)
+            .field("function", &self.function)
+            .field("idempotent", &self.idempotent)
+            .field("atomic", &self.atomic)
             .finish()
     }
 }
@@ -1051,6 +1105,120 @@ fn parse_stream_group_params(
     }
 }
 
+/// Script source parameters shared by the script commands (`eval`, and
+/// `fcall` from task 2.3).
+///
+/// Script text is operator config only (ADR-0032); `script`/`scriptFile` are
+/// only meaningful for a script command and are ignored for every other
+/// command, matching the existing stream-option precedent. For a script
+/// command exactly one source is required: both or neither fails closed with
+/// an error naming both params.
+#[derive(Debug)]
+struct ScriptParams {
+    script: Option<String>,
+    script_file: Option<PathBuf>,
+    function: Option<String>,
+    idempotent: bool,
+}
+
+fn parse_script_params(
+    params: &HashMap<String, String>,
+    command: &RedisCommand,
+) -> Result<ScriptParams, CamelError> {
+    // `parse_uri` percent-decodes non-sensitive query values, so both params
+    // arrive decoded (a Lua source authored as `script=return%201` reads
+    // "return 1").
+    let script = params.get("script").cloned();
+    let script_file = params.get("scriptFile").map(PathBuf::from);
+    let idempotent = match params.get("idempotent") {
+        Some(s) => match s.to_lowercase().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => {
+                return Err(CamelError::InvalidUri(format!(
+                    "invalid idempotent '{}': expected 'true' or 'false'",
+                    s
+                )));
+            }
+        },
+        None => false,
+    };
+
+    if is_script_command(command) {
+        match (&script, &script_file) {
+            (Some(_), Some(_)) => {
+                return Err(CamelError::InvalidUri(
+                    "script and scriptFile are mutually exclusive: a script command takes exactly one script source"
+                        .to_string(),
+                ));
+            }
+            (None, None) => {
+                return Err(CamelError::InvalidUri(
+                    "a script command requires a script source: set exactly one of script (inline source) or scriptFile (path)"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // `function=` names the `FCALL` entry point, so it is required exactly for
+    // `fcall` and meaningless everywhere else: a configured function on
+    // another command would silently address nothing.
+    let function = params.get("function").cloned();
+    match command {
+        RedisCommand::Fcall => {
+            if function.as_deref().is_none_or(str::is_empty) {
+                return Err(CamelError::InvalidUri(
+                    "command=fcall requires 'function': set the registered function name to invoke"
+                        .to_string(),
+                ));
+            }
+        }
+        _ if function.is_some() => {
+            return Err(CamelError::InvalidUri(format!(
+                "'function' is only valid for command=fcall, not command={}",
+                command.as_str()
+            )));
+        }
+        _ => {}
+    }
+
+    Ok(ScriptParams {
+        script,
+        script_file,
+        function,
+        idempotent,
+    })
+}
+
+/// True for endpoint commands that run server-side script text.
+///
+/// Only these commands may carry `script`/`scriptFile`, and only these take
+/// their operands from the exchange body (`{"keys": [...], "args": [...]}`).
+pub fn is_script_command(cmd: &RedisCommand) -> bool {
+    matches!(cmd, RedisCommand::Eval | RedisCommand::Fcall)
+}
+
+/// Parse the `atomic=` batch option.
+///
+/// Only the literal `true`/`false` values are accepted (case-insensitive,
+/// matching the other boolean URI params); anything else is a named
+/// `InvalidUri` error rather than a silent default. Absent means `true`.
+fn parse_atomic_param(params: &HashMap<String, String>) -> Result<bool, CamelError> {
+    match params.get("atomic") {
+        Some(s) => match s.to_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(CamelError::InvalidUri(format!(
+                "invalid atomic '{}': expected 'true' or 'false'",
+                s
+            ))),
+        },
+        None => Ok(true),
+    }
+}
+
 impl RedisEndpointConfig {
     pub fn from_uri(uri: &str) -> Result<Self, CamelError> {
         let parts = parse_uri(uri)?;
@@ -1141,6 +1309,8 @@ impl RedisEndpointConfig {
             let (stream_recover_enabled, stream_recover_min_idle_ms, stream_recover_batch) =
                 parse_stream_recover_params(&parts.params, &command)?;
             let (create_group, group_start) = parse_stream_group_params(&parts.params, &command)?;
+            let script_params = parse_script_params(&parts.params, &command)?;
+            let atomic = parse_atomic_param(&parts.params)?;
 
             // Parse password
             let password = parts.params.get("password").cloned();
@@ -1172,6 +1342,11 @@ impl RedisEndpointConfig {
                 reconnect: NetworkRetryPolicy::default(),
                 connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
                 topology_kind,
+                script: script_params.script,
+                script_file: script_params.script_file,
+                function: script_params.function,
+                idempotent: script_params.idempotent,
+                atomic,
             });
         }
 
@@ -1309,6 +1484,8 @@ impl RedisEndpointConfig {
         let (stream_recover_enabled, stream_recover_min_idle_ms, stream_recover_batch) =
             parse_stream_recover_params(&parts.params, &command)?;
         let (create_group, group_start) = parse_stream_group_params(&parts.params, &command)?;
+        let script_params = parse_script_params(&parts.params, &command)?;
+        let atomic = parse_atomic_param(&parts.params)?;
 
         // Parse password: userinfo (from redis_url) takes precedence over query param
         let password = password_from_userinfo.or_else(|| parts.params.get("password").cloned());
@@ -1374,6 +1551,11 @@ impl RedisEndpointConfig {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: RedisConfig::default().connection_timeout_secs,
             topology_kind: TopologyKind::Standalone,
+            script: script_params.script,
+            script_file: script_params.script_file,
+            function: script_params.function,
+            idempotent: script_params.idempotent,
+            atomic,
         })
     }
 
@@ -1640,6 +1822,17 @@ pub(crate) fn sentinel_node_url_requires_tls(node: &str) -> bool {
 /// `camel_component_redis::config::is_transient_redis_error` stays stable
 /// for `camel-redis-repo`.
 pub use crate::transport_error::is_transient_redis_error;
+
+/// Re-exported with the classifier: bucket an attempt failure by replay
+/// safety (execution-outcome split, see the `transport_error` module).
+pub use crate::transport_error::RetryClass;
+/// Where an attempt failed relative to the socket write.
+pub use crate::transport_error::SendPhase;
+/// Classifies one failed request attempt into its [`RetryClass`] bucket.
+pub use crate::transport_error::retry_class;
+/// Classifies one failed SCRIPT/FUNCTION attempt into its [`RetryClass`]
+/// bucket (prefix, scripts cannot prove non-execution from a reply code).
+pub use crate::transport_error::retry_class_script;
 
 // ── Auth-failure credential-plane guidance ──────────────────────────────────
 
@@ -2146,6 +2339,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let url = c.redis_url();
         assert!(
@@ -2186,6 +2384,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let url = c.redis_url();
         assert!(
@@ -2221,6 +2424,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let url = c.redis_url();
         assert!(
@@ -2277,6 +2485,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let url = c.redis_url();
         assert!(
@@ -2312,6 +2525,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let url = c.redis_url();
         assert!(
@@ -2347,6 +2565,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let safe = c_ssl.redis_url_safe();
         assert!(
@@ -2383,6 +2606,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let safe = c_no_ssl.redis_url_safe();
         assert!(
@@ -2419,6 +2647,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let endpoint = c.safe_endpoint();
         assert!(
@@ -2461,6 +2694,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         assert!(c_ssl.safe_endpoint().starts_with("rediss://"));
 
@@ -2488,6 +2726,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         assert!(c_plain.safe_endpoint().starts_with("redis://"));
     }
@@ -2907,6 +3150,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
 
         let cfg = RedisConfig::default().with_tls_ca_cert("/global/ca.pem");
@@ -2941,6 +3189,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let debug = format!("{:?}", ep);
         assert!(
@@ -3452,6 +3705,11 @@ mod tests {
             reconnect: NetworkRetryPolicy::default(),
             connection_timeout_secs: 10,
             topology_kind: TopologyKind::Standalone,
+            script: None,
+            script_file: None,
+            function: None,
+            idempotent: false,
+            atomic: true,
         };
         let debug = format!("{:?}", config);
         assert!(
@@ -4122,10 +4380,14 @@ mod tests {
             ("PSUBSCRIBE", RedisCommand::Psubscribe),
             ("PING", RedisCommand::Ping),
             ("ECHO", RedisCommand::Echo),
+            // Script operations render lowercase (see `as_str`).
+            ("eval", RedisCommand::Eval),
+            ("fcall", RedisCommand::Fcall),
+            ("multi", RedisCommand::Multi),
         ];
         assert_eq!(
             cases.len(),
-            121,
+            124,
             "table must list every RedisCommand variant"
         );
         for (token, expected) in cases {
@@ -4138,5 +4400,88 @@ mod tests {
                 "{token} must round-trip through as_str"
             );
         }
+    }
+
+    // ── Script endpoint params (redisfc 2.1) ───────────────────────────────
+
+    #[test]
+    fn eval_parses_inline_script_param() {
+        let cfg =
+            RedisEndpointConfig::from_uri("redis://localhost/?command=eval&script=return%201")
+                .expect("an eval URI with an inline script must parse");
+
+        assert_eq!(cfg.command, RedisCommand::Eval);
+        assert_eq!(
+            cfg.script.as_deref(),
+            Some("return 1"),
+            "the script param must be percent-decoded into the raw Lua source"
+        );
+        assert!(cfg.script_file.is_none(), "no scriptFile was given");
+        assert!(!cfg.idempotent, "idempotent defaults to false");
+    }
+
+    #[test]
+    fn eval_rejects_script_and_scriptfile_together() {
+        let err = RedisEndpointConfig::from_uri(
+            "redis://localhost/?command=eval&script=return%201&scriptFile=%2Ftmp%2Flua%2Fs.lua",
+        )
+        .expect_err("script and scriptFile are mutually exclusive");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("script") && msg.contains("scriptFile"),
+            "the error must name both params, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn eval_rejects_neither_script_source() {
+        let err = RedisEndpointConfig::from_uri("redis://localhost/?command=eval")
+            .expect_err("eval needs exactly one script source");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("script") && msg.contains("scriptFile"),
+            "the error must name both params, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn fcall_requires_function_param() {
+        let err =
+            RedisEndpointConfig::from_uri("redis://localhost/?command=fcall&script=return%201")
+                .expect_err("fcall needs the invoked function name");
+
+        assert!(
+            err.to_string().contains("function"),
+            "the error must name the missing function param, got: {err}"
+        );
+    }
+
+    #[test]
+    fn idempotent_param_parses_bool() {
+        let on = RedisEndpointConfig::from_uri(
+            "redis://localhost/?command=eval&script=return%201&idempotent=true",
+        )
+        .expect("idempotent=true must parse");
+        assert!(on.idempotent, "idempotent=true must set the opt-in");
+
+        let off = RedisEndpointConfig::from_uri(
+            "redis://localhost/?command=eval&script=return%201&idempotent=false",
+        )
+        .expect("idempotent=false must parse");
+        assert!(
+            !off.idempotent,
+            "idempotent=false must leave the opt-in off"
+        );
+
+        let err = RedisEndpointConfig::from_uri(
+            "redis://localhost/?command=eval&script=return%201&idempotent=maybe",
+        )
+        .expect_err("only true/false are accepted");
+        assert!(
+            err.to_string().contains("idempotent"),
+            "the error must name the param, got: {err}"
+        );
     }
 }

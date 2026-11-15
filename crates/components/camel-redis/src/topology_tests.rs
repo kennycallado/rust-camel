@@ -267,6 +267,11 @@ fn sentinel_node_conn_info_carries_username() {
                 .with_nodes(vec!["redis://s-a:26379".into()])
                 .with_master_name("orders"),
         ),
+        script: None,
+        script_file: None,
+        function: None,
+        idempotent: false,
+        atomic: true,
     };
 
     // sentinel_node_conn_info embeds the redis settings; redis 1.6.0 has no
@@ -435,8 +440,7 @@ Hy8+9icj50unvO7Lgx7T1549xg==
 -----END CERTIFICATE-----
 ";
 
-// Unique path under the OS temp dir (a `tempfile` path without adding
-// the tempfile crate as a dev-dependency). The pid keeps concurrent test
+// Unique path under the OS temp dir. The pid keeps concurrent test
 // binaries from colliding.
 #[cfg(feature = "tls")]
 fn temp_ca_path(name: &str) -> std::path::PathBuf {
@@ -718,6 +722,11 @@ async fn sentinel_resolve_carries_username_to_master_connection() {
                 .with_nodes(vec![format!("redis://{sentinel_addr}")])
                 .with_master_name("orders"),
         ),
+        script: None,
+        script_file: None,
+        function: None,
+        idempotent: false,
+        atomic: true,
     };
 
     let topology = SentinelTopology::new(
@@ -814,6 +823,11 @@ fn tls_sentinel_config(ca_path: Option<String>) -> RedisEndpointConfig {
                 .with_nodes(vec!["rediss://127.0.0.1:26443".into()])
                 .with_master_name("mymaster"),
         ),
+        script: None,
+        script_file: None,
+        function: None,
+        idempotent: false,
+        atomic: true,
     }
 }
 

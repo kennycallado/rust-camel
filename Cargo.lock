@@ -2197,6 +2197,7 @@ name = "camel-component-redis"
 version = "0.69.0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
  "camel-api",
  "camel-component-api",
  "camel-core",
@@ -2205,6 +2206,7 @@ dependencies = [
  "redis",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-util",
  "toml",
@@ -2527,6 +2529,7 @@ dependencies = [
  "camel-component-direct",
  "camel-component-http",
  "camel-component-mock",
+ "camel-component-redis",
  "camel-core",
  "camel-dataformat-protobuf",
  "camel-endpoint",
@@ -2538,6 +2541,7 @@ dependencies = [
  "jsonschema",
  "noyalib",
  "percent-encoding",
+ "redis",
  "regex",
  "schemars 1.2.3",
  "serde",

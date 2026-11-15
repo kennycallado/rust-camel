@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod geo;
 pub mod hash;
 pub mod key;
@@ -435,6 +436,255 @@ pub(crate) fn reply_to_body(reply: Option<&[u8]>) -> Body {
         Some(bytes) => match String::from_utf8(bytes.to_vec()) {
             Ok(text) => Body::Text(text),
             Err(_) => Body::Bytes(bytes.to_vec().into()),
+        },
+    }
+}
+
+// ── Script operands and rich replies (redisfc 2.1) ──────────────────────────
+
+/// The documented body shape for script operands, echoed by every
+/// body-shape error so the operator sees the expected input.
+const SCRIPT_OPERAND_SHAPE: &str = r#"{"keys": [...], "args": [...]}"#;
+
+fn script_operand_shape_error(detail: impl std::fmt::Display) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "script operands must be a JSON body object {SCRIPT_OPERAND_SHAPE} with string keys and string-or-number args: {detail}"
+    ))
+}
+
+/// Resolves `EVAL`/`FCALL` keys and args from the exchange body.
+///
+/// Scripts declare their own multi-key operand layout, which the single-key
+/// `CamelRedis.Key` header cannot express, so this is the documented scoped
+/// exception to header-sourced key addressing (see the `redis-values` spec).
+/// The body MUST be a JSON object `{"keys": [<string>...], "args":
+/// [<string|number>...]}`: BOTH arrays are required (a body missing either
+/// fails before send), `keys` elements are strings ONLY, and `args` elements
+/// are strings or numbers. Every violation fails before send with an error
+/// naming the shape. Numeric args are encoded as their decimal string form,
+/// which is what the wire protocol carries.
+pub fn script_operands(exchange: &Exchange) -> Result<(Vec<String>, Vec<String>), CamelError> {
+    let Body::Json(serde_json::Value::Object(body)) = &exchange.input.body else {
+        return Err(script_operand_shape_error(format!(
+            "got a {} body",
+            script_body_shape(&exchange.input.body)
+        )));
+    };
+    let keys = script_operand_array(body.get("keys"), "keys", OperandKind::Key)?;
+    let args = script_operand_array(body.get("args"), "args", OperandKind::Arg)?;
+    Ok((keys, args))
+}
+
+/// Which operand array is being resolved.
+///
+/// The two arrays share their container rule but not their element rule:
+/// `keys` carry key names (strings only) while `args` may carry numbers too.
+#[derive(Clone, Copy)]
+enum OperandKind {
+    /// `keys`: key names, strings only.
+    Key,
+    /// `args`: strings or numbers (numbers encode as their decimal string).
+    Arg,
+}
+
+/// Renders the body variant for a body-shape error.
+fn script_body_shape(body: &Body) -> &'static str {
+    match body {
+        Body::Empty => "empty",
+        Body::Bytes(_) => "binary",
+        Body::Text(_) => "text",
+        Body::Json(_) => "non-object JSON",
+        Body::Xml(_) => "XML",
+        Body::Stream(_) => "streaming",
+        _ => "unexpected",
+    }
+}
+
+/// Maps one operand array of the script body.
+///
+/// The field is REQUIRED: a body that omits `keys` or `args` fails here
+/// rather than silently sending an empty operand list. Non-array values and
+/// elements outside the field's element rule fail closed.
+fn script_operand_array(
+    value: Option<&serde_json::Value>,
+    name: &str,
+    kind: OperandKind,
+) -> Result<Vec<String>, CamelError> {
+    let Some(value) = value else {
+        return Err(script_operand_shape_error(format!(
+            "'{name}' is required: both operand arrays must be present"
+        )));
+    };
+    let serde_json::Value::Array(elements) = value else {
+        return Err(script_operand_shape_error(format!(
+            "'{name}' must be an array, got {}",
+            value
+        )));
+    };
+    elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| script_operand_element(element, name, index, kind))
+        .collect()
+}
+
+/// Maps one operand element under its field's element rule.
+fn script_operand_element(
+    element: &serde_json::Value,
+    name: &str,
+    index: usize,
+    kind: OperandKind,
+) -> Result<String, CamelError> {
+    match (kind, element) {
+        (_, serde_json::Value::String(text)) => Ok(text.clone()),
+        // The wire form of a script arg is its decimal string.
+        (OperandKind::Arg, serde_json::Value::Number(number)) => Ok(number.to_string()),
+        (OperandKind::Key, other) => Err(script_operand_shape_error(format!(
+            "'{name}[{index}]' must be a string key, got {other}"
+        ))),
+        (OperandKind::Arg, other) => Err(script_operand_shape_error(format!(
+            "'{name}[{index}]' must be a string or a number, got {other}"
+        ))),
+    }
+}
+
+/// Renders a Redis server error the way Redis reports it (`CODE detail`).
+///
+/// redis-rs's `Display` for a known-kind server error prints the enum variant
+/// name, so the code and its detail are reassembled from the structural
+/// accessors instead.
+pub(crate) fn server_error_text(err: &redis::ServerError) -> String {
+    match err.details() {
+        Some(detail) => format!("{}: {detail}", err.code()),
+        None => err.code().to_string(),
+    }
+}
+
+fn server_error_body_error(err: &redis::ServerError) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "a Redis server error reply ({}) cannot be represented as a body",
+        server_error_text(err)
+    ))
+}
+
+/// Maps a rich `redis::Value` reply to an exchange body.
+///
+/// The script and batch paths use this instead of [`reply_to_body`] because
+/// they must represent nested replies. The mapping:
+///
+/// - `Nil` → JSON `null`; `Int` → JSON number; `Double` → JSON number;
+/// - `Boolean` → JSON bool; `Okay`/`SimpleString` → text;
+/// - `BulkString` → text when UTF-8, bytes at the top level when not (the
+///   byte-body contract); nested non-UTF-8 bulk strings become
+///   `{"bytes": "<base64>"}` because JSON arrays cannot carry raw bytes;
+/// - `Array`/`Set` → JSON array (recursive element mapping); `Map` → JSON
+///   object (keys rendered to strings);
+/// - `VerbatimString` → its text content; `BigNumber` → its decimal digits as
+///   a JSON string;
+/// - `Attribute` → the underlying data value (RESP3 attributes are metadata
+///   and are dropped); `Push` → JSON `null` (defensive: not expected here);
+/// - `ServerError` → an error, at the top level and for any nested entry
+///   (batch dispatch extracts per-entry errors with the entry index before
+///   conversion; script dispatch treats it as a terminal/business path).
+pub fn redis_value_to_body(value: &redis::Value) -> Result<Body, CamelError> {
+    match value {
+        redis::Value::Nil => Ok(Body::Json(serde_json::Value::Null)),
+        redis::Value::Int(number) => Ok(Body::Json(serde_json::Value::from(*number))),
+        redis::Value::Okay => Ok(Body::Text("OK".to_string())),
+        redis::Value::SimpleString(text) => Ok(Body::Text(text.clone())),
+        redis::Value::BulkString(bytes) => Ok(match String::from_utf8(bytes.clone()) {
+            Ok(text) => Body::Text(text),
+            Err(_) => Body::Bytes(bytes.clone().into()),
+        }),
+        redis::Value::VerbatimString { text, .. } => Ok(Body::Text(text.clone())),
+        redis::Value::Array(elements) | redis::Value::Set(elements) => {
+            Ok(Body::Json(serde_json::Value::Array(
+                elements
+                    .iter()
+                    .map(reply_value_to_json)
+                    .collect::<Result<Vec<_>, _>>()?,
+            )))
+        }
+        redis::Value::Map(entries) => Ok(Body::Json(map_reply_to_json(entries)?)),
+        redis::Value::Double(number) => Ok(Body::Json(serde_json::Value::from(*number))),
+        redis::Value::Boolean(flag) => Ok(Body::Json(serde_json::Value::Bool(*flag))),
+        redis::Value::BigNumber(number) => {
+            Ok(Body::Json(serde_json::Value::String(number.to_string())))
+        }
+        redis::Value::Attribute { data, .. } => redis_value_to_body(data),
+        redis::Value::ServerError(err) => Err(server_error_body_error(err)),
+        // Push messages are not expected on the script/batch reply paths; the
+        // defensive mapping is JSON null, and the wildcard keeps the
+        // `#[non_exhaustive]` match total. Neither arm can panic.
+        _ => Ok(Body::Json(serde_json::Value::Null)),
+    }
+}
+
+/// Element mapping for the nested positions of [`redis_value_to_body`].
+///
+/// Batch dispatch calls this for each entry's `EXEC`/pipeline reply so the
+/// per-entry results reuse the exact element contract (`Nil` → `null`,
+/// `Int` → number, non-UTF-8 bulk → `{"bytes": "<base64>"}`, and so on).
+pub(crate) fn reply_value_to_json(value: &redis::Value) -> Result<serde_json::Value, CamelError> {
+    use base64::Engine;
+    let encoded = match value {
+        redis::Value::Nil => serde_json::Value::Null,
+        redis::Value::Int(number) => serde_json::Value::from(*number),
+        redis::Value::Okay => serde_json::Value::String("OK".to_string()),
+        redis::Value::SimpleString(text) => serde_json::Value::String(text.clone()),
+        redis::Value::BulkString(bytes) => match String::from_utf8(bytes.clone()) {
+            Ok(text) => serde_json::Value::String(text),
+            // JSON arrays cannot carry raw bytes: the object form is the
+            // explicit nested-binary representation.
+            Err(_) => serde_json::json!({
+                "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+        },
+        redis::Value::VerbatimString { text, .. } => serde_json::Value::String(text.clone()),
+        redis::Value::Array(elements) | redis::Value::Set(elements) => serde_json::Value::Array(
+            elements
+                .iter()
+                .map(reply_value_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        redis::Value::Map(entries) => map_reply_to_json(entries)?,
+        redis::Value::Double(number) => serde_json::Value::from(*number),
+        redis::Value::Boolean(flag) => serde_json::Value::Bool(*flag),
+        redis::Value::BigNumber(number) => serde_json::Value::String(number.to_string()),
+        redis::Value::Attribute { data, .. } => reply_value_to_json(data)?,
+        redis::Value::ServerError(err) => return Err(server_error_body_error(err)),
+        // Defence in depth for the not-expected Push/unknown variants: a
+        // nested position renders JSON null and never panics.
+        _ => serde_json::Value::Null,
+    };
+    Ok(encoded)
+}
+
+/// A `Map` reply as a JSON object: keys rendered to strings, values via the
+/// element mapping.
+fn map_reply_to_json(
+    entries: &[(redis::Value, redis::Value)],
+) -> Result<serde_json::Value, CamelError> {
+    let mut object = serde_json::Map::with_capacity(entries.len());
+    for (key, value) in entries {
+        object.insert(map_key_to_string(key)?, reply_value_to_json(value)?);
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
+/// Renders a `Map` key as the JSON object key it becomes.
+///
+/// UTF-8 bulk/simple text is used verbatim, integers use their decimal form,
+/// and every other kind uses its element-mapped JSON rendered to a string.
+fn map_key_to_string(key: &redis::Value) -> Result<String, CamelError> {
+    match key {
+        redis::Value::BulkString(bytes) => Ok(String::from_utf8_lossy(bytes).into_owned()),
+        redis::Value::SimpleString(text) => Ok(text.clone()),
+        redis::Value::Okay => Ok("OK".to_string()),
+        redis::Value::Int(number) => Ok(number.to_string()),
+        other => match reply_value_to_json(other)? {
+            serde_json::Value::String(text) => Ok(text),
+            rendered => Ok(rendered.to_string()),
         },
     }
 }
@@ -1229,6 +1479,150 @@ mod value_helper_tests {
         assert_eq!(
             reply_to_body(Some(&[0xC3, 0x28])),
             Body::Bytes(vec![0xC3, 0x28].into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod script_operand_tests {
+    use super::*;
+    use camel_component_api::Message;
+
+    fn body_exchange(body: Body) -> Exchange {
+        Exchange::new(Message::new(body))
+    }
+
+    #[test]
+    fn script_keys_and_args_bind_from_body() {
+        let exchange = body_exchange(Body::Json(serde_json::json!({
+            "keys": ["a", "b"],
+            "args": ["x", 7],
+        })));
+
+        let (keys, args) =
+            script_operands(&exchange).expect("a well-formed operand body must bind");
+
+        assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            args,
+            vec!["x".to_string(), "7".to_string()],
+            "numeric args encode as their decimal string form"
+        );
+    }
+
+    #[test]
+    fn script_operands_require_both_arrays_and_typed_args() {
+        let missing_args = body_exchange(Body::Json(serde_json::json!({"keys": []})));
+        let err = script_operands(&missing_args).expect_err("a missing args field must fail");
+        assert!(
+            err.to_string().contains("'args' is required"),
+            "the error must name the missing field, got: {err}"
+        );
+
+        let mistyped_arg = body_exchange(Body::Json(serde_json::json!({
+            "keys": [],
+            "args": [true],
+        })));
+        let err = script_operands(&mistyped_arg).expect_err("a boolean arg must fail");
+        assert!(
+            err.to_string()
+                .contains("'args[0]' must be a string or a number"),
+            "the error must state the args element rule, got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod script_reply_tests {
+    use super::*;
+
+    #[test]
+    fn redis_value_to_body_maps_nested_replies() {
+        let nested = redis::Value::Array(vec![
+            redis::Value::Int(1),
+            redis::Value::BulkString("ütf8".as_bytes().to_vec()),
+            redis::Value::BulkString(vec![0xFFu8]),
+            redis::Value::Nil,
+            redis::Value::Okay,
+        ]);
+
+        assert_eq!(
+            redis_value_to_body(&nested).expect("nested array replies must map"),
+            Body::Json(serde_json::json!([1, "ütf8", {"bytes": "/w=="}, null, "OK"])),
+            "nested binary bulk strings use the explicit {{\"bytes\": base64}} object"
+        );
+
+        let standalone = redis::Value::BulkString(vec![0xFFu8]);
+        assert_eq!(
+            redis_value_to_body(&standalone).expect("a binary bulk string maps to bytes"),
+            Body::Bytes(vec![0xFFu8].into()),
+            "top-level non-UTF-8 bulk strings keep the byte-body contract"
+        );
+    }
+
+    #[test]
+    fn redis_value_to_body_maps_map_bignumber_and_attribute() {
+        let map = redis::Value::Map(vec![
+            (
+                redis::Value::Int(1),
+                redis::Value::BulkString(b"one".to_vec()),
+            ),
+            (
+                redis::Value::BulkString(b"k".to_vec()),
+                redis::Value::Int(2),
+            ),
+        ]);
+        assert_eq!(
+            redis_value_to_body(&map).expect("map replies must map"),
+            Body::Json(serde_json::json!({"1": "one", "k": 2})),
+            "map keys render to strings; values use the element mapping"
+        );
+
+        let big = redis::Value::BigNumber(
+            "12345678901234567890"
+                .parse()
+                .expect("the decimal literal parses into the driver's number type"),
+        );
+        assert_eq!(
+            redis_value_to_body(&big).expect("bignumber replies must map"),
+            Body::Json(serde_json::json!("12345678901234567890")),
+            "a bignumber maps to its decimal digits as a JSON string"
+        );
+
+        let attribute = redis::Value::Attribute {
+            data: Box::new(redis::Value::Int(5)),
+            attributes: vec![(
+                redis::Value::BulkString(b"ttl".to_vec()),
+                redis::Value::Int(1),
+            )],
+        };
+        assert_eq!(
+            redis_value_to_body(&attribute).expect("attribute replies must map"),
+            Body::Json(serde_json::json!(5)),
+            "RESP3 attributes are dropped and the underlying data value is mapped"
+        );
+    }
+
+    #[test]
+    fn redis_value_to_body_server_error_is_err() {
+        let top = redis::parse_redis_value(
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+        )
+        .expect("valid RESP error reply");
+        let err = redis_value_to_body(&top).expect_err("a server error has no body form");
+        assert!(
+            err.to_string().contains("WRONGTYPE"),
+            "the error must name the server error text, got: {err}"
+        );
+
+        let nested_error =
+            redis::parse_redis_value(b"-ERR nested boom\r\n").expect("valid RESP error reply");
+        let nested = redis::Value::Array(vec![redis::Value::Int(1), nested_error]);
+        let err = redis_value_to_body(&nested).expect_err("a nested server error has no body form");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ERR") && msg.contains("nested boom"),
+            "the error must name the nested server error text, got: {msg}"
         );
     }
 }

@@ -44,9 +44,11 @@ camel-component-api = { workspace = true, features = ["test-support"] }
 camel-component-direct.workspace = true
 camel-component-http.workspace = true
 camel-component-mock.workspace = true
+camel-component-redis.workspace = true
 criterion.workspace = true
 futures.workspace = true
 jsonschema = { workspace = true }
+redis.workspace = true
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "net", "time", "io-util"] }
 tokio-util.workspace = true

@@ -1,5 +1,7 @@
-use crate::config::{RedisCommand, RedisEndpointConfig, is_idempotent_command};
-use crate::executor::{MultiplexedExecutor, execute_with_retry};
+use crate::config::{RedisCommand, RedisEndpointConfig, is_idempotent_command, is_script_command};
+use crate::executor::{CommandContext, MultiplexedExecutor, execute_with_retry};
+use crate::script::{ScriptKind, ScriptRuntime, load_script_source};
+use crate::transport_error::RequestKind;
 use camel_component_api::{CamelError, Exchange, RuntimeObservability};
 use std::future::Future;
 use std::pin::Pin;
@@ -35,7 +37,8 @@ impl RedisProducer {
         runtime: Arc<dyn RuntimeObservability>,
     ) -> Result<Self, CamelError> {
         let topology = crate::topology::topology_from_config(&config)?;
-        let executor = MultiplexedExecutor::new(config.clone(), topology);
+        let context = command_context(&config)?;
+        let executor = MultiplexedExecutor::new(config.clone(), topology).with_context(context);
         Ok(Self {
             config,
             executor,
@@ -48,7 +51,10 @@ impl RedisProducer {
     /// The endpoint URI is the sole command source (ADR-0032). A
     /// `CamelRedis.Command` header — with any value, parsable or not — is
     /// rejected so that message payloads cannot select a different Redis
-    /// command than the one the endpoint declares.
+    /// command than the one the endpoint declares. Script text is operator
+    /// config too: on a script endpoint a `CamelRedis.Script` header is
+    /// rejected for the same reason (exchange data is untrusted; executable
+    /// text is an interpretable sink).
     fn resolve_command(
         exchange: &Exchange,
         config: &RedisEndpointConfig,
@@ -56,6 +62,14 @@ impl RedisProducer {
         if exchange.input.header("CamelRedis.Command").is_some() {
             return Err(CamelError::ProcessorError(
                 "untrusted header 'CamelRedis.Command' cannot select a Redis command; the endpoint URI 'command=' is the only command source (ADR-0032)"
+                    .into(),
+            ));
+        }
+        if is_script_command(&config.command)
+            && exchange.input.header("CamelRedis.Script").is_some()
+        {
+            return Err(CamelError::ProcessorError(
+                "untrusted header 'CamelRedis.Script' cannot supply script text; a script endpoint takes its source only from the URI 'script=' or 'scriptFile=' (ADR-0032)"
                     .into(),
             ));
         }
@@ -131,6 +145,45 @@ impl RedisProducer {
     }
 }
 
+/// Builds the per-endpoint dispatch context: the script runtime for a
+/// script command (validating and, for `scriptFile`, reading its source NOW,
+/// so a missing/unreadable file fails at endpoint creation) plus the
+/// `idempotent` replay opt-in.
+fn command_context(config: &RedisEndpointConfig) -> Result<CommandContext, CamelError> {
+    let script = if is_script_command(&config.command) {
+        Some(Arc::new(ScriptRuntime::new(
+            load_script_source(config)?,
+            script_kind(config)?,
+        )))
+    } else {
+        None
+    };
+    Ok(CommandContext {
+        script,
+        script_idempotent: config.idempotent,
+        atomic: config.atomic,
+        batch: None,
+    })
+}
+
+/// Resolves which script command the runtime drives.
+///
+/// `from_uri` already validated the `function`/`script` pairing; a
+/// programmatically built config that skips it fails closed here instead of
+/// dispatching an `FCALL` without a name.
+fn script_kind(config: &RedisEndpointConfig) -> Result<ScriptKind, CamelError> {
+    match config.command {
+        RedisCommand::Fcall => match config.function.clone() {
+            Some(function) if !function.is_empty() => Ok(ScriptKind::Fcall { function }),
+            _ => Err(CamelError::Config(
+                "command=fcall requires 'function': set the registered function name to invoke"
+                    .to_string(),
+            )),
+        },
+        _ => Ok(ScriptKind::Eval),
+    }
+}
+
 impl Service<Exchange> for RedisProducer {
     type Response = Exchange;
     type Error = CamelError;
@@ -161,17 +214,40 @@ impl Service<Exchange> for RedisProducer {
             }
             Self::apply_default_channels(&mut exchange, &config);
 
-            // 3. Execute with retry on transient errors. The executor reconnects
-            //    (re-resolving the master through the topology) before each retry.
+            // 3. Execute with retry. Retry eligibility is a producer-side
+            //    preflight: the retry loop wraps dispatch, so the idempotence
+            //    argument must be resolved BEFORE the loop runs. Script
+            //    commands opt in through the endpoint's `idempotent` flag and
+            //    use the script classifier, whose provenance pair resolves
+            //    every reply before classification. A batch is replayable
+            //    only when EVERY entry is idempotent, and its plan is built
+            //    here — before any connection — so a rejected batch cannot
+            //    send a partially-applied command list.
             // ("redis","command") facade (dashboard-observability 4.3): the
             // command boundary observes the final outcome AFTER the retry
             // loop settles — one observe per exchange, not per attempt (the
             // custom loop in execute_with_retry never wires metrics).
+            let batch = if cmd == RedisCommand::Multi {
+                Some(crate::commands::batch::plan_batch(&exchange)?)
+            } else {
+                None
+            };
+            let (is_idempotent, kind) = if is_script_command(&cmd) {
+                (config.idempotent, RequestKind::Script)
+            } else if let Some(plan) = &batch {
+                (plan.idempotent, RequestKind::Plain)
+            } else {
+                (is_idempotent_command(&cmd), RequestKind::Plain)
+            };
+            if let Some(plan) = batch {
+                executor = executor.with_batch(plan);
+            }
             let command_outcome = execute_with_retry(
                 &mut executor,
                 &cmd,
                 &mut exchange,
-                is_idempotent_command(&cmd),
+                is_idempotent,
+                kind,
                 &config.reconnect,
             )
             .await;
@@ -188,6 +264,7 @@ mod tests {
     use super::*;
     use crate::executor::test_stub;
     use crate::topology::FakeTopology;
+    use camel_component_api::NetworkRetryPolicy;
     use camel_component_api::test_support::NoopRuntimeObservability;
     use std::error::Error as _;
 
@@ -201,7 +278,8 @@ mod tests {
     /// struct directly and inject the RESP stub topology.
     fn stub_producer(url: &str, topology: Arc<FakeTopology>) -> RedisProducer {
         let config = RedisEndpointConfig::from_uri(url).expect("valid stub redis URI");
-        let executor = MultiplexedExecutor::new(config.clone(), topology);
+        let context = command_context(&config).expect("script source resolves for the stub config");
+        let executor = MultiplexedExecutor::new(config.clone(), topology).with_context(context);
         RedisProducer {
             config,
             executor,
@@ -641,5 +719,2093 @@ mod tests {
         assert!(config.reconnect.should_retry(1));
         assert!(config.reconnect.should_retry(2));
         assert!(!config.reconnect.should_retry(3));
+    }
+
+    // ── eval script execution (redisfc 2.1) ────────────────────────────────
+
+    /// Raw `EXEC` reply carrying the provenance pair `(exists, result)`.
+    /// `exists` is `SCRIPT EXISTS <sha>`'s reply — real Redis answers one
+    /// flag per requested SHA, so it is a one-element ARRAY (`*1\r\n:1\r\n`),
+    /// never a bare integer — and `result` is `EVALSHA`'s.
+    const PAIR_CACHED_ONE: &[u8] = b"*2\r\n*1\r\n:1\r\n:1\r\n";
+    const PAIR_UNCACHED_NOSCRIPT: &[u8] =
+        b"*2\r\n*1\r\n:0\r\n-NOSCRIPT No matching script. Please use EVAL.\r\n";
+    const PAIR_CACHED_NOSCRIPT: &[u8] = b"*2\r\n*1\r\n:1\r\n-NOSCRIPT forged by the script\r\n";
+    const PAIR_SCRIPT_BUSY: &[u8] = b"*2\r\n*1\r\n:1\r\n-BUSY fake script reply\r\n";
+
+    fn eval_uri(stub: &test_stub::StubServer, script: &str) -> String {
+        format!("{}?command=eval&script={script}", stub.url())
+    }
+
+    fn eval_sha(script: &str) -> String {
+        redis::Script::new(script).get_hash().to_string()
+    }
+
+    fn eval_exchange() -> Exchange {
+        use camel_component_api::Body;
+        Exchange::new(Message::new(Body::Json(serde_json::json!({
+            "keys": [],
+            "args": [],
+        }))))
+    }
+
+    fn recorded_text(stub: &test_stub::StubServer) -> Vec<String> {
+        stub.recorded_frames()
+            .iter()
+            .map(|frame| String::from_utf8_lossy(frame).into_owned())
+            .collect()
+    }
+
+    /// Cached connection generation of `producer`'s executor: `None` when the
+    /// cache is empty (a failure invalidated it), `Some(n)` while generation
+    /// `n` is cached.
+    async fn cached_generation(producer: &RedisProducer) -> Option<u64> {
+        let conn = producer.executor.conn_arc();
+        let guard = conn.lock().await; // allow-test-wait: test-owned cache cell; lock is uncontended in-test
+        guard.as_ref().map(|(generation, _)| *generation)
+    }
+
+    /// `command=eval` producer wired to `stub`'s topology.
+    fn eval_producer(stub: &test_stub::StubServer) -> RedisProducer {
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        stub_producer(&eval_uri(stub, "return%201"), topology)
+    }
+
+    fn evalsha_count(frames: &[String]) -> usize {
+        frames.iter().filter(|f| f.contains("EVALSHA")).count()
+    }
+
+    #[tokio::test]
+    async fn eval_inline_script_runs_with_body_keys_and_args() {
+        use camel_component_api::Body;
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(PAIR_CACHED_ONE)])
+                .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
+            "keys": ["k1"],
+            "args": ["a1"],
+        }))));
+        let out = producer
+            .call(exchange)
+            .await
+            .expect("the script answers the integer 1");
+
+        assert_eq!(
+            out.input.body,
+            Body::Json(serde_json::json!(1)),
+            "the reply becomes the exchange body"
+        );
+
+        let frames = recorded_text(&stub);
+        let evalsha = frames
+            .iter()
+            .find(|frame| frame.contains("EVALSHA"))
+            .unwrap_or_else(|| panic!("the invocation must be an EVALSHA frame: {frames:?}"));
+        let sha = eval_sha("return 1");
+        assert!(
+            evalsha.contains(&sha),
+            "EVALSHA must carry the script SHA, got: {evalsha}"
+        );
+        assert!(
+            evalsha.contains("k1"),
+            "the body key must travel as the first key operand, got: {evalsha}"
+        );
+        assert!(
+            evalsha.contains("a1"),
+            "the body arg must travel as the first arg operand, got: {evalsha}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_provenance_pair_is_atomic() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(PAIR_CACHED_ONE)])
+                .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        producer
+            .call(eval_exchange())
+            .await
+            .expect("the cached script answers the integer 1");
+
+        let frames = recorded_text(&stub);
+        let sha = eval_sha("return 1");
+        assert_eq!(
+            frames.len(),
+            4,
+            "the provenance pair is one atomic pipeline: MULTI, SCRIPT EXISTS, EVALSHA, EXEC; got {frames:?}"
+        );
+        assert!(frames[0].contains("MULTI"), "pair must open with MULTI");
+        assert!(
+            frames[1].contains("SCRIPT")
+                && frames[1].contains("EXISTS")
+                && frames[1].contains(&sha),
+            "the pair must observe SCRIPT EXISTS <sha>, got: {}",
+            frames[1]
+        );
+        assert!(
+            frames[2].contains("EVALSHA") && frames[2].contains(&sha),
+            "the pair must invoke EVALSHA <sha>, got: {}",
+            frames[2]
+        );
+        assert!(frames[3].contains("EXEC"), "pair must close with EXEC");
+    }
+
+    #[tokio::test]
+    async fn eval_noscript_reloads_once_and_reinvokes() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Raw(PAIR_UNCACHED_NOSCRIPT),
+            test_stub::AppReply::Ok,
+            test_stub::AppReply::Raw(PAIR_CACHED_ONE),
+        ])
+        .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        let out = producer
+            .call(eval_exchange())
+            .await
+            .expect("the reload recovers the missing script once");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(1)),
+            "the second pair's result is the exchange result"
+        );
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            9,
+            "pair1, SCRIPT LOAD, pair2 as four frames each plus the reload; got {frames:?}"
+        );
+        assert!(
+            frames[4].contains("SCRIPT") && frames[4].contains("LOAD"),
+            "the reload must be a SCRIPT LOAD between the pairs, got: {}",
+            frames[4]
+        );
+        assert_eq!(
+            evalsha_count(&frames),
+            2,
+            "exactly one re-invocation after the reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_second_noscript_is_named_error() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Raw(PAIR_UNCACHED_NOSCRIPT),
+            test_stub::AppReply::Ok,
+            test_stub::AppReply::Raw(PAIR_CACHED_NOSCRIPT),
+        ])
+        .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        let err = producer
+            .call(eval_exchange())
+            .await
+            .expect_err("a second NOSCRIPT is terminal");
+
+        assert!(
+            err.to_string().contains("NOSCRIPT"),
+            "the terminal error must name NOSCRIPT, got: {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            evalsha_count(&frames),
+            2,
+            "no third invocation after the second NOSCRIPT; frames: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_forged_noscript_not_reinvoked_without_optin() {
+        let stub = test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(
+            PAIR_CACHED_NOSCRIPT,
+        )])
+        .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        let err = producer
+            .call(eval_exchange())
+            .await
+            .expect_err("a cached script cannot return NOSCRIPT, so the reply is forged");
+
+        assert!(
+            err.to_string().contains("NOSCRIPT"),
+            "the forged reply surfaces as a named error, got: {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            evalsha_count(&frames),
+            1,
+            "exactly one side effect: the forged reply must not be re-invoked; frames: {frames:?}"
+        );
+        assert!(
+            !frames.iter().any(|f| f.contains("LOAD")),
+            "a cached script must not be reloaded: {frames:?}"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "a proven-forged reply is a business error"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_rejects_script_header() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let mut producer = eval_producer(&stub);
+
+        let mut msg = Message::new(camel_component_api::Body::Json(serde_json::json!({
+            "keys": [],
+            "args": [],
+        })));
+        msg.set_header(
+            "CamelRedis.Script",
+            serde_json::json!("return redis.call('GET', 'k')"),
+        );
+
+        let err = producer
+            .call(Exchange::new(msg))
+            .await
+            .expect_err("script text from exchange data is rejected");
+
+        assert!(
+            err.to_string().contains("CamelRedis.Script"),
+            "the error must name the rejected header, got: {err}"
+        );
+        assert_eq!(
+            stub.command_count(),
+            0,
+            "the rejection must happen before send"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_malformed_body_operands_named_error() {
+        use camel_component_api::Body;
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let mut producer = eval_producer(&stub);
+
+        let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
+            "keys": "k1",
+        }))));
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("a non-array keys field is rejected");
+
+        assert!(
+            err.to_string()
+                .contains(r#"{"keys": [...], "args": [...]}"#),
+            "the error must name the expected body shape, got: {err}"
+        );
+        assert_eq!(
+            stub.command_count(),
+            0,
+            "the rejection must happen before send"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_rejects_missing_keys_field() {
+        use camel_component_api::Body;
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let mut producer = eval_producer(&stub);
+
+        let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
+            "args": ["x"],
+        }))));
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("both operand arrays are required, so a missing keys field is rejected");
+
+        assert!(
+            err.to_string().contains("'keys' is required"),
+            "the error must name the missing field, got: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains(r#"{"keys": [...], "args": [...]}"#),
+            "the error must name the expected body shape, got: {err}"
+        );
+        assert_eq!(
+            stub.command_count(),
+            0,
+            "the rejection must happen before send"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_rejects_non_string_key() {
+        use camel_component_api::Body;
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let mut producer = eval_producer(&stub);
+
+        let exchange = Exchange::new(Message::new(Body::Json(serde_json::json!({
+            "keys": [123],
+            "args": [],
+        }))));
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("keys accept strings only, so a numeric key is rejected");
+
+        assert!(
+            err.to_string().contains("'keys[0]'"),
+            "the error must name the offending element, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("must be a string key"),
+            "the error must state the keys element rule, got: {err}"
+        );
+        assert!(
+            err.to_string()
+                .contains(r#"{"keys": [...], "args": [...]}"#),
+            "the error must name the expected body shape, got: {err}"
+        );
+        assert_eq!(
+            stub.command_count(),
+            0,
+            "the rejection must happen before send"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_faked_busy_reply_not_replayed_without_optin() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(PAIR_SCRIPT_BUSY)])
+                .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        let err = producer
+            .call(eval_exchange())
+            .await
+            .expect_err("a cached script returning BUSY is a business error");
+
+        assert!(
+            err.to_string().contains("BUSY"),
+            "the faked BUSY reply surfaces as a named business error, got: {err}"
+        );
+        assert_eq!(
+            evalsha_count(&recorded_text(&stub)),
+            1,
+            "exactly one invocation: no replay without the idempotent opt-in"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "an arbitrary script-forged code is a business error, never transient"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_script_commands_keep_header_sourced_keys() {
+        use camel_component_api::Body;
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Bulk("v")).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let mut producer = stub_producer(&format!("{}?command=get", stub.url()), topology);
+        stub.record_frames();
+
+        let mut msg = Message::new(Body::Text("ignored".into()));
+        msg.set_header("CamelRedis.Key", serde_json::json!("k1"));
+        producer
+            .call(Exchange::new(msg))
+            .await
+            .expect("GET answers from the stub");
+
+        let frames = recorded_text(&stub);
+        assert_eq!(frames.len(), 1, "one GET frame: {frames:?}");
+        assert!(
+            frames[0].contains("GET") && frames[0].contains("k1"),
+            "the key still comes from CamelRedis.Key, got: {}",
+            frames[0]
+        );
+    }
+
+    /// The reactive `SCRIPT LOAD` after a `NOSCRIPT` dies on the socket: the
+    /// terminal error must still evict the dead connection, so the next
+    /// exchange loads on a fresh one instead of retrying against the poisoned
+    /// socket.
+    #[tokio::test]
+    async fn eval_script_load_failure_invalidates_dead_connection() {
+        let dead = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Raw(PAIR_UNCACHED_NOSCRIPT),
+            test_stub::AppReply::Close,
+        ])
+        .await;
+        let fresh = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Raw(PAIR_UNCACHED_NOSCRIPT),
+            test_stub::AppReply::Ok,
+            test_stub::AppReply::Raw(PAIR_CACHED_ONE),
+        ])
+        .await;
+        let topology = Arc::new(FakeTopology::addrs(vec![dead.url(), fresh.url()]));
+        let mut producer = stub_producer(&eval_uri(&dead, "return%201"), topology.clone());
+
+        let err = producer
+            .call(eval_exchange())
+            .await
+            .expect_err("the reload died on the socket, so the first exchange fails");
+
+        assert!(
+            err.to_string().contains("SCRIPT LOAD"),
+            "the terminal error must name the failed reload, got: {err}"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "the attempt is terminal: a failed load is never replayed: {err}"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "the preserved driver error must reach the invalidation track: {err}"
+        );
+        assert!(
+            crate::transport_error::is_transient_redis_error(&err),
+            "invalidating evidence implies the transient class: {err}"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            None,
+            "the dead generation must be evicted, not reused by later exchanges"
+        );
+        assert_eq!(
+            dead.command_count(),
+            5,
+            "the pair's four frames plus the reload reached the dead stub"
+        );
+
+        let out = producer
+            .call(eval_exchange())
+            .await
+            .expect("the second exchange redials and loads on a fresh connection");
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(1)),
+            "the fresh connection serves the invocation"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            Some(2),
+            "the retry dialed a new generation"
+        );
+        assert_eq!(
+            fresh.command_count(),
+            9,
+            "the fresh connection re-ran the pair, the reload, and the second pair"
+        );
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "exactly one redial: the dead connection was not reused"
+        );
+    }
+
+    // ── fcall script execution (redisfc 2.3) ───────────────────────────────    /// The function-library source the fcall tests configure inline.
+    const LOCK_LIBRARY: &str =
+        "#!lua name=lock\nredis.register_function('lock', function(keys, args) return 'hi' end)";
+
+    /// A distinct library source for the `scriptFile` test, so the wire log
+    /// proves which implementation the first-use load bound.
+    const CONFIGURED_LIBRARY: &str = "#!lua name=lock\nredis.register_function('lock', function(keys, args) return 'configured' end)";
+
+    /// `$len\r\n<text>\r\n`: one RESP2 bulk string.
+    fn bulk(text: &str) -> Vec<u8> {
+        let mut out = format!("${}\r\n", text.len()).into_bytes();
+        out.extend_from_slice(text.as_bytes());
+        out.extend_from_slice(b"\r\n");
+        out
+    }
+
+    /// `*n\r\n<elements>`: one RESP2 array.
+    fn array(elements: impl IntoIterator<Item = Vec<u8>>) -> Vec<u8> {
+        let elements: Vec<Vec<u8>> = elements.into_iter().collect();
+        let mut out = format!("*{}\r\n", elements.len()).into_bytes();
+        for element in elements {
+            out.extend_from_slice(&element);
+        }
+        out
+    }
+
+    /// A real RESP2 `FUNCTION LIST` reply: one library whose `functions`
+    /// field carries one entry per name. Redis answers an array of
+    /// libraries, each a flat alternating field/value array; a function
+    /// entry has the same flat shape (RESP2, the driver default).
+    fn function_list(names: &[&str]) -> Vec<u8> {
+        let functions: Vec<Vec<u8>> = names
+            .iter()
+            .map(|name| array(vec![bulk("name"), bulk(name)]))
+            .collect();
+        let library = array(vec![
+            bulk("library_name"),
+            bulk("lock"),
+            bulk("engine"),
+            bulk("LUA"),
+            bulk("functions"),
+            array(functions),
+            bulk("library_code"),
+            bulk(LOCK_LIBRARY),
+        ]);
+        array(vec![library])
+    }
+
+    /// A provenance-pair `EXEC` reply with an explicit `FUNCTION LIST` entry.
+    fn fcall_pair_with_list(list: Vec<u8>, result: Vec<u8>) -> Vec<u8> {
+        array(vec![list, result])
+    }
+
+    /// A provenance-pair `EXEC` reply: `(FUNCTION LIST, FCALL)`.
+    fn fcall_pair(present: bool, result: Vec<u8>) -> Vec<u8> {
+        let names: &[&str] = if present { &["lock"] } else { &[] };
+        fcall_pair_with_list(function_list(names), result)
+    }
+
+    /// `%n\r\n<field><value>…`: one RESP3 map.
+    fn resp3_map(pairs: Vec<(&str, Vec<u8>)>) -> Vec<u8> {
+        let mut out = format!("%{}\r\n", pairs.len()).into_bytes();
+        for (key, value) in pairs {
+            out.extend_from_slice(&bulk(key));
+            out.extend_from_slice(&value);
+        }
+        out
+    }
+
+    /// A RESP2 `FUNCTION LIST` reply whose function entry has a non-text
+    /// `name`. Such a reply proves nothing about registration.
+    fn function_list_with_non_text_name() -> Vec<u8> {
+        let entry = array(vec![bulk("name"), b":7\r\n".to_vec()]);
+        let library = array(vec![
+            bulk("library_name"),
+            bulk("lock"),
+            bulk("engine"),
+            bulk("LUA"),
+            bulk("functions"),
+            array(vec![entry]),
+            bulk("library_code"),
+            bulk(LOCK_LIBRARY),
+        ]);
+        array(vec![library])
+    }
+
+    /// The RESP3-map form of [`function_list_with_non_text_name`].
+    fn resp3_function_list_with_non_text_name() -> Vec<u8> {
+        let entry = resp3_map(vec![("name", b":7\r\n".to_vec())]);
+        let library = resp3_map(vec![
+            ("library_name", bulk("lock")),
+            ("engine", bulk("LUA")),
+            ("functions", array(vec![entry])),
+            ("library_code", bulk(LOCK_LIBRARY)),
+        ]);
+        array(vec![library])
+    }
+
+    /// Leaks `bytes` so a dynamically built reply can ride [`AppReply::Raw`].
+    fn raw_reply(bytes: Vec<u8>) -> test_stub::AppReply {
+        test_stub::AppReply::Raw(Box::leak(bytes.into_boxed_slice()))
+    }
+
+    /// The `FCALL` reply for an unregistered function.
+    fn function_not_found() -> Vec<u8> {
+        b"-ERR Function not found\r\n".to_vec()
+    }
+
+    fn encode_query_value(value: &str) -> String {
+        percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+    }
+
+    fn fcall_uri(stub: &test_stub::StubServer, extra: &str) -> String {
+        format!(
+            "{}?command=fcall&function=lock&script={}{extra}",
+            stub.url(),
+            encode_query_value(LOCK_LIBRARY)
+        )
+    }
+
+    fn fcall_producer(stub: &test_stub::StubServer) -> RedisProducer {
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        stub_producer(&fcall_uri(stub, ""), topology)
+    }
+
+    fn fcall_exchange(args: &[&str]) -> Exchange {
+        use camel_component_api::Body;
+        Exchange::new(Message::new(Body::Json(serde_json::json!({
+            "keys": [],
+            "args": args,
+        }))))
+    }
+
+    /// `FUNCTION LOAD` frames: the first-use load and any recovery load.
+    fn load_count(frames: &[String]) -> usize {
+        frames
+            .iter()
+            .filter(|frame| frame.contains("FUNCTION") && frame.contains("LOAD"))
+            .count()
+    }
+
+    fn fcall_count(frames: &[String]) -> usize {
+        frames
+            .iter()
+            .filter(|frame| frame.contains("FCALL"))
+            .count()
+    }
+
+    fn first_index(frames: &[String], needle: &str) -> Option<usize> {
+        frames.iter().position(|frame| frame.contains(needle))
+    }
+
+    #[tokio::test]
+    async fn fcall_loads_library_and_invokes() {
+        use camel_component_api::Body;
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("hi"))),
+        ])
+        .await;
+        let mut producer = fcall_producer(&stub);
+        stub.record_frames();
+
+        let first = producer
+            .call(fcall_exchange(&["a1"]))
+            .await
+            .expect("the function library loads and the invocation answers");
+        let second = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the repeat exchange reuses the loaded library");
+
+        assert_eq!(
+            first.input.body,
+            Body::Text("hi".into()),
+            "the FCALL reply becomes the exchange body"
+        );
+        assert_eq!(
+            second.input.body,
+            Body::Text("hi".into()),
+            "the repeat exchange maps its reply the same way"
+        );
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            load_count(&frames),
+            1,
+            "the first-use lazy load runs exactly once across both exchanges: {frames:?}"
+        );
+        assert_eq!(
+            fcall_count(&frames),
+            2,
+            "one FCALL invocation per exchange: {frames:?}"
+        );
+        let load =
+            first_index(&frames, "FUNCTION").expect("the first-use load must be on the wire");
+        let invoke = first_index(&frames, "FCALL").expect("the invocation must be on the wire");
+        assert!(
+            load < invoke,
+            "the library loads before the first invocation: {frames:?}"
+        );
+        assert!(
+            frames[load].contains("REPLACE") && frames[load].contains("register_function"),
+            "the load must be FUNCTION LOAD REPLACE with the configured source, got: {}",
+            frames[load]
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_first_use_replaces_preexisting_function() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let library_path = dir.path().join("lock.lua");
+        std::fs::write(&library_path, CONFIGURED_LIBRARY).expect("write the library source");
+
+        // FUNCTION LIST already reports a `lock` function, so only the
+        // first-use REPLACE can bind the name to the configured code.
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("hi"))),
+        ])
+        .await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let uri = format!(
+            "{}?command=fcall&function=lock&scriptFile={}",
+            stub.url(),
+            encode_query_value(&library_path.display().to_string())
+        );
+        let mut producer = stub_producer(&uri, topology);
+        stub.record_frames();
+
+        producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the configured implementation runs");
+        let after_first = recorded_text(&stub);
+        let invoke =
+            first_index(&after_first, "FCALL").expect("the invocation must be on the wire");
+        let load =
+            first_index(&after_first, "FUNCTION").expect("the first-use load must be on the wire");
+        assert!(
+            load < invoke,
+            "the configured source must load before the first invocation: {after_first:?}"
+        );
+        assert!(
+            after_first[load].contains("REPLACE")
+                && after_first[load].contains("return 'configured'"),
+            "the first-use load must bind the configured implementation, got: {}",
+            after_first[load]
+        );
+
+        stub.record_frames();
+        producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the repeat exchange reuses the loaded library");
+        assert_eq!(
+            load_count(&recorded_text(&stub)),
+            0,
+            "a second exchange sends no FUNCTION LOAD"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_missing_function_reloads_once() {
+        use camel_component_api::Body;
+        // Pair 1 observes the function absent and answers "function not
+        // found"; the recovery load succeeds and pair 2 runs the function.
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(false, function_not_found())),
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("again"))),
+        ])
+        .await;
+        let mut producer = fcall_producer(&stub);
+        stub.record_frames();
+
+        let out = producer
+            .call(fcall_exchange(&["again"]))
+            .await
+            .expect("the recovery load and single re-invocation succeed");
+
+        assert_eq!(
+            out.input.body,
+            Body::Text("again".into()),
+            "the second pair's result is the exchange result"
+        );
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            load_count(&frames),
+            2,
+            "the first-use load plus exactly one recovery load: {frames:?}"
+        );
+        assert_eq!(
+            fcall_count(&frames),
+            2,
+            "one initial invocation plus exactly one re-invocation: {frames:?}"
+        );
+        let loads: Vec<usize> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| frame.contains("FUNCTION") && frame.contains("LOAD"))
+            .map(|(index, _)| index)
+            .collect();
+        let invokes: Vec<usize> = frames
+            .iter()
+            .enumerate()
+            .filter(|(_, frame)| frame.contains("FCALL"))
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            loads[0] < invokes[0] && invokes[0] < loads[1] && loads[1] < invokes[1],
+            "the loads are distinguishable: initial load, invocation, recovery load, re-invocation; got {frames:?}"
+        );
+
+        // A harness that keeps reporting the function absent and "not found"
+        // exhausts the single reload: two invocations, then a terminal error.
+        let stuck = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(false, function_not_found())),
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(false, function_not_found())),
+        ])
+        .await;
+        let mut producer = fcall_producer(&stuck);
+        stuck.record_frames();
+
+        let err = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect_err("a repeated missing function is terminal");
+
+        assert!(
+            err.to_string().contains("function") && err.to_string().contains("lock"),
+            "the terminal error must name the function, got: {err}"
+        );
+        assert_eq!(
+            fcall_count(&recorded_text(&stuck)),
+            2,
+            "exactly one re-invocation before giving up"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "an exhausted reload is terminal: {err}"
+        );
+    }
+
+    /// A `FUNCTION LIST` reply with a non-text function `name` is malformed,
+    /// not "absent": the request is terminal and nothing is re-invoked.
+    async fn assert_malformed_function_name_is_terminal(list: Vec<u8>) {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("hi"))),
+            raw_reply(fcall_pair_with_list(list, function_not_found())),
+        ])
+        .await;
+        let mut producer = fcall_producer(&stub);
+        producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the priming exchange completes the first-use load");
+        stub.record_frames();
+
+        let err = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect_err("a non-text function name makes the whole LIST reply malformed");
+
+        assert!(
+            err.to_string().contains("malformed FCALL provenance pair"),
+            "the malformed LIST reply surfaces as a named terminal error, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("'name'"),
+            "the error names the offending field, got: {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            fcall_count(&frames),
+            1,
+            "the pair's FCALL ran once and was not re-invoked; frames: {frames:?}"
+        );
+        assert_eq!(
+            load_count(&frames),
+            0,
+            "a malformed LIST reply must not trigger a recovery load; frames: {frames:?}"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "a malformed LIST reply is terminal: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_malformed_function_name_is_terminal_resp2() {
+        assert_malformed_function_name_is_terminal(function_list_with_non_text_name()).await;
+    }
+
+    #[tokio::test]
+    async fn fcall_malformed_function_name_is_terminal_resp3() {
+        assert_malformed_function_name_is_terminal(resp3_function_list_with_non_text_name()).await;
+    }
+
+    #[tokio::test]
+    async fn fcall_concurrent_first_use_loads_once() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("hi"))),
+        ])
+        .await;
+        let producer = fcall_producer(&stub);
+        stub.record_frames();
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let mut clone = producer.clone();
+            handles.push(tokio::spawn(async move {
+                clone.call(fcall_exchange(&[])).await
+            }));
+        }
+        for handle in handles {
+            let out = handle
+                .await
+                .expect("the exchange task must not panic")
+                .expect("every concurrent first exchange succeeds");
+            assert_eq!(
+                out.input.body,
+                camel_component_api::Body::Text("hi".into()),
+                "every exchange maps its reply"
+            );
+        }
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            load_count(&frames),
+            1,
+            "the OnceCell init runs exactly one load under concurrent first use: {frames:?}"
+        );
+        assert_eq!(
+            fcall_count(&frames),
+            4,
+            "every exchange invokes the function once: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_forged_function_not_found_not_reinvoked_without_optin() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("ok"))),
+            raw_reply(fcall_pair(
+                true,
+                b"-ERR Function not found forged\r\n".to_vec(),
+            )),
+        ])
+        .await;
+        let mut producer = fcall_producer(&stub);
+
+        // First exchange completes the first-use init.
+        producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the initial exchange loads the library");
+        stub.record_frames();
+
+        let err = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect_err("a registered function cannot miss, so the reply is forged");
+
+        assert!(
+            err.to_string().contains("Function not found forged"),
+            "the forged reply surfaces as a named business error, got: {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            fcall_count(&frames),
+            1,
+            "exactly one side effect: the forged error must not be re-invoked; frames: {frames:?}"
+        );
+        assert_eq!(
+            load_count(&frames),
+            0,
+            "no recovery load: the only load is the completed first-use init; frames: {frames:?}"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "a proven-forged reply is a business error"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_rejects_script_header() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let mut producer = fcall_producer(&stub);
+
+        let mut msg = Message::new(camel_component_api::Body::Json(serde_json::json!({
+            "keys": [],
+            "args": [],
+        })));
+        msg.set_header(
+            "CamelRedis.Script",
+            serde_json::json!("return redis.call('GET', 'k')"),
+        );
+
+        let err = producer
+            .call(Exchange::new(msg))
+            .await
+            .expect_err("script text from exchange data is rejected");
+
+        assert!(
+            err.to_string().contains("CamelRedis.Script"),
+            "the error must name the rejected header, got: {err}"
+        );
+        assert_eq!(
+            stub.command_count(),
+            0,
+            "the rejection must happen before send"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_faked_loading_reply_not_replayed_without_optin() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, b"-LOADING fake script reply\r\n".to_vec())),
+        ])
+        .await;
+        let mut producer = fcall_producer(&stub);
+        stub.record_frames();
+
+        let err = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect_err("a registered function returning LOADING is a business error");
+
+        assert!(
+            err.to_string().contains("LOADING"),
+            "the faked LOADING reply surfaces as a named business error, got: {err}"
+        );
+        assert_eq!(
+            fcall_count(&recorded_text(&stub)),
+            1,
+            "exactly one invocation: no replay without the idempotent opt-in"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "an arbitrary script-forged code is a business error, never transient"
+        );
+    }
+
+    /// The first-use `FUNCTION LOAD REPLACE` dies on the socket. The terminal
+    /// error must still evict the dead connection: the init latch stays unset
+    /// after a failed load, so a surviving dead connection would make EVERY
+    /// later exchange retry the load against the same dead socket.
+    #[tokio::test]
+    async fn fcall_load_failure_invalidates_dead_connection() {
+        let dead = test_stub::StubServer::start(test_stub::AppReply::Close).await;
+        let fresh = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("hi"))),
+        ])
+        .await;
+        let topology = Arc::new(FakeTopology::addrs(vec![dead.url(), fresh.url()]));
+        let mut producer = stub_producer(&fcall_uri(&dead, ""), topology.clone());
+
+        let err = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect_err("the load died on the socket, so the first exchange fails");
+
+        assert!(
+            err.to_string().contains("FUNCTION LOAD REPLACE"),
+            "the terminal error must name the failed load, got: {err}"
+        );
+        assert_eq!(
+            crate::config::retry_class_script(&err, crate::config::SendPhase::PostFlush),
+            crate::config::RetryClass::NeverTransient,
+            "the attempt is terminal: a failed load is never replayed: {err}"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "the preserved driver error must reach the invalidation track: {err}"
+        );
+        assert!(
+            crate::transport_error::is_transient_redis_error(&err),
+            "invalidating evidence implies the transient class: {err}"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            None,
+            "the dead generation must be evicted, not reused by later exchanges"
+        );
+        assert_eq!(
+            dead.command_count(),
+            1,
+            "exactly one load reached the dead stub"
+        );
+
+        let out = producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the second exchange redials and loads on a fresh connection");
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Text("hi".into()),
+            "the fresh connection serves the invocation"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            Some(2),
+            "the retry dialed a new generation"
+        );
+        assert_eq!(
+            fresh.command_count(),
+            5,
+            "the fresh connection ran FUNCTION LOAD REPLACE plus the four pair frames"
+        );
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "exactly one redial: the dead connection was not reused"
+        );
+    }
+
+    // ── idempotent opt-in and outcome-unknown replay (redisfc 2.3) ─────────
+    /// Runs `exchange` on a primed producer, kills the socket after the four
+    /// provenance-pair frames were flushed, and reopens the reply gate so a
+    /// replay can complete. Returns the outcome.
+    ///
+    /// Delegates to [`call_killed_after_frames`], so the bounded preflight
+    /// (frame barrier → kill → reply gate → join, with an abort on timeout)
+    /// has exactly one implementation.
+    async fn call_with_kill_after_flush(
+        producer: &RedisProducer,
+        stub: &test_stub::StubServer,
+        exchange: Exchange,
+    ) -> Result<Exchange, CamelError> {
+        call_killed_after_frames(producer, stub, exchange, 4).await
+    }
+
+    #[tokio::test]
+    async fn eval_non_idempotent_outcome_unknown_not_retried() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(PAIR_CACHED_ONE)])
+                .await;
+        let mut producer = eval_producer(&stub);
+        producer
+            .call(eval_exchange())
+            .await
+            .expect("the priming exchange succeeds");
+        stub.record_frames();
+
+        let err = call_with_kill_after_flush(&producer, &stub, eval_exchange())
+            .await
+            .expect_err("an outcome-unknown script failure is not retried without the opt-in");
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            evalsha_count(&frames),
+            1,
+            "exactly one invocation: no replay without the idempotent opt-in; frames: {frames:?}"
+        );
+        assert!(
+            err.to_string().contains("EVALSHA"),
+            "the transport failure surfaces at the invocation, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_idempotent_optin_outcome_unknown_retried() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(PAIR_CACHED_ONE)])
+                .await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let uri = format!(
+            "{}?command=eval&script=return%201&idempotent=true",
+            stub.url()
+        );
+        let mut producer = stub_producer(&uri, topology);
+        producer
+            .call(eval_exchange())
+            .await
+            .expect("the priming exchange succeeds");
+        stub.record_frames();
+
+        let out = call_with_kill_after_flush(&producer, &stub, eval_exchange())
+            .await
+            .expect("the idempotent opt-in replays the outcome-unknown request");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(1)),
+            "the replayed invocation's result is the exchange result"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            evalsha_count(&frames),
+            2,
+            "the killed attempt plus exactly one replay; frames: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fcall_idempotent_optin_outcome_unknown_retried() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            raw_reply(fcall_pair(true, bulk("hi"))),
+        ])
+        .await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let uri = fcall_uri(&stub, "&idempotent=true");
+        let mut producer = stub_producer(&uri, topology);
+        producer
+            .call(fcall_exchange(&[]))
+            .await
+            .expect("the priming exchange loads the library");
+        stub.record_frames();
+
+        let out = call_with_kill_after_flush(&producer, &stub, fcall_exchange(&[]))
+            .await
+            .expect("the idempotent opt-in replays the outcome-unknown request");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Text("hi".into()),
+            "the replayed invocation's result is the exchange result"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            fcall_count(&frames),
+            2,
+            "the killed attempt plus exactly one replay; frames: {frames:?}"
+        );
+        assert_eq!(
+            load_count(&frames),
+            0,
+            "the replay reuses the already-loaded library; frames: {frames:?}"
+        );
+    }
+
+    // ── multi batch execution (redisfc 3.2) ────────────────────────────────
+
+    use crate::transport_error::RetryClass;
+    use crate::transport_error::SendPhase;
+    use crate::transport_error::retry_class;
+    use crate::transport_error::retry_class_script;
+
+    /// `command=multi` producer wired to `stub`'s topology.
+    fn multi_producer(stub: &test_stub::StubServer, atomic: bool) -> RedisProducer {
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let uri = format!("{}?command=multi&atomic={atomic}", stub.url());
+        stub_producer(&uri, topology)
+    }
+
+    /// One batch exchange: `entries` as `CamelRedis.Batch`, `body` as the
+    /// index-aligned value array.
+    fn batch_exchange(entries: serde_json::Value, body: serde_json::Value) -> Exchange {
+        let mut message = Message::new(camel_component_api::Body::Json(body));
+        message.set_header("CamelRedis.Batch", entries);
+        Exchange::new(message)
+    }
+
+    /// `SET a "v"` + `INCR b` — the canonical two-entry batch.
+    fn set_incr_batch() -> Exchange {
+        batch_exchange(
+            serde_json::json!([
+                {"command": "set", "key": "a"},
+                {"command": "incr", "key": "b"},
+            ]),
+            serde_json::json!(["v", null]),
+        )
+    }
+
+    #[tokio::test]
+    async fn batch_atomic_runs_as_multi_exec() {
+        let stub = test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(
+            b"*2\r\n+OK\r\n:1\r\n",
+        )])
+        .await;
+        let mut producer = multi_producer(&stub, true);
+        stub.record_frames();
+
+        let out = producer
+            .call(set_incr_batch())
+            .await
+            .expect("an atomic batch answers one reply per entry");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["OK", 1])),
+            "the EXEC array maps element-wise into the body"
+        );
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            4,
+            "one MULTI/EXEC pipeline: MULTI, SET, INCR, EXEC; got {frames:?}"
+        );
+        assert!(
+            frames[0].contains("MULTI"),
+            "the pipeline must open with MULTI, got: {}",
+            frames[0]
+        );
+        assert!(
+            frames[1].contains("SET") && frames[1].contains("a") && frames[1].contains("v"),
+            "the SET entry must carry its key and body value, got: {}",
+            frames[1]
+        );
+        assert!(
+            frames[2].contains("INCR") && frames[2].contains("b"),
+            "the INCR entry must carry its key, got: {}",
+            frames[2]
+        );
+        assert!(
+            frames[3].contains("EXEC"),
+            "the pipeline must close with EXEC, got: {}",
+            frames[3]
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_plain_pipeline_skips_multi_exec() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            test_stub::AppReply::Raw(b":1\r\n"),
+        ])
+        .await;
+        let mut producer = multi_producer(&stub, false);
+        stub.record_frames();
+
+        let out = producer
+            .call(set_incr_batch())
+            .await
+            .expect("a plain pipeline answers one reply per entry");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["OK", 1])),
+            "the per-entry replies map element-wise into the body"
+        );
+
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            2,
+            "a plain pipeline sends the two commands only; got {frames:?}"
+        );
+        assert!(
+            frames.iter().all(|frame| !frame.contains("MULTI")),
+            "atomic=false must not open a transaction; got {frames:?}"
+        );
+        assert!(
+            frames.iter().all(|frame| !frame.contains("EXEC")),
+            "atomic=false must not close a transaction; got {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_partial_entry_failure_not_replayed() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            test_stub::WRONGTYPE_REPLY,
+        ])
+        .await;
+        let mut producer = multi_producer(&stub, false);
+        stub.record_frames();
+
+        let err = producer
+            .call(set_incr_batch())
+            .await
+            .expect_err("entry 1's WRONGTYPE is a business error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("entry 1"),
+            "the error must name the failing entry index, got: {message}"
+        );
+        assert!(
+            message.contains("WRONGTYPE"),
+            "the error must carry the server error text, got: {message}"
+        );
+        assert_eq!(
+            stub.recorded_frames().len(),
+            2,
+            "entry 0 already executed, so the batch must never be replayed"
+        );
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "a per-entry error means earlier entries executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_partial_success_with_loading_entry_is_never_replayed() {
+        for reply in [
+            test_stub::AppReply::Error("LOADING Redis is loading the dataset in memory"),
+            test_stub::AppReply::Error("BUSY Redis is busy running a script"),
+        ] {
+            let stub =
+                test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Ok, reply]).await;
+            let mut producer = multi_producer(&stub, false);
+            stub.record_frames();
+
+            let exchange = batch_exchange(
+                serde_json::json!([
+                    {"command": "incr", "key": "a"},
+                    {"command": "get", "key": "b"},
+                ]),
+                serde_json::json!([null, null]),
+            );
+
+            let err = producer
+                .call(exchange)
+                .await
+                .expect_err("entry 1's reply is an error");
+
+            let message = err.to_string();
+            assert!(
+                message.contains("entry 1"),
+                "the error must name the failing entry index, got: {message}"
+            );
+            assert_eq!(
+                stub.recorded_frames().len(),
+                2,
+                "partial success is not whole-request non-execution: the pipeline must not be replayed"
+            );
+            assert_eq!(
+                retry_class(&err, SendPhase::PostFlush),
+                RetryClass::NeverTransient,
+                "a per-entry LOADING/BUSY reply is not the whole-request NotExecuted path"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_readonly_entry_invalidates_connection() {
+        const READONLY: &str = "READONLY You can't write against a read only replica.";
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Error(READONLY),
+            test_stub::AppReply::Error(READONLY),
+            test_stub::AppReply::Ok,
+            test_stub::AppReply::Raw(b":1\r\n"),
+        ])
+        .await;
+        let mut producer = multi_producer(&stub, false);
+        stub.record_frames();
+
+        let err = producer
+            .call(set_incr_batch())
+            .await
+            .expect_err("entry 0's READONLY is a per-entry error reply");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("entry 0"),
+            "the error must name the failing entry index, got: {message}"
+        );
+        assert!(
+            message.contains("READONLY"),
+            "the error must carry the server error text, got: {message}"
+        );
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "a per-entry READONLY is a business outcome, not a whole-request rejection"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "the READONLY driver error must survive beneath the marker so the demoted-master connection is evicted: {err}"
+        );
+        assert_eq!(
+            stub.recorded_frames().len(),
+            2,
+            "exactly one batch attempt: SET and INCR, no replay"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            None,
+            "the demoted-master connection must be evicted, not reused by later exchanges"
+        );
+
+        let out = producer
+            .call(set_incr_batch())
+            .await
+            .expect("the next exchange redials and succeeds on the fresh connection");
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["OK", 1])),
+            "the fresh connection serves the batch"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            Some(2),
+            "the next exchange dialed a new generation"
+        );
+        assert_eq!(
+            stub.recorded_frames().len(),
+            4,
+            "the failed attempt plus one more batch attempt; got {:?}",
+            recorded_text(&stub)
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_invalidation_evidence_scanned_beyond_first_error() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Ok,
+            test_stub::WRONGTYPE_REPLY,
+            test_stub::AppReply::Error("READONLY You can't write against a read only replica."),
+        ])
+        .await;
+        let mut producer = multi_producer(&stub, false);
+
+        let exchange = batch_exchange(
+            serde_json::json!([
+                {"command": "set", "key": "a"},
+                {"command": "incr", "key": "b"},
+                {"command": "set", "key": "c"},
+            ]),
+            serde_json::json!(["v", null, "w"]),
+        );
+
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("entry 1's WRONGTYPE is the surfaced business error");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("entry 1"),
+            "the surfaced error names the first failing entry, got: {message}"
+        );
+        assert!(
+            message.contains("WRONGTYPE"),
+            "the surfaced error carries its own server text, got: {message}"
+        );
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "a per-entry WRONGTYPE is a business verdict"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "READONLY evidence at entry 2 must invalidate the connection even though entry 1's WRONGTYPE is surfaced: {err}"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            None,
+            "the demoted-master connection must be evicted despite the surfaced WRONGTYPE"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_execabort_is_never_transient() {
+        // Faithful queue-time rejection: MULTI is accepted, ONE staged
+        // command is rejected instead of `+QUEUED`, and EXEC then aborts
+        // with EXECABORT (what a real Redis does). Scripting EXEC as the
+        // error alone would make redis-rs raise UnexpectedReturnType and
+        // hide the driver's real Server(ExecAbort) classification.
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::QueueTimeError("ERR wrong number of arguments for 'set' command"),
+            test_stub::AppReply::Error(
+                "EXECABORT Transaction discarded because of previous errors.",
+            ),
+        ])
+        .await;
+        let mut producer = multi_producer(&stub, true);
+        stub.record_frames();
+
+        let err = producer
+            .call(set_incr_batch())
+            .await
+            .expect_err("EXECABORT rejects the whole transaction");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("wrong number of arguments"),
+            "the error must name the queue failure that aborted the transaction, got: {message}"
+        );
+        assert_eq!(
+            crate::transport_error::redis_error_code(&err),
+            Some("EXECABORT"),
+            "the preserved driver error must carry its real EXECABORT classification, got: {message}"
+        );
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "EXECABORT is a settled server verdict, never replayed"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            4,
+            "exactly one attempt: MULTI, SET, INCR, EXEC; got {frames:?}"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.contains("MULTI"))
+                .count(),
+            1,
+            "a second attempt would open a second transaction; got {frames:?}"
+        );
+    }
+
+    // ── batch retry buckets (redisfc 3.3) ──────────────────────────────────
+
+    /// A queue-time `READONLY` inside `MULTI` is one aggregate `EXECABORT`
+    /// that retains the demoted-master evidence. The batch is never replayed,
+    /// yet the connection must be evicted so the next exchange re-resolves
+    /// the topology.
+    #[tokio::test]
+    async fn batch_atomic_queue_time_readonly_invalidates_connection() {
+        const READONLY: &str = "READONLY You can't write against a read only replica.";
+        // Faithful queue-time rejection: MULTI is accepted, the staged SET is
+        // answered `-READONLY` instead of `+QUEUED`, and EXEC aborts. The
+        // next scripted reply serves the second exchange on a fresh
+        // connection.
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::QueueTimeError(READONLY),
+            test_stub::AppReply::Error(
+                "EXECABORT Transaction discarded because of previous errors.",
+            ),
+            test_stub::AppReply::Raw(b"*2\r\n+OK\r\n:1\r\n"),
+        ])
+        .await;
+        let mut producer = multi_producer(&stub, true);
+        stub.record_frames();
+
+        let err = producer
+            .call(set_incr_batch())
+            .await
+            .expect_err("the queue-time READONLY aborts the transaction");
+
+        assert!(
+            err.to_string().contains("ReadOnly"),
+            "the aggregate must carry the queue-time cause, got: {err}"
+        );
+        assert_eq!(
+            crate::transport_error::redis_error_code(&err),
+            Some("EXECABORT"),
+            "the preserved driver error keeps its EXECABORT classification, got: {err}"
+        );
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "EXECABORT is never replayed, even with demoted-master evidence: {err}"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "the READONLY retained inside the EXECABORT aggregate must evict the demoted-master connection: {err}"
+        );
+        assert!(
+            crate::transport_error::is_transient_redis_error(&err),
+            "invalidation implies the transient class (subset obligation): {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            4,
+            "exactly one attempt: MULTI, SET, INCR, EXEC; got {frames:?}"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.contains("MULTI"))
+                .count(),
+            1,
+            "a replay would open a second transaction; got {frames:?}"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            None,
+            "the demoted-master connection must be evicted"
+        );
+
+        let out = producer
+            .call(set_incr_batch())
+            .await
+            .expect("the next exchange redials and succeeds on the fresh connection");
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["OK", 1])),
+            "the fresh connection serves the batch"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            Some(2),
+            "the next exchange dialed a new generation"
+        );
+    }
+
+    /// The same queue-time abort on the `EVALSHA` staged inside the atomic
+    /// provenance pair: one attempt, never replayed, connection evicted.
+    #[tokio::test]
+    async fn script_pair_queue_time_readonly_invalidates_connection() {
+        const READONLY: &str = "READONLY You can't write against a read only replica.";
+        let stub = test_stub::StubServer::start_scripted(vec![
+            // SCRIPT EXISTS is queued normally; the rejection lands on the
+            // EVALSHA that follows it.
+            test_stub::AppReply::Queued,
+            test_stub::AppReply::QueueTimeError(READONLY),
+            test_stub::AppReply::Error(
+                "EXECABORT Transaction discarded because of previous errors.",
+            ),
+            // The second invocation's provenance pair, on a fresh connection.
+            test_stub::AppReply::Raw(PAIR_CACHED_ONE),
+        ])
+        .await;
+        let mut producer = eval_producer(&stub);
+        stub.record_frames();
+
+        let err = producer
+            .call(eval_exchange())
+            .await
+            .expect_err("the queue-time READONLY aborts the provenance pair");
+
+        assert!(
+            err.to_string().contains("ReadOnly"),
+            "the aggregate must carry the queue-time cause, got: {err}"
+        );
+        assert_eq!(
+            crate::transport_error::redis_error_code(&err),
+            Some("EXECABORT"),
+            "the preserved driver error keeps its EXECABORT classification, got: {err}"
+        );
+        assert_eq!(
+            retry_class_script(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "an aborted provenance pair is never replayed: {err}"
+        );
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "the READONLY retained inside the EXECABORT aggregate must evict the demoted-master connection: {err}"
+        );
+        assert!(
+            crate::transport_error::is_transient_redis_error(&err),
+            "invalidation implies the transient class (subset obligation): {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            evalsha_count(&frames),
+            1,
+            "exactly one EVALSHA attempt, no replay; got {frames:?}"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            None,
+            "the demoted-master connection must be evicted"
+        );
+
+        let out = producer
+            .call(eval_exchange())
+            .await
+            .expect("the next exchange redials and succeeds on the fresh connection");
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(1)),
+            "the fresh connection serves the script"
+        );
+        assert_eq!(
+            cached_generation(&producer).await,
+            Some(2),
+            "the next exchange dialed a new generation"
+        );
+    }
+
+    /// Batch body slots admit scalars only: an object slot has no v1 meaning
+    /// and must fail before any command frame.
+    #[tokio::test]
+    async fn batch_object_payload_rejected() {
+        let stub = test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Ok]).await;
+        let mut producer = multi_producer(&stub, true);
+        stub.record_frames();
+
+        let exchange = batch_exchange(
+            serde_json::json!([{"command": "set", "key": "a"}]),
+            serde_json::json!([{"unexpected": "object"}]),
+        );
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("a container slot has no batch meaning");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("entry 0"),
+            "the error must name the entry index, got: {message}"
+        );
+        assert!(
+            message.contains("scalar") && message.contains("JSON object"),
+            "the error must name the scalar slot contract and the received shape, got: {message}"
+        );
+        assert_eq!(
+            stub.recorded_frames().len(),
+            0,
+            "the slot is rejected before send"
+        );
+    }
+
+    /// An array slot is rejected too: v1 has no multi-value batch command.
+    #[tokio::test]
+    async fn batch_array_payload_rejected() {
+        let stub = test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Ok]).await;
+        let mut producer = multi_producer(&stub, false);
+        stub.record_frames();
+
+        let exchange = batch_exchange(
+            serde_json::json!([{"command": "set", "key": "a"}]),
+            serde_json::json!([["a", "b"]]),
+        );
+        let err = producer
+            .call(exchange)
+            .await
+            .expect_err("an array slot has no v1 batch command that consumes it");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("entry 0"),
+            "the error must name the entry index, got: {message}"
+        );
+        assert!(
+            message.contains("scalar") && message.contains("JSON array"),
+            "the error must name the scalar slot contract and the received shape, got: {message}"
+        );
+        assert_eq!(
+            stub.recorded_frames().len(),
+            0,
+            "the slot is rejected before send"
+        );
+    }
+
+    /// Regression pin: a scalar string slot still encodes.
+    #[tokio::test]
+    async fn batch_string_payload_accepted() {
+        let stub = test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Ok]).await;
+        let mut producer = multi_producer(&stub, false);
+        stub.record_frames();
+
+        let exchange = batch_exchange(
+            serde_json::json!([{"command": "set", "key": "a"}]),
+            serde_json::json!(["v"]),
+        );
+        let out = producer
+            .call(exchange)
+            .await
+            .expect("a scalar string payload encodes");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["OK"])),
+            "the SET reply becomes the batch's single element"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(frames.len(), 1, "one SET frame; got {frames:?}");
+        assert!(
+            frames[0].contains("SET") && frames[0].contains("v"),
+            "the scalar payload travels verbatim; got {frames:?}"
+        );
+    }
+
+    /// Retry budget with millisecond delays, so a replayed batch settles well
+    /// inside the test timeout.
+    fn fast_retry_policy() -> NetworkRetryPolicy {
+        NetworkRetryPolicy {
+            max_attempts: 3,
+            initial_delay: std::time::Duration::from_millis(1),
+            max_delay: std::time::Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        }
+    }
+
+    /// `command=multi` producer wired to `stub`, with the fast retry budget.
+    fn multi_producer_with_policy(stub: &test_stub::StubServer, atomic: bool) -> RedisProducer {
+        let mut producer = multi_producer(stub, atomic);
+        producer.config.reconnect = fast_retry_policy();
+        producer
+    }
+
+    /// Opens the producer's cached connection before the reply gate is held,
+    /// so the kill lands on the batch request and not on the driver
+    /// handshake.
+    async fn prime_connection(producer: &RedisProducer) {
+        producer
+            .executor
+            .get_conn()
+            .await
+            .expect("the stub connection must open before replies are withheld");
+    }
+
+    /// Runs `exchange` and kills the stub socket once `frames` application
+    /// frames arrived, then reopens the reply gate so a replay can complete.
+    async fn call_killed_after_frames(
+        producer: &RedisProducer,
+        stub: &test_stub::StubServer,
+        exchange: Exchange,
+        frames: usize,
+    ) -> Result<Exchange, CamelError> {
+        let before = stub.command_count();
+        let mut task_producer = producer.clone();
+        stub.hold_replies();
+        let call = tokio::spawn(async move { task_producer.call(exchange).await });
+        let abort = call.abort_handle();
+        // The frame barrier and the kill both drive stub progress, so the
+        // deadline has to cover the whole preflight: a missing pipeline
+        // frame must fail bounded instead of parking the test forever.
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            stub.wait_for_commands(before + frames).await;
+            stub.kill().await;
+            stub.release_replies();
+            call.await
+        })
+        .await;
+        match settled {
+            Ok(joined) => joined.expect("the exchange task must not panic"),
+            Err(_) => {
+                abort.abort();
+                panic!("the kill sequence must settle within 5s");
+            }
+        }
+    }
+
+    /// One-entry `INCR` batch: the non-idempotent shape.
+    fn incr_batch() -> Exchange {
+        batch_exchange(
+            serde_json::json!([{"command": "incr", "key": "a"}]),
+            serde_json::json!([null]),
+        )
+    }
+
+    #[tokio::test]
+    async fn batch_post_flush_drop_non_idempotent_not_retried() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(b":1\r\n")]).await;
+        let producer = multi_producer_with_policy(&stub, false);
+        prime_connection(&producer).await;
+        stub.record_frames();
+
+        let err = call_killed_after_frames(&producer, &stub, incr_batch(), 1)
+            .await
+            .expect_err("INCR makes the batch non-idempotent, so the outcome is not replayed");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("Redis multi failed"),
+            "the transport failure surfaces at the batch wrap site, got: {message}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            1,
+            "exactly one pipeline: a non-idempotent batch is never replayed; got {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_post_flush_drop_all_idempotent_retried() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Bulk("x")]).await;
+        let producer = multi_producer_with_policy(&stub, false);
+        prime_connection(&producer).await;
+        stub.record_frames();
+
+        let exchange = batch_exchange(
+            serde_json::json!([
+                {"command": "get", "key": "a"},
+                {"command": "get", "key": "b"},
+            ]),
+            serde_json::json!([null, null]),
+        );
+        let out = call_killed_after_frames(&producer, &stub, exchange, 2)
+            .await
+            .expect("an all-idempotent batch replays the outcome-unknown pipeline");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["x", "x"])),
+            "the replay's per-entry replies map element-wise into the body"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            4,
+            "the killed two-entry pipeline plus exactly one replay; got {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_pre_send_failure_retries_non_idempotent_batch() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(b":1\r\n")]).await;
+        // The first checkout resolves a dead address, so the dial fails before
+        // a byte is written (PreSend, NotExecuted); the second resolution
+        // reaches the stub. NotExecuted replays whatever the batch's
+        // idempotence.
+        let topology = Arc::new(FakeTopology::addrs(vec![
+            "redis://127.0.0.1:1".to_string(),
+            stub.url(),
+        ]));
+        let uri = format!("{}?command=multi&atomic=false", stub.url());
+        let mut producer = stub_producer(&uri, Arc::clone(&topology));
+        producer.config.reconnect = fast_retry_policy();
+
+        let out = producer
+            .call(incr_batch())
+            .await
+            .expect("a pre-send failure proves nothing ran, so the batch replays");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!([1])),
+            "the replay's INCR reply maps into the body"
+        );
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "two attempts: the refused dial and the stub"
+        );
+        assert_eq!(
+            stub.command_count(),
+            1,
+            "only the second attempt reached a server"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_atomic_disconnect_after_flush_is_outcome_unknown() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Raw(b"*1\r\n:1\r\n")])
+                .await;
+        let producer = multi_producer_with_policy(&stub, true);
+        prime_connection(&producer).await;
+        stub.record_frames();
+
+        let err = call_killed_after_frames(&producer, &stub, incr_batch(), 3)
+            .await
+            .expect_err("the atomic EXEC may have committed, so a non-idempotent batch stops");
+
+        assert!(
+            err.to_string().contains("Redis multi failed"),
+            "the transport failure surfaces at the batch wrap site, got: {err}"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            3,
+            "exactly one atomic pipeline: MULTI, INCR, EXEC; got {frames:?}"
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.contains("MULTI"))
+                .count(),
+            1,
+            "a replay would open a second transaction; got {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_plain_disconnect_after_flush_is_outcome_unknown() {
+        let stub =
+            test_stub::StubServer::start_scripted(vec![test_stub::AppReply::Bulk("x")]).await;
+        let producer = multi_producer_with_policy(&stub, false);
+        prime_connection(&producer).await;
+        stub.record_frames();
+
+        let exchange = batch_exchange(
+            serde_json::json!([{"command": "get", "key": "a"}]),
+            serde_json::json!([null]),
+        );
+        let out = call_killed_after_frames(&producer, &stub, exchange, 1)
+            .await
+            .expect("GET is idempotent, so the outcome-unknown plain pipeline replays");
+
+        assert_eq!(
+            out.input.body,
+            camel_component_api::Body::Json(serde_json::json!(["x"])),
+            "the replay's GET reply is the exchange result"
+        );
+        let frames = recorded_text(&stub);
+        assert_eq!(
+            frames.len(),
+            2,
+            "the killed pipeline plus exactly one replay; got {frames:?}"
+        );
     }
 }

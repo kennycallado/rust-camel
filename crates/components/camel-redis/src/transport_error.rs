@@ -46,25 +46,55 @@
 //!    `ClusterConnectionNotFound` (its Debug rendering contains
 //!    "connection"), or `Io` whose source is a `std::io::Error` of kind
 //!    `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`,
-//!    `BrokenPipe`, or `TimedOut`. Documented flip 1 (accepted,
+//!    `BrokenPipe`, or `TimedOut`. A transaction/pipeline aggregate also
+//!    counts when ANY reply it retains is `Server(ReadOnly)` (a queue-time
+//!    `READONLY` inside `MULTI` arrives as one `EXECABORT` aggregate).
+//!    Documented flip 1 (accepted,
 //!    false→true, design.md): an enumerated transient io kind with custom
 //!    text lacking classifier words (e.g.
 //!    `io::Error::new(ConnectionRefused, "no route")`) — legacy sniffed
 //!    the text and missed it; the kind is ground truth for an OS
 //!    connection refusal. Pinned by `io_custom_text_refused_kind_is_transient`.
-//! 5. A preserved `RedisError` whose server code (`RedisError::code()`) is one
-//!    of [`SETTLED_FATAL_SERVER_CODES`] (`NOGROUP`, `BUSYGROUP`, `NOPERM`) →
-//!    false, decided by the code alone, before any text matching. This
-//!    deliberately diverges from the legacy table when a classifier word
-//!    appears inside such a message (redis-failover MODIFIED, exemption
-//!    sentence: `NOPERM connection is not allowed …` is fatal, although the
-//!    legacy word `connection` said transient).
+//! 5. A preserved `RedisError` whose server code (`RedisError::code()`) is
+//!    decided by the code alone, before any text matching:
+//!    `LOADING`/`BUSY` → true (a whole-request rejection that proves nothing
+//!    ran, so a replay is safe; it does NOT invalidate the connection),
+//!    while [`SETTLED_FATAL_SERVER_CODES`] (`NOGROUP`, `BUSYGROUP`,
+//!    `NOPERM`) and [`NEVER_TRANSIENT_SERVER_CODES`] (`EXECABORT`, `EXEC`,
+//!    `NOAUTH`, `WRONGPASS`, `NOPERM`) → false. This deliberately diverges
+//!    from the legacy table when a classifier word appears inside such a
+//!    message (redis-failover MODIFIED, exemption sentence: `NOPERM
+//!    connection is not allowed …` is fatal, although the legacy word
+//!    `connection` said transient).
 //! 6. Otherwise that same `RedisError`'s Display is matched against the
 //!    legacy word set in [`legacy_substring_matches`] — the only substring
 //!    matching in the crate's classification. It preserves
 //!    server-controlled messages (`ERR connection lost …`), TLS inner
 //!    text, and redis-rs static details.
 //! 7. No marker and no `RedisError` in the chain → false.
+//!
+//! # Execution-outcome retry split
+//!
+//! [`retry_class`] maps a failed attempt plus its [`SendPhase`] onto exactly
+//! one of three replay buckets ([`RetryClass`]):
+//!
+//! - `NotExecuted`: the request provably never ran — a pre-send
+//!   dial/checkout failure, or a whole-request `LOADING`/`BUSY` server
+//!   reply. Always replayable under the retry budget, even for a
+//!   non-idempotent command.
+//! - `OutcomeUnknown`: the request may have run — an I/O failure after the
+//!   request was flushed, or with unknown flush status. Replayable only when
+//!   the request is idempotent.
+//! - `NeverTransient`: a setup/auth defect or a semantic/business reply
+//!   (`EXECABORT`, per-command `EXEC` errors, `NOAUTH`/`WRONGPASS`/`NOPERM`,
+//!   `WRONGTYPE`, `BUSYKEY`, `NOSCRIPT`, `ERR …`). Never replayed.
+//!
+//! The bucket is a replay decision only. The error class keeps its own
+//! invariants, independent of replay: `invalidates_connection(e) ⇒
+//! is_transient_redis_error(e)` (replay additionally needs the bucket and the
+//! request's idempotence). `LOADING`/`BUSY` are transient (retryable) but
+//! never invalidate the connection; `READONLY` is transient AND invalidating
+//! (a demoted master).
 //!
 //! # redis 1.6.0 kind taxonomy
 //!
@@ -188,6 +218,214 @@ pub(crate) fn marker_camel(
 /// rule 5 plus its exemption sentence).
 pub(crate) const SETTLED_FATAL_SERVER_CODES: [&str; 3] = ["NOGROUP", "BUSYGROUP", "NOPERM"];
 
+/// Server codes that prove a whole request never ran.
+///
+/// `LOADING` (dataset still loading) and `BUSY` (a script is running) are
+/// whole-request rejections: replaying under the retry budget is always safe,
+/// whatever the command's idempotence. `BUSYKEY` is deliberately absent — it
+/// is a per-key semantic conflict, not a busy rejection.
+pub(crate) const NOT_EXECUTED_SERVER_CODES: [&str; 2] = ["LOADING", "BUSY"];
+
+/// Server codes that are semantic/business verdicts: reconnecting cannot
+/// change them, so they are never retried.
+///
+/// `EXECABORT` discards a whole transaction, `EXEC` is a per-command
+/// transaction error, and `NOAUTH`/`WRONGPASS`/`NOPERM` are fatal auth/ACL
+/// defects. Decided by the code alone, ahead of any classifier-word text
+/// match (same style as [`SETTLED_FATAL_SERVER_CODES`]).
+pub(crate) const NEVER_TRANSIENT_SERVER_CODES: [&str; 5] =
+    ["EXECABORT", "EXEC", "NOAUTH", "WRONGPASS", "NOPERM"];
+
+/// Where a failed request attempt failed relative to the socket write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendPhase {
+    /// Connection checkout/dialing failed before any byte was written: the
+    /// request provably never ran.
+    PreSend,
+    /// The request was handed to the connection (and possibly flushed) before
+    /// the failure: the outcome is unknown unless the error proves otherwise.
+    PostFlush,
+}
+
+/// Replay bucket for one failed request attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum RetryClass {
+    /// Provably never ran: always replayable under the retry budget.
+    NotExecuted,
+    /// May have run: replayable only when the request is idempotent.
+    OutcomeUnknown,
+    /// Semantic/business reply or setup defect: never replayed.
+    NeverTransient,
+}
+
+/// Which request family is being classified.
+///
+/// A plain command's error reply is generated by Redis itself, so its code
+/// proves execution facts (`LOADING`/`BUSY` mean the whole request never
+/// ran). A script's error reply can be forged by the script itself
+/// (`redis.error_reply('BUSY ...')` after side effects), so a script request
+/// needs its own classifier and its own provenance resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestKind {
+    /// A single command or a batch of plain commands.
+    Plain,
+    /// A server-side script invocation (`EVALSHA`/`FCALL`).
+    Script,
+}
+
+/// Marker: a terminal script-runtime failure (proven-forged reply, exhausted
+/// `NOSCRIPT` reload, failed `SCRIPT LOAD`/`FUNCTION LOAD`, malformed
+/// provenance pair).
+///
+/// The dispatch's atomic provenance pair resolves every script reply BEFORE
+/// classification, so these arrive here already proven terminal: replaying
+/// them cannot change the outcome and could duplicate the script's side
+/// effects.
+///
+/// A terminal path that WRAPS a driver failure (a failed `SCRIPT LOAD` /
+/// `FUNCTION LOAD REPLACE`) carries the `redis::RedisError` in `cause`, so
+/// the chain keeps its structural transport evidence. The marker decides the
+/// replay bucket (always [`RetryClass::NeverTransient`]); the preserved cause
+/// keeps [`invalidates_connection`] independent of it, so a dead socket is
+/// still evicted and the next exchange redials instead of retrying the load
+/// on the same poisoned connection forever.
+#[derive(Debug)]
+pub(crate) struct ScriptTerminalError {
+    /// The driver failure this terminal path wraps, if any.
+    cause: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl std::fmt::Display for ScriptTerminalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("script terminal failure")
+    }
+}
+
+impl std::error::Error for ScriptTerminalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause
+            .as_deref()
+            .map(|cause| cause as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Builds a terminal script-runtime error.
+///
+/// The text is the operator-facing message; the [`ScriptTerminalError`]
+/// marker rides in the source chain so [`retry_class_script`] can recognize
+/// it structurally instead of sniffing prose.
+pub(crate) fn script_terminal_error(text: impl Into<String>) -> CamelError {
+    marker_camel(text.into(), ScriptTerminalError { cause: None })
+}
+
+/// Builds a terminal script-runtime error that keeps `cause` in the source
+/// chain beneath the marker.
+///
+/// Used where the terminal verdict wraps a driver failure (a failed
+/// `SCRIPT LOAD` / `FUNCTION LOAD REPLACE`): the attempt stays
+/// [`RetryClass::NeverTransient`] because the marker comes first in
+/// [`retry_class_script`], while [`invalidates_connection`] and
+/// [`is_transient_redis_error`] still walk past the marker to the preserved
+/// `redis::RedisError` for their structural transport verdict.
+pub(crate) fn script_terminal_error_with_cause(
+    text: impl Into<String>,
+    cause: redis::RedisError,
+) -> CamelError {
+    marker_camel(
+        text.into(),
+        ScriptTerminalError {
+            cause: Some(Box::new(cause)),
+        },
+    )
+}
+
+/// Marker: a per-entry server error reply inside a `command=multi` batch.
+///
+/// Entries before the failing one already executed, so a batch error is a
+/// business outcome of the request: it is always
+/// [`RetryClass::NeverTransient`], even when the reply is a whole-request
+/// code such as `LOADING`/`BUSY` (those describe the rejected entry, not the
+/// whole batch). The marker is therefore checked BEFORE the
+/// [`NOT_EXECUTED_SERVER_CODES`] rule in [`retry_class`].
+///
+/// The preserved driver error in `cause` keeps the transport tracks
+/// independent of that replay verdict: [`invalidates_connection`] and
+/// [`is_transient_redis_error`] walk past the marker to the structural
+/// `redis::RedisError`. Batch dispatch preserves the batch's invalidating
+/// evidence (a `READONLY` reply from ANY entry) there, so a demoted-master
+/// connection is evicted even when the surfaced error names a different
+/// entry.
+#[derive(Debug)]
+pub(crate) struct BatchEntryError {
+    /// The structural driver error the transport tracks classify.
+    ///
+    /// Batch dispatch prefers the invalidating evidence when ANY entry reply
+    /// carries it (a `READONLY` demotes the connection regardless of which
+    /// entry is surfaced), and otherwise preserves the surfaced entry's own
+    /// error.
+    cause: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl std::fmt::Display for BatchEntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("batch entry failure")
+    }
+}
+
+impl std::error::Error for BatchEntryError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause
+            .as_deref()
+            .map(|cause| cause as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Builds a batch entry error that keeps `cause` in the source chain beneath
+/// the [`BatchEntryError`] marker.
+///
+/// The text is the operator-facing message (entry index plus server text);
+/// the marker decides the replay bucket while the cause feeds the structural
+/// transport verdicts.
+pub(crate) fn batch_entry_error_with_cause(
+    text: impl Into<String>,
+    cause: redis::RedisError,
+) -> CamelError {
+    marker_camel(
+        text.into(),
+        BatchEntryError {
+            cause: Some(Box::new(cause)),
+        },
+    )
+}
+
+/// True when `err` carries the [`BatchEntryError`] marker.
+fn is_batch_entry_error(err: &CamelError) -> bool {
+    let mut source = err.source();
+    let mut hops = 0;
+    while let Some(raw) = source {
+        if hops >= MAX_SOURCE_HOPS {
+            break;
+        }
+        let src = unwrap_arc_dyn_error(raw);
+        if src.downcast_ref::<BatchEntryError>().is_some() {
+            return true;
+        }
+        source = src.source();
+        hops += 1;
+    }
+    false
+}
+
+/// True when a server reply proves the cached connection is unusable.
+///
+/// Exposes the [`invalidates_connection`] verdict for a bare
+/// `redis::RedisError` so batch dispatch can scan every entry reply for
+/// invalidation evidence before choosing which error to surface.
+pub(crate) fn server_error_invalidates(err: &redis::RedisError) -> bool {
+    classify_redis_error_for_invalidation(err)
+}
+
 /// The legacy classifier word set — the rule-6 fallback and the ONLY
 /// substring matching in the crate's classification.
 ///
@@ -290,14 +528,19 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
 ///   timeout, so the timeout wrap is proof enough to drop the connection;
 /// - a `redis::RedisError` of kind `Server(ReadOnly)` — a demoted master;
 ///   this is the ONE server reply that invalidates;
+/// - a transaction/pipeline aggregate that retains ANY `Server(ReadOnly)`
+///   reply. redis-rs reports a queue-time `MULTI` failure as one aggregate
+///   `Server(ExecAbort)` and keeps the individual replies, so the demoted
+///   master's `READONLY` is visible only in those entries;
 /// - a `redis::RedisError` of kind `Io` whose inner `std::io::Error` kind is
 ///   `ConnectionRefused`, `ConnectionReset`, `ConnectionAborted`, or
 ///   `BrokenPipe`, or whose Display carries the driver's
 ///   `connection dropped` phrase.
 ///
 /// Everything else stays valid: every other server reply (settled-fatal
-/// codes and server text that merely matches the transient fallback words
-/// included), [`TransientRetryBudgetExhausted`], [`TransientByProse`],
+/// codes, the new whole-request `LOADING`/`BUSY` rejections, and server text
+/// that merely matches the transient fallback words included),
+/// [`TransientRetryBudgetExhausted`], [`TransientByProse`],
 /// `ClusterConnectionNotFound`, io `TimedOut`, config errors, and plain
 /// `ProcessorError` text.
 ///
@@ -307,6 +550,16 @@ pub fn is_transient_redis_error(err: &CamelError) -> bool {
 /// typed io kind sit in an inspectable chain — so no connection identity can
 /// be inferred from it. Real transport failures at the invalidation call
 /// sites preserve the `redis::RedisError` in the source chain instead.
+///
+/// [`ScriptTerminalError`] is transparent to this walk: the verdict comes
+/// from the driver error preserved beneath a failed `SCRIPT LOAD` /
+/// `FUNCTION LOAD`, so a terminal (never-replayed) load failure can still
+/// invalidate a dead connection.
+///
+/// Invalidation is independent of replay. An aborted transaction
+/// (`EXECABORT`) retains its queue-time replies: when one of them is
+/// `READONLY`, the connection is evicted even though the batch or script pair
+/// is never replayed. The next exchange redials and re-resolves the topology.
 ///
 /// # Subset obligation
 ///
@@ -355,6 +608,155 @@ pub fn invalidates_connection(err: &CamelError) -> bool {
         hops += 1;
     }
     // No marker, no `redis::RedisError` — nothing structural to invalidate on.
+    false
+}
+
+/// Classifies one failed request attempt into its replay bucket.
+///
+/// Precedence is strict (see the module docs):
+///
+/// 1. [`BatchEntryError`]-marked errors → [`RetryClass::NeverTransient`]:
+///    the failing entry is a business outcome of a batch whose earlier
+///    entries already executed, so a per-entry `LOADING`/`BUSY` reply never
+///    becomes the whole-request `NotExecuted` path (the marker is transparent
+///    to the connection tracks only, not to this bucket);
+/// 2. config/validation errors and native `AuthenticationFailed` redis
+///    errors → [`RetryClass::NeverTransient`], whatever the phase;
+/// 3. `EXECABORT` → [`RetryClass::NeverTransient`], whatever the phase. The
+///    rule sits ahead of the transient branch because an aborted transaction
+///    can retain demoted-master `READONLY` evidence, which makes the
+///    invalidation track fire without making the request replayable (the
+///    blessed spec pins `EXECABORT` as never retried);
+/// 4. [`NOT_EXECUTED_SERVER_CODES`] (`LOADING`, `BUSY`) →
+///    [`RetryClass::NotExecuted`], whatever the phase (the whole request was
+///    rejected before running);
+/// 5. [`is_transient_redis_error`] → [`RetryClass::NotExecuted`] for
+///    [`SendPhase::PreSend`] and [`RetryClass::OutcomeUnknown`] for
+///    [`SendPhase::PostFlush`] (the conservative split; `READONLY` stays
+///    here);
+/// 6. everything else (semantic/business errors such as the remaining
+///    [`NEVER_TRANSIENT_SERVER_CODES`], `WRONGTYPE`, `BUSYKEY`, `NOSCRIPT`,
+///    `ERR …`) → [`RetryClass::NeverTransient`], whatever the phase.
+///
+/// The bucket answers only "may this attempt be replayed?". Connection
+/// invalidation remains a separate decision ([`invalidates_connection`]), and
+/// the error-class invariant `invalidates_connection(e) ⇒
+/// is_transient_redis_error(e)` holds independently of the bucket.
+pub fn retry_class(err: &CamelError, phase: SendPhase) -> RetryClass {
+    // (a) A batch entry reply is a business outcome: earlier entries already
+    // executed, so the marker outranks the server-code and transient rules
+    // its preserved cause could otherwise trigger.
+    if is_batch_entry_error(err) {
+        return RetryClass::NeverTransient;
+    }
+    // (b) Setup and auth defects are not repaired by replaying the request.
+    if matches!(err, CamelError::Config(_) | CamelError::ConfigValidation(_))
+        || wraps_native_auth_failure(err)
+    {
+        return RetryClass::NeverTransient;
+    }
+    // (c) A transaction abort discards the whole batch and is never replayed,
+    // even when its retained replies make the invalidation track fire.
+    if carries_server_code(err, &["EXECABORT"]) {
+        return RetryClass::NeverTransient;
+    }
+    // (d) A whole-request server rejection proves nothing executed.
+    if carries_server_code(err, &NOT_EXECUTED_SERVER_CODES) {
+        return RetryClass::NotExecuted;
+    }
+    // (e) The transient error class keeps its conservative phase split.
+    if is_transient_redis_error(err) {
+        return match phase {
+            SendPhase::PreSend => RetryClass::NotExecuted,
+            SendPhase::PostFlush => RetryClass::OutcomeUnknown,
+        };
+    }
+    // (f) Semantic/business errors (`EXEC` per-command errors,
+    // `NOAUTH`/`WRONGPASS`/`NOPERM`, `WRONGTYPE`, `BUSYKEY`, `NOSCRIPT`,
+    // `ERR …`) — a replay cannot change the verdict.
+    RetryClass::NeverTransient
+}
+
+/// Classifies one failed SCRIPT/FUNCTION attempt into its replay bucket.
+///
+/// Script error replies can carry ARBITRARY codes: a Lua script may run side
+/// effects and then return `redis.error_reply('BUSY ...')`. A post-send script
+/// error reply is therefore NOT proof of non-execution, and the plain
+/// [`retry_class`] table (which trusts `LOADING`/`BUSY` as whole-request
+/// rejections) cannot be used.
+///
+/// The EVAL/FCALL dispatch resolves each reply first with its atomic
+/// provenance pair (`MULTI; SCRIPT EXISTS; EVALSHA; EXEC`): proven-forged
+/// replies and runtime terminal failures arrive here as named business errors
+/// carrying the [`ScriptTerminalError`] marker. Precedence:
+///
+/// 1. config/validation errors and native `AuthenticationFailed` →
+///    [`RetryClass::NeverTransient`];
+/// 2. [`ScriptTerminalError`]-marked errors (proven-forged reply,
+///    reload-exhausted `NOSCRIPT`, failed `SCRIPT LOAD`, malformed pair) →
+///    [`RetryClass::NeverTransient`]; a failed load keeps its driver error
+///    beneath the marker, which feeds [`invalidates_connection`] without
+///    changing this bucket;
+/// 3. `EXECABORT` → [`RetryClass::NeverTransient`]: the atomic provenance
+///    pair can abort at queue time, and the blessed spec never replays an
+///    aborted transaction. An aborted pair can retain a queue-time
+///    `READONLY`, which invalidates the connection without making the script
+///    replayable;
+/// 4. a transient (`I/O`, timeout) failure before send →
+///    [`RetryClass::NotExecuted`] (proven: nothing was written);
+/// 5. a transient failure after the request was flushed (or with unknown
+///    flush status) → [`RetryClass::OutcomeUnknown`]: the script may or may
+///    not have run, so it is replayed only under the endpoint's `idempotent`
+///    opt-in;
+/// 6. any other (non-transient, non-script) error → [`RetryClass::NeverTransient`].
+///
+/// Deliberately absent: the [`NOT_EXECUTED_SERVER_CODES`] rule. For scripts
+/// those codes are forgeable, so they are never treated as proof of
+/// non-execution.
+pub fn retry_class_script(err: &CamelError, phase: SendPhase) -> RetryClass {
+    // (a) Setup and auth defects are not repaired by replaying the script.
+    if matches!(err, CamelError::Config(_) | CamelError::ConfigValidation(_))
+        || wraps_native_auth_failure(err)
+    {
+        return RetryClass::NeverTransient;
+    }
+    // (b) The script runtime already resolved this reply/terminal path: the
+    // side effect may stand, and a replay could duplicate it.
+    if is_script_terminal_error(err) {
+        return RetryClass::NeverTransient;
+    }
+    // (c) A transaction abort discards the provenance pair and is never
+    // replayed; the connection track reads its retained evidence separately.
+    if carries_server_code(err, &["EXECABORT"]) {
+        return RetryClass::NeverTransient;
+    }
+    // (d)/(e) Transport-class failures keep the conservative phase split.
+    if is_transient_redis_error(err) {
+        return match phase {
+            SendPhase::PreSend => RetryClass::NotExecuted,
+            SendPhase::PostFlush => RetryClass::OutcomeUnknown,
+        };
+    }
+    // (f) Anything else is a business verdict with no transport evidence.
+    RetryClass::NeverTransient
+}
+
+/// True when `err` carries the [`ScriptTerminalError`] marker (bounded chain
+/// walk, same shape as [`is_transient_redis_error`]).
+fn is_script_terminal_error(err: &CamelError) -> bool {
+    let mut source = err.source();
+    let mut hops = 0;
+    while let Some(raw) = source {
+        if hops >= MAX_SOURCE_HOPS {
+            break;
+        }
+        let src = unwrap_arc_dyn_error(raw);
+        if src.downcast_ref::<ScriptTerminalError>().is_some() {
+            return true;
+        }
+        source = src.source();
+        hops += 1;
+    }
     false
 }
 
@@ -424,12 +826,69 @@ pub(crate) fn is_retry_budget_exhausted(err: &CamelError) -> bool {
     false
 }
 
+/// The first `redis::RedisError` in `err`'s source chain, if any.
+///
+/// Uses the same bounded walk and Arc unwrapping as
+/// [`is_transient_redis_error`]. Callers that need the `ErrorKind` or the
+/// server code read it structurally instead of parsing rendered text.
+fn first_redis_error(err: &CamelError) -> Option<&redis::RedisError> {
+    let mut source = err.source();
+    let mut hops = 0;
+    while let Some(raw) = source {
+        if hops >= MAX_SOURCE_HOPS {
+            break;
+        }
+        let src = unwrap_arc_dyn_error(raw);
+        if let Some(redis_err) = src.downcast_ref::<redis::RedisError>() {
+            return Some(redis_err);
+        }
+        source = src.source();
+        hops += 1;
+    }
+    None
+}
+
+/// True when the first `redis::RedisError` in the chain is the native auth
+/// failure kind, which carries NO server error code string.
+fn wraps_native_auth_failure(err: &CamelError) -> bool {
+    first_redis_error(err)
+        .is_some_and(|redis_err| matches!(redis_err.kind(), redis::ErrorKind::AuthenticationFailed))
+}
+
+/// True when the first `redis::RedisError` in the chain carries one of
+/// `codes`, matched exactly.
+///
+/// `RedisError::code()` is the structural form of the RESP reply's first word.
+/// When the driver exposes no code (synthetic/general errors), the first
+/// whitespace-delimited word of the rendered Display is used instead. Matching
+/// is exact, never substring: `BUSY` does not match `BUSYKEY`.
+fn carries_server_code(err: &CamelError, codes: &[&str]) -> bool {
+    let Some(redis_err) = first_redis_error(err) else {
+        return false;
+    };
+    if let Some(code) = redis_err.code() {
+        return codes.contains(&code);
+    }
+    let display = redis_err.to_string();
+    display
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| codes.contains(&word))
+}
+
 /// Rules 4–6 applied to the first `redis::RedisError` in a source chain.
 fn classify_redis_error(err: &redis::RedisError) -> bool {
     // Rule 4: structural kinds that always rendered a classifier word.
     match err.kind() {
         redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly)
         | redis::ErrorKind::ClusterConnectionNotFound => return true,
+        // A transaction/pipeline aggregate decides through the replies it
+        // retains: a queue-time `READONLY` inside `MULTI` arrives as ONE
+        // `EXECABORT` aggregate whose own code is never transient. Marking
+        // that evidence transient keeps the subset obligation
+        // `invalidates_connection(e) ⇒ is_transient_redis_error(e)`;
+        // `retry_class` still pins the replay bucket at `NeverTransient`.
+        redis::ErrorKind::Server(_) if retained_reply_is_readonly(err) => return true,
         redis::ErrorKind::Io => {
             let enumerated_io_kind = err
                 .source()
@@ -449,17 +908,22 @@ fn classify_redis_error(err: &redis::RedisError) -> bool {
         }
         _ => {}
     }
-    // Rule 5: settled server codes are decided by the code alone, before any
-    // text matching. These three deliberately diverge from the legacy table:
-    // when the server message embeds a classifier word (e.g.
-    // `NOPERM connection is not allowed for this user`), the legacy substring
-    // rule said transient — the code is ground truth that reconnecting cannot
-    // help (redis-failover MODIFIED, exemption sentence).
-    if err
-        .code()
-        .is_some_and(|code| SETTLED_FATAL_SERVER_CODES.contains(&code))
-    {
-        return false;
+    // Rule 5: server codes are decided by the code alone, before any text
+    // matching. A whole-request `LOADING`/`BUSY` rejection is retryable (the
+    // request never ran); the settled-fatal and never-transient business
+    // codes are not. `NOPERM connection is not allowed for this user` is the
+    // deliberate divergence from the legacy table: the code is ground truth
+    // that reconnecting cannot help (redis-failover MODIFIED, exemption
+    // sentence).
+    match err.code() {
+        Some(code) if NOT_EXECUTED_SERVER_CODES.contains(&code) => return true,
+        Some(code)
+            if SETTLED_FATAL_SERVER_CODES.contains(&code)
+                || NEVER_TRANSIENT_SERVER_CODES.contains(&code) =>
+        {
+            return false;
+        }
+        _ => {}
     }
     // Rule 6: the explicit legacy substring fallback on this RedisError's own
     // Display.
@@ -469,18 +933,25 @@ fn classify_redis_error(err: &redis::RedisError) -> bool {
 /// The [`invalidates_connection`] verdict for the first `redis::RedisError` in
 /// a source chain.
 ///
-/// Only `Server(ReadOnly)` invalidates among server replies; only the four
-/// enumerated connection-death io kinds (or the driver's own
-/// `connection dropped` phrase) invalidate among io failures. Every other
-/// kind — TLS/static text, `ClusterConnectionNotFound`, authentication,
-/// business replies, io `TimedOut` — leaves the cached connection in place.
+/// Only a `Server(ReadOnly)` reply invalidates among server replies; only the
+/// four enumerated connection-death io kinds (or the driver's own
+/// `connection dropped` phrase) invalidate among io failures. A
+/// transaction/pipeline aggregate has no verdict of its own: its kind is
+/// `ExecAbort` (or the first entry's kind), so the retained per-command
+/// replies are inspected instead. Every other kind — TLS/static text,
+/// `ClusterConnectionNotFound`, authentication, business replies, io
+/// `TimedOut` — leaves the cached connection in place.
 fn classify_redis_error_for_invalidation(err: &redis::RedisError) -> bool {
     match err.kind() {
-        // The one server reply that proves a demoted master.
-        redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly) => true,
-        // Every other server reply is a business outcome; reconnecting does
-        // not help and the socket is fine.
-        redis::ErrorKind::Server(_) => false,
+        // A demoted master is the one invalidating server reply. The evidence
+        // may sit in the aggregate's retained entries rather than in its own
+        // kind (a queue-time `READONLY` inside `MULTI` is reported as
+        // `ExecAbort` and a pipeline aggregate borrows its first entry's
+        // kind). A synthetic General-repr server error retains no entries, so
+        // its own kind stays the evidence.
+        redis::ErrorKind::Server(kind) => {
+            matches!(kind, redis::ServerErrorKind::ReadOnly) || retained_reply_is_readonly(err)
+        }
         // Transient bookkeeping, deliberately outside the ruled set.
         redis::ErrorKind::ClusterConnectionNotFound => false,
         redis::ErrorKind::Io => {
@@ -507,6 +978,25 @@ fn classify_redis_error_for_invalidation(err: &redis::RedisError) -> bool {
         }
         _ => false,
     }
+}
+
+/// True when any reply retained inside a multi-error server aggregate is a
+/// demoted-master `READONLY`.
+///
+/// redis-rs reports a queue-time failure inside `MULTI` as ONE aggregate
+/// `Server(ExecAbort)` and keeps the individual replies. A plain pipeline
+/// failure is the same aggregate shape, classed by its FIRST reply. The
+/// aggregate's own kind therefore proves nothing about the cause: after a
+/// Sentinel failover a demoted master rejects the queued write with
+/// `READONLY`, and only the retained entries carry that evidence. A
+/// single-reply server error also yields a one-element list, which classifies
+/// exactly like its own kind.
+fn retained_reply_is_readonly(err: &redis::RedisError) -> bool {
+    err.clone().into_server_errors().is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|(_, entry)| matches!(entry.kind(), Some(redis::ServerErrorKind::ReadOnly)))
+    })
 }
 
 // ── Shared test fixtures ────────────────────────────────────────────────────
@@ -1035,9 +1525,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn subset_property_holds_over_corpus() {
-        let corpus: Vec<(&str, CamelError)> = vec![
+    /// Shared transport/server error corpus: every shape the crate's
+    /// classification boundaries can produce. Used by the subset property
+    /// and the READONLY regression pin.
+    fn classifier_corpus() -> Vec<(&'static str, CamelError)> {
+        vec![
             // Shared transient fixtures.
             ("io_refused_error", redis_error_raw(io_refused_error())),
             ("io_reset_error", redis_error_raw(io_reset_error())),
@@ -1206,7 +1698,12 @@ mod tests {
             // Chained wraps inside and beyond the hop bound.
             ("chained marker depth 1", chained_marker_chain(1)),
             ("chained marker depth 9", chained_marker_chain(9)),
-        ];
+        ]
+    }
+
+    #[test]
+    fn subset_property_holds_over_corpus() {
+        let corpus = classifier_corpus();
         let mut invalidating = 0usize;
         for (shape, err) in &corpus {
             let invalidates = invalidates_connection(err);
@@ -1225,6 +1722,306 @@ mod tests {
         assert!(
             invalidating >= 4,
             "corpus must exercise the invalidation-positive shapes, saw {invalidating}"
+        );
+    }
+
+    // ── retry_class (execution-outcome split) ───────────────────────────
+
+    #[test]
+    fn retry_class_pre_send_failure_is_not_executed() {
+        let err = CamelError::Io("dial tcp 127.0.0.1:6379: connect: connection refused".into());
+        assert_eq!(
+            retry_class(&err, SendPhase::PreSend),
+            RetryClass::NotExecuted,
+            "a pre-send dial failure proves the request never ran: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_class_loading_and_busy_are_not_executed() {
+        for reply in [
+            &b"-LOADING Redis is loading the dataset in memory\r\n"[..],
+            b"-BUSY Redis is busy running a script. Try again later.\r\n",
+        ] {
+            let err = redis_error_raw(parsed_server_error(reply));
+            assert_eq!(
+                retry_class(&err, SendPhase::PostFlush),
+                RetryClass::NotExecuted,
+                "a whole-request LOADING/BUSY rejection proves nothing executed: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_class_busykey_is_semantic() {
+        let err = redis_error_raw(parsed_server_error(
+            b"-BUSYKEY Target key name already exists.\r\n",
+        ));
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::NeverTransient,
+            "BUSYKEY is a semantic conflict, not the whole-request BUSY rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_class_wrongtype_is_never_transient() {
+        let err = redis_error_raw(parsed_server_error(
+            b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n",
+        ));
+        for phase in [SendPhase::PreSend, SendPhase::PostFlush] {
+            assert_eq!(
+                retry_class(&err, phase),
+                RetryClass::NeverTransient,
+                "a business WRONGTYPE reply is never replayed ({phase:?}): {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_class_pre_send_auth_failure_is_never_transient() {
+        let err = redis_error_raw(parsed_server_error(b"-NOAUTH Authentication required.\r\n"));
+        assert_eq!(
+            retry_class(&err, SendPhase::PreSend),
+            RetryClass::NeverTransient,
+            "NOAUTH is a fatal auth defect, not a checkout hiccup: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_class_native_auth_failure_is_never_transient() {
+        // Source-preserving checkout shape: the native redis auth kind with
+        // no server error code to match on.
+        let err = redis_error_to_camel(
+            "AUTH",
+            redis::RedisError::from((
+                redis::ErrorKind::AuthenticationFailed,
+                "authentication failed",
+            )),
+        );
+        for phase in [SendPhase::PreSend, SendPhase::PostFlush] {
+            assert_eq!(
+                retry_class(&err, phase),
+                RetryClass::NeverTransient,
+                "a native AuthenticationFailed error is never replayed ({phase:?}): {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_class_config_errors_are_never_transient() {
+        let cases = [
+            CamelError::Config("CA file at /etc/readonly.pem unreadable".into()),
+            CamelError::ConfigValidation(ConfigValidationError::ThrottlerMaxRequestsZero),
+        ];
+        for err in cases {
+            assert_eq!(
+                retry_class(&err, SendPhase::PreSend),
+                RetryClass::NeverTransient,
+                "config/validation errors are setup defects: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_class_execabort_and_exec_errors_are_never_transient() {
+        for reply in [
+            &b"-EXECABORT Transaction discarded because of previous errors.\r\n"[..],
+            b"-EXEC transaction failed\r\n",
+        ] {
+            let err = redis_error_raw(parsed_server_error(reply));
+            assert_eq!(
+                retry_class(&err, SendPhase::PostFlush),
+                RetryClass::NeverTransient,
+                "EXECABORT and per-command EXEC errors are never replayed: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_class_post_flush_io_is_outcome_unknown() {
+        let err = CamelError::Io("connection reset by peer".into());
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::OutcomeUnknown,
+            "an I/O failure after flush leaves the outcome unknown: {err}"
+        );
+    }
+
+    #[test]
+    fn retry_class_readonly_stays_transient_conservative() {
+        let err = redis_error_raw(parsed_server_error(
+            b"-READONLY You can't write against a read only replica.\r\n",
+        ));
+        assert_eq!(
+            retry_class(&err, SendPhase::PreSend),
+            RetryClass::NotExecuted,
+            "READONLY stays on the conservative transient split (pre-send): {err}"
+        );
+        assert_eq!(
+            retry_class(&err, SendPhase::PostFlush),
+            RetryClass::OutcomeUnknown,
+            "READONLY stays on the conservative transient split (post-flush): {err}"
+        );
+        assert!(
+            invalidates_connection(&err),
+            "READONLY still proves a demoted master and must invalidate: {err}"
+        );
+    }
+
+    #[test]
+    fn readonly_idempotent_replay_preserved() {
+        let corpus = classifier_corpus();
+        let (_, readonly) = corpus
+            .iter()
+            .find(|(shape, _)| *shape == "Server(ReadOnly)")
+            .expect("classifier corpus carries the Server(ReadOnly) shape");
+        assert!(
+            is_transient_redis_error(readonly),
+            "READONLY must stay transient so idempotent requests keep replaying: {readonly}"
+        );
+    }
+
+    #[test]
+    fn invalidating_errors_remain_transient_subset() {
+        let mut corpus = classifier_corpus();
+        corpus.extend([
+            (
+                "LOADING",
+                redis_error_raw(parsed_server_error(
+                    b"-LOADING Redis is loading the dataset in memory\r\n",
+                )),
+            ),
+            (
+                "BUSY",
+                redis_error_raw(parsed_server_error(
+                    b"-BUSY Redis is busy running a script. Try again later.\r\n",
+                )),
+            ),
+            (
+                "EXECABORT",
+                redis_error_raw(parsed_server_error(
+                    b"-EXECABORT Transaction discarded because of previous errors.\r\n",
+                )),
+            ),
+            (
+                "NOAUTH",
+                redis_error_raw(parsed_server_error(b"-NOAUTH Authentication required.\r\n")),
+            ),
+            (
+                "READONLY",
+                redis_error_raw(parsed_server_error(
+                    b"-READONLY You can't write against a read only replica.\r\n",
+                )),
+            ),
+        ]);
+        for (shape, err) in &corpus {
+            assert!(
+                !invalidates_connection(err) || is_transient_redis_error(err),
+                "subset violated by {shape}: invalidates_connection is true but is_transient_redis_error is false: {err}"
+            );
+        }
+        for code in ["LOADING", "BUSY"] {
+            let (_, err) = corpus
+                .iter()
+                .find(|(shape, _)| *shape == code)
+                .unwrap_or_else(|| panic!("extended corpus carries the {code} shape"));
+            assert!(
+                is_transient_redis_error(err),
+                "{code} joins the transient error class (retryable): {err}"
+            );
+            assert!(
+                !invalidates_connection(err),
+                "{code} is a whole-request rejection and must not invalidate the connection: {err}"
+            );
+        }
+    }
+
+    // ── Script-request classifier (redisfc 2.1) ────────────────────────────
+
+    #[test]
+    fn retry_class_script_business_errors_are_never_transient() {
+        let cases = [
+            (
+                "proven-forged reply",
+                crate::script::forged_script_reply_error("NOSCRIPT forged by the script"),
+            ),
+            (
+                "reload-exhausted NOSCRIPT",
+                crate::script::noscript_reload_exhausted_error("0123456789abcdef"),
+            ),
+            (
+                "failed SCRIPT LOAD",
+                crate::script::script_load_failed_error(
+                    "0123456789abcdef",
+                    io_redis_error(std::io::ErrorKind::ConnectionReset),
+                ),
+            ),
+        ];
+        for (shape, err) in &cases {
+            assert_eq!(
+                retry_class_script(err, SendPhase::PostFlush),
+                RetryClass::NeverTransient,
+                "{shape} is a script business/terminal error and must never be replayed: {err}"
+            );
+        }
+    }
+
+    /// A failed load is terminal for the ATTEMPT but keeps its driver error in
+    /// the chain, so the connection-death evidence still reaches
+    /// [`invalidates_connection`]. The two tracks must stay independent: a
+    /// terminal load failure on a dead socket must evict that socket.
+    #[test]
+    fn failed_load_keeps_transport_evidence_beneath_the_marker() {
+        let cases = [
+            (
+                "SCRIPT LOAD",
+                crate::script::script_load_failed_error(
+                    "0123456789abcdef",
+                    io_redis_error(std::io::ErrorKind::ConnectionReset),
+                ),
+            ),
+            (
+                "FUNCTION LOAD REPLACE",
+                crate::script::function_load_failed_error(io_redis_error(
+                    std::io::ErrorKind::BrokenPipe,
+                )),
+            ),
+        ];
+        for (shape, err) in &cases {
+            assert_eq!(
+                retry_class_script(err, SendPhase::PostFlush),
+                RetryClass::NeverTransient,
+                "{shape} stays terminal: the marker outranks the preserved cause: {err}"
+            );
+            assert!(
+                invalidates_connection(err),
+                "{shape} on a dead socket must still invalidate the connection: {err}"
+            );
+            assert!(
+                is_transient_redis_error(err),
+                "invalidation implies the transient class (subset obligation): {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_class_script_pre_send_is_not_executed() {
+        let err = CamelError::Io("connection refused".into());
+        assert_eq!(
+            retry_class_script(&err, SendPhase::PreSend),
+            RetryClass::NotExecuted,
+            "a pre-send failure proves the script never ran"
+        );
+    }
+
+    #[test]
+    fn retry_class_script_post_flush_io_is_outcome_unknown() {
+        let err = CamelError::Io("connection reset by peer".into());
+        assert_eq!(
+            retry_class_script(&err, SendPhase::PostFlush),
+            RetryClass::OutcomeUnknown,
+            "a post-flush transport failure leaves the script outcome unknown"
         );
     }
 }

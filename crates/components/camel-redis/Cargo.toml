@@ -15,7 +15,7 @@ categories = ["database", "asynchronous", "network-programming"]
 [dependencies]
 camel-api = { workspace = true }
 camel-component-api = { workspace = true }
-redis = { workspace = true, features = ["tokio-comp", "aio"] }
+redis = { workspace = true, features = ["tokio-comp", "aio", "script"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 tower = { workspace = true }
@@ -26,6 +26,7 @@ futures-util = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
 percent-encoding = { workspace = true }
+base64 = { workspace = true }
 
 [features]
 default = []
@@ -39,5 +40,6 @@ workspace = true
 [dev-dependencies]
 camel-core = { workspace = true }
 camel-component-api = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }

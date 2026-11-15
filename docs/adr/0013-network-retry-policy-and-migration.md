@@ -2,7 +2,7 @@
 
 Status: Accepted
 
-Amended: 2026-11 — transport invalidation rule and consecutive-failure budget (bd rc-2un5k, rc-n64k3)
+Amended: 2026-11 — transport invalidation rule and consecutive-failure budget (bd rc-2un5k, rc-n64k3); execution-outcome classification (change redisfc)
 
 ## Context
 
@@ -40,6 +40,59 @@ The recovery drain-ack path is a deliberate exception. A drain ack consumes budg
 
 Redis now follows the same consecutive-failure model as the Kafka, MQTT, and JMS consumers.
 
+## Execution-outcome classification (redisfc)
+
+The transport classifier answers one question: is this error transient? It does not answer a second question: may this attempt be replayed? A transient error that proves the request never executed is safe to replay under the retry budget. A transient error after the request may have reached the server is not.
+
+`RetryClass` adds the second answer. `retry_class(err, phase)` maps a failed attempt plus its `SendPhase` onto exactly one bucket:
+
+- **not-executed** (`RetryClass::NotExecuted`): the request provably never ran. A pre-send dial or checkout failure qualifies. A whole-request `LOADING` or `BUSY` server reply also qualifies. These attempts always replay under the retry budget, even for a non-idempotent command.
+- **outcome-unknown** (`RetryClass::OutcomeUnknown`): the request may have run. An I/O failure after the flush qualifies, and so does any failure whose flush status is unknown. These attempts replay only when the request is idempotent. Idempotence is decided per command by `is_idempotent_command`, for a batch only when every entry is idempotent, and for `EVAL`/`FCALL` only with the endpoint `idempotent` opt-in.
+- **never-transient** (`RetryClass::NeverTransient`): a setup defect or a semantic/business reply. These attempts never replay.
+
+`AttemptFailure` carries the `SendPhase` next to the error. The executor records `SendPhase::PreSend` when checkout or dialing fails, and `SendPhase::PostFlush` when the request was handed to the connection before the failure.
+
+### Precedence
+
+`retry_class` applies four rules in strict order:
+
+1. Config and validation errors, plus a native `redis::ErrorKind::AuthenticationFailed`, return `NeverTransient`. The phase is irrelevant.
+2. The server codes `LOADING` and `BUSY` return `NotExecuted`. The whole request was rejected before it ran, so the phase is irrelevant.
+3. `is_transient_redis_error` returns `NotExecuted` for `SendPhase::PreSend` and `OutcomeUnknown` for `SendPhase::PostFlush`.
+4. Everything else is a semantic rejection and returns `NeverTransient`. The set covers `EXECABORT`, per-command `EXEC` errors, `NOAUTH`, `WRONGPASS`, `NOPERM`, `WRONGTYPE`, `BUSYKEY`, `NOSCRIPT`, and general `ERR …` replies.
+
+The `READONLY` reply is the deliberate exception. A write against a replica is a structural transient error, and it invalidates the connection because the topology is stale. `retry_class` keeps it in rule 3, so the phase decides the bucket. Replay stays conservative: no replay for a non-idempotent command after the flush.
+
+`LOADING` and `BUSY` retry on the same connection. They are whole-request rejections that prove nothing about the socket, so `invalidates_connection` returns false. A redial happens only on an invalidating failure, and it consumes the retry budget.
+
+### Invalidation is not replayability
+
+Invalidation and replayability are two questions with two answers. The invariant `invalidates_connection(e) ⇒ is_transient_redis_error(e)` holds over error classes. It does not depend on the replay decision.
+
+A non-idempotent command that fails after the flush with a connection-reset error shows the separation. The error is transient, so `invalidates_connection` is true and the socket is discarded. The bucket is `OutcomeUnknown`, so the command is never replayed. The caller sees the error and decides. A non-invalidating server rejection (`LOADING`, `BUSY`) is the mirror case: the connection stays, and the request replays on it.
+
+### Script provenance
+
+A script reply is not trustworthy evidence about execution. A Lua script can run its side effects and then return an error reply with any code, for example `redis.error_reply('BUSY ...')` or a forged `NOSCRIPT`. A post-send script error reply therefore does not prove non-execution, and the reply code alone cannot classify it.
+
+The dispatch resolves each script reply before classification. Every script invocation travels as one atomic provenance pair: `MULTI; SCRIPT EXISTS <sha>; EVALSHA; EXEC`. The fcall mirror uses `FUNCTION LIST`, because `FUNCTION EXISTS` does not exist in Redis. The pair is atomic, so the presence observation cannot race a concurrent `SCRIPT FLUSH` or function deletion.
+
+The pair decides the meaning of each reply:
+
+- The target is present and the reply is `NOSCRIPT` or "function not found". The reply is forged. The script ran, so the result is a business error. The dispatch does not re-invoke the script.
+- The script runtime reports a runtime terminal failure. The script ran exactly once and its outcome stands. This is also a business error.
+- A transport-class failure happens after the send. The script may or may not have run. This is `OutcomeUnknown`, and it replays only under the endpoint `idempotent` opt-in.
+
+`retry_class_script` implements this distinction. It maps a named script business error to `NeverTransient`, a pre-send failure to `NotExecuted`, and a post-send transport failure to `OutcomeUnknown`. `execute_with_retry` selects the classifier per request kind. Plain requests keep `retry_class`. A batch entry is a plain command and cannot forge a reply, so the whole-request `LOADING`/`BUSY` provenance holds for it.
+
+### Script trust boundary
+
+Script text is operator configuration under ADR-0032. It comes from the endpoint URI only, through the `script` or `scriptFile` parameter. No exchange header, body, or property can supply or change script text. `scriptFile` resolves against the route-file directory. Exchange data can still reach a script as an `ARGV` entry. That data is an argument, never code.
+
+### Why no WATCH
+
+WATCH/EXEC needs a private connection per transaction. Each `RedisProducer::new` builds its own `MultiplexedExecutor` with a fresh connection cache, so separate endpoints do not share a connection. Concurrent exchanges on clones of one producer do share one `MultiplexedConnection`, because the derived `Clone` copies the cache handle and the generation tag. WATCH state bound to a connection would therefore leak across those exchanges. Optimistic transactions are deliberately not offered. A caller that needs read-modify-write atomicity writes one script instead, and that path follows the provenance and trust rules above.
+
 ## Migration decision tree
 
 - **Use `retry_async`**: operation owns or clones its state, no shutdown-cancellation need. Examples: WS connect (`Some("ws-producer")`), CXF pool connect (`Some("cxf")`), gRPC producer (`Some("grpc-producer")`), OpenSearch producer (`Some("opensearch-producer")`), SQL pool connect (`Some("sql-consumer")`, `Some("sql-producer")`).
@@ -59,4 +112,5 @@ Redis now follows the same consecutive-failure model as the Kafka, MQTT, and JMS
   - `rc-cvq` was evaluated and closed wontfix: a stateful HRTB/boxed-future helper would add public API complexity without simplifying the confirmed Redis sites enough to justify it.
   - `rc-1nm` resolved: `retry_async` and `retry_async_cancelable` now accept `label: Option<&'static str>`. All 8 migrated components pass component identity via `Some("ws-producer")` etc., emitting a structured `component` tracing field. Operators can filter by component label.
   - `rc-2un5k` and `rc-n64k3` amended this ADR with the transport invalidation rule and the consecutive-failure budget for the Redis executor and consumer loops.
+  - The `redisfc` change amended this ADR with the execution-outcome classification, the script provenance rule, and the no-WATCH rationale.
   - Container test dead-store cleanup (pre-existing `attempt = 0` before `break`).

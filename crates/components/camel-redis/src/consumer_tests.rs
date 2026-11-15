@@ -35,6 +35,11 @@ fn create_test_config(command: RedisCommand) -> RedisEndpointConfig {
         // (which now retries on connect failure) terminate quickly.
         connection_timeout_secs: 1,
         topology_kind: crate::sentinel_config::TopologyKind::Standalone,
+        script: None,
+        script_file: None,
+        function: None,
+        idempotent: false,
+        atomic: true,
     }
 }
 

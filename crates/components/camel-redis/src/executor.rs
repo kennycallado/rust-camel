@@ -1,5 +1,8 @@
 use async_trait::async_trait;
-use camel_component_api::{CamelError, Exchange, NetworkRetryPolicy};
+use camel_component_api::Body;
+use camel_component_api::CamelError;
+use camel_component_api::Exchange;
+use camel_component_api::NetworkRetryPolicy;
 // retry_async is used in tests (the regression test in this file).
 #[cfg(test)]
 use camel_component_api::retry_async;
@@ -11,8 +14,48 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::commands;
-use crate::config::{RedisCommand, RedisEndpointConfig, is_transient_redis_error};
+use crate::config::RedisCommand;
+use crate::config::RedisEndpointConfig;
+use crate::script::ScriptRuntime;
 use crate::topology::{RedisTopology, ServerKind};
+use crate::transport_error::RequestKind;
+use crate::transport_error::RetryClass;
+use crate::transport_error::SendPhase;
+
+/// A failed command attempt tagged with where it failed relative to the
+/// socket write.
+///
+/// The phase, not the error class, decides whether the request may have
+/// executed: checkout/dial failures are [`SendPhase::PreSend`] (the request
+/// provably never ran), everything after the request is handed to the
+/// connection is [`SendPhase::PostFlush`] (the flush status is unknown, so
+/// the conservative default is "may have run").
+#[derive(Debug)]
+pub struct AttemptFailure {
+    /// The failure to classify, replay, or surface.
+    pub err: CamelError,
+    /// Where the attempt failed relative to the socket write.
+    pub phase: SendPhase,
+}
+
+impl AttemptFailure {
+    /// A failure before any byte of the request was written.
+    pub(crate) fn pre_send(err: CamelError) -> Self {
+        Self {
+            err,
+            phase: SendPhase::PreSend,
+        }
+    }
+
+    /// A failure after the request was handed to the connection, with an
+    /// unknown flush status included.
+    pub(crate) fn post_flush(err: CamelError) -> Self {
+        Self {
+            err,
+            phase: SendPhase::PostFlush,
+        }
+    }
+}
 
 /// Abstraction over a Redis connection that can execute commands.
 ///
@@ -21,11 +64,14 @@ use crate::topology::{RedisTopology, ServerKind};
 #[async_trait]
 pub trait RedisCommandExecutor: Send + Sync {
     /// Execute a Redis command against the given exchange.
+    ///
+    /// Failures carry the [`SendPhase`] they happened in so the retry loop can
+    /// classify them into a replay bucket.
     async fn execute_command(
         &mut self,
         cmd: &RedisCommand,
         exchange: &mut Exchange,
-    ) -> Result<(), CamelError>;
+    ) -> Result<(), AttemptFailure>;
 
     /// Reconnect the underlying connection.
     async fn reconnect(&mut self) -> Result<(), CamelError>;
@@ -45,11 +91,15 @@ pub struct FakeExecutor {
     pub reconnect_count: Arc<AtomicUsize>,
 }
 
-/// Error type for the fake executor, can be transient or non-transient.
+/// Error type for the fake executor, can be transient or non-transient, and
+/// carries the send phase the failure is reported in.
 #[derive(Debug, Clone)]
 pub struct FakeError {
     pub message: String,
     pub is_transient: bool,
+    /// Phase reported to the retry loop; a transient failure tagged
+    /// [`SendPhase::PostFlush`] is replayable only for idempotent commands.
+    pub phase: SendPhase,
 }
 
 impl std::fmt::Display for FakeError {
@@ -85,7 +135,7 @@ impl RedisCommandExecutor for FakeExecutor {
         &mut self,
         _cmd: &RedisCommand,
         _exchange: &mut Exchange,
-    ) -> Result<(), CamelError> {
+    ) -> Result<(), AttemptFailure> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
         let result = {
@@ -96,16 +146,20 @@ impl RedisCommandExecutor for FakeExecutor {
         match result {
             Ok(()) => Ok(()),
             Err(fake_err) => {
-                if fake_err.is_transient {
-                    Err(crate::transport_error::marker_camel(
+                let err = if fake_err.is_transient {
+                    crate::transport_error::marker_camel(
                         format!("Connection error: {}", fake_err.message),
                         crate::transport_error::TransientByProse {
                             site: "FakeExecutor transient seam",
                         },
-                    ))
+                    )
                 } else {
-                    Err(CamelError::ProcessorError(fake_err.message))
-                }
+                    CamelError::ProcessorError(fake_err.message)
+                };
+                Err(AttemptFailure {
+                    err,
+                    phase: fake_err.phase,
+                })
             }
         }
     }
@@ -114,6 +168,31 @@ impl RedisCommandExecutor for FakeExecutor {
         self.reconnect_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+
+/// Per-endpoint context threaded into the dispatch layer.
+///
+/// `script` is `Some` exactly for script-kind endpoints (`command=eval`, and
+/// `command=fcall` from task 2.3). The runtime is built once in
+/// [`crate::producer::RedisProducer::new`], where the source is validated and
+/// (for `scriptFile`) read.
+///
+/// `atomic` mirrors the endpoint's `atomic=` param and only affects
+/// `command=multi`. `batch` is per-exchange: the producer preflights
+/// `CamelRedis.Batch` into a [`BatchPlan`](commands::batch::BatchPlan) BEFORE
+/// the retry loop and attaches it to a per-call executor clone, so concurrent
+/// exchanges never share a plan.
+#[derive(Clone, Default)]
+pub struct CommandContext {
+    /// Script runtime for a script-kind endpoint, `None` otherwise.
+    pub script: Option<Arc<ScriptRuntime>>,
+    /// Endpoint `idempotent` opt-in: replay outcome-unknown script failures.
+    pub script_idempotent: bool,
+    /// Endpoint `atomic` opt-in: send a batch inside `MULTI`/`EXEC`.
+    pub atomic: bool,
+    /// The preflighted batch plan for this exchange, `Some` only for
+    /// `command=multi`.
+    pub batch: Option<commands::batch::BatchPlan>,
 }
 
 /// Dispatches a Redis command to the appropriate module handler.
@@ -125,6 +204,7 @@ pub async fn dispatch_command(
     cmd: &RedisCommand,
     conn: &mut MultiplexedConnection,
     exchange: &mut Exchange,
+    ctx: &CommandContext,
 ) -> Result<(), CamelError> {
     match cmd {
         // String commands
@@ -269,11 +349,158 @@ pub async fn dispatch_command(
             commands::pubsub::dispatch(cmd, conn, exchange).await
         }
 
+        // Script commands: the script text comes from the endpoint config and
+        // its operands from the body. Every invocation is one atomic
+        // provenance pair (see `crate::script`).
+        RedisCommand::Eval | RedisCommand::Fcall => {
+            let Some(script) = ctx.script.as_deref() else {
+                return Err(crate::transport_error::script_terminal_error(format!(
+                    "command={} has no script runtime: a script command requires script or scriptFile",
+                    cmd.as_str()
+                )));
+            };
+            let (keys, args) = commands::script_operands(exchange)?;
+            let reply = script.invoke(conn, &keys, &args).await?;
+            exchange.input.body = commands::redis_value_to_body(&reply)?;
+            Ok(())
+        }
+
+        // Batch request (`command=multi`): the producer already parsed and
+        // validated `CamelRedis.Batch` into the plan; this arm encodes every
+        // entry and sends the whole batch as ONE pipeline.
+        RedisCommand::Multi => {
+            let Some(plan) = ctx.batch.as_ref() else {
+                return Err(CamelError::ProcessorError(
+                    "command=multi requires the CamelRedis.Batch preflight plan".to_string(),
+                ));
+            };
+            dispatch_batch(conn, exchange, plan, ctx.atomic).await
+        }
+
         // Other commands
         RedisCommand::Ping | RedisCommand::Echo => {
             commands::other::dispatch(cmd, conn, exchange).await
         }
     }
+}
+
+/// Sends one preflighted batch as a single pipeline.
+///
+/// `atomic` selects `MULTI`/`EXEC`; the plain form is the same pipeline
+/// without the transaction wrapper. `ignore_errors()` is load-bearing on both
+/// forms: without it redis-rs collapses the first entry error into one
+/// overall `RedisError`, destroying the per-entry correspondence that
+/// provenance needs — and a plain pipeline would lose the successful entries
+/// that already executed.
+///
+/// Error precedence lives here, before reply-to-body conversion:
+///
+/// - a per-entry `ServerError` reply becomes a named error carrying the entry
+///   index and the server text, with the driver error preserved beneath a
+///   [`BatchEntryError`](crate::transport_error::BatchEntryError) marker.
+///   Earlier entries DID execute, so the batch is never replayed wholesale
+///   (the marker pins `retry_class` at `NeverTransient` even for per-entry
+///   `LOADING`/`BUSY` replies, which are NOT the whole-request `NotExecuted`
+///   path); the preserved driver error keeps `invalidates_connection`
+///   structural, and every entry reply is scanned so a `READONLY` from ANY
+///   entry still evicts the demoted-master connection;
+/// - a pipeline-level driver failure (including the atomic `EXECABORT`) is
+///   mapped through [`redis_error_to_camel`](crate::transport_error::redis_error_to_camel)
+///   so the classifier still sees the `RedisError` code: `EXECABORT` stays
+///   `NeverTransient`, a post-flush connection failure is `OutcomeUnknown`.
+///   The aggregate is forwarded unchanged because redis-rs keeps the
+///   queue-time per-command replies inside it: a `READONLY` rejected at
+///   staging time still evicts the demoted-master connection through those
+///   retained entries, and the next exchange redials and re-resolves the
+///   topology.
+async fn dispatch_batch(
+    conn: &mut MultiplexedConnection,
+    exchange: &mut Exchange,
+    plan: &commands::batch::BatchPlan,
+    atomic: bool,
+) -> Result<(), CamelError> {
+    // `plan_batch` already proved the body is an index-aligned JSON array.
+    // Re-check defensively: dispatch is also reachable without the producer.
+    let elements = match &exchange.input.body {
+        Body::Json(serde_json::Value::Array(elements)) if elements.len() == plan.entries.len() => {
+            elements
+        }
+        _ => {
+            return Err(CamelError::ProcessorError(
+                "Invalid CamelRedis.Batch: the body must be a JSON array with one element per entry"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let mut pipe = redis::pipe();
+    if atomic {
+        pipe.atomic();
+    }
+    pipe.ignore_errors();
+    for (index, (entry, value)) in plan.entries.iter().zip(elements).enumerate() {
+        // The plan validated every operand field, but the body slot's type is
+        // only known here; the index is added so a bad payload names its
+        // entry.
+        let command = commands::batch::encode_entry(entry, Some(value))
+            .map_err(|err| CamelError::ProcessorError(format!("{err} (entry {index})")))?;
+        pipe.add_command(command);
+    }
+
+    // Each entry reply stays a raw `redis::Value` so the per-entry errors are
+    // visible; only the successful ones are converted to body elements.
+    let replies: Vec<redis::Value> = pipe
+        .query_async(conn)
+        .await
+        .map_err(|err| crate::transport_error::redis_error_to_camel("multi", err))?;
+
+    // Scan EVERY entry reply before surfacing anything: the first failing
+    // entry is the reported error, but invalidation evidence may come from a
+    // different entry (a demoted master can reject one entry with READONLY
+    // while an earlier entry reports a plain business error). ADR-0013 makes
+    // eviction independent of replay, so the evidence must not depend on
+    // entry order.
+    let mut body = Vec::with_capacity(replies.len());
+    let mut first_failure: Option<(usize, redis::ServerError)> = None;
+    let mut invalidation_evidence: Option<redis::RedisError> = None;
+    for (index, reply) in replies.iter().enumerate() {
+        let redis::Value::ServerError(server_error) = reply else {
+            // Element mapping matches `redis_value_to_body`: a non-UTF-8 entry
+            // reply becomes `{"bytes": "<base64>"}` instead of a lossy string.
+            body.push(commands::reply_value_to_json(reply)?);
+            continue;
+        };
+        if first_failure.is_none() {
+            first_failure = Some((index, server_error.clone()));
+        }
+        if invalidation_evidence.is_none() {
+            let driver_error: redis::RedisError = server_error.clone().into();
+            if crate::transport_error::server_error_invalidates(&driver_error) {
+                invalidation_evidence = Some(driver_error);
+            }
+        }
+    }
+
+    if let Some((index, server_error)) = first_failure {
+        let command = plan
+            .entries
+            .get(index)
+            .map_or("?", |entry| entry.command.as_str());
+        let text = format!(
+            "Redis batch entry {index} ({command}) failed: {}",
+            commands::server_error_text(&server_error)
+        );
+        // The marker keeps the replay bucket `NeverTransient` (earlier entries
+        // already executed); the preserved cause keeps the transport tracks
+        // structural. Prefer the invalidation evidence so a `READONLY` from
+        // any entry still evicts the demoted-master connection.
+        let cause = invalidation_evidence.unwrap_or_else(|| server_error.into());
+        return Err(crate::transport_error::batch_entry_error_with_cause(
+            text, cause,
+        ));
+    }
+    exchange.input.body = Body::Json(serde_json::Value::Array(body));
+    Ok(())
 }
 
 /// Driver response-deadline policy for a newly built connection.
@@ -341,6 +568,8 @@ pub struct MultiplexedExecutor {
     // the reverse nesting never occurs.
     connect_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     response_timeout: Option<Duration>,
+    /// Per-endpoint dispatch context (script runtime, replay opt-in).
+    context: CommandContext,
 }
 
 impl MultiplexedExecutor {
@@ -354,7 +583,25 @@ impl MultiplexedExecutor {
             last_used_gen: 0,
             connect_gate: Arc::new(tokio::sync::Mutex::new(())),
             response_timeout: None,
+            context: CommandContext::default(),
         }
+    }
+
+    /// Attach the per-endpoint [`CommandContext`] (script runtime and the
+    /// `idempotent` opt-in) used by every dispatch.
+    pub fn with_context(mut self, context: CommandContext) -> Self {
+        self.context = context;
+        self
+    }
+
+    /// Attach the preflighted batch plan for the next request.
+    ///
+    /// The producer clones the executor per exchange and calls this on that
+    /// clone, so the plan is per-request state; it never leaks into a
+    /// sibling clone's dispatch.
+    pub fn with_batch(mut self, batch: crate::commands::batch::BatchPlan) -> Self {
+        self.context.batch = Some(batch);
+        self
     }
 
     /// Set the driver-level per-command response deadline.
@@ -576,22 +823,27 @@ impl RedisCommandExecutor for MultiplexedExecutor {
         &mut self,
         cmd: &RedisCommand,
         exchange: &mut Exchange,
-    ) -> Result<(), CamelError> {
-        let (generation, mut conn) = self.checkout().await?;
+    ) -> Result<(), AttemptFailure> {
+        // Checkout failures (topology resolution, dialing, handshake) happen
+        // before any byte of the request is written.
+        let (generation, mut conn) = self.checkout().await.map_err(AttemptFailure::pre_send)?;
         // Record the generation this instance last used: `reconnect` uses it
         // to compare-and-clear instead of blindly evicting.
         self.last_used_gen = generation;
-        match dispatch_command(cmd, &mut conn, exchange).await {
+        match dispatch_command(cmd, &mut conn, exchange, &self.context).await {
             Ok(()) => Ok(()),
             Err(err) => {
                 // A transport failure is proof the cached connection is
                 // dead: evict it by compare-and-clear so a fresher
-                // connection rebuilt by another clone survives. The error is
-                // rethrown unchanged — no dial, no retry here.
+                // connection rebuilt by another clone survives. Invalidation
+                // is independent of replay. The error is rethrown unchanged —
+                // no dial, no retry here.
                 if crate::transport_error::invalidates_connection(&err) {
                     self.invalidate_if_current(generation).await;
                 }
-                Err(err)
+                // The request was handed to the connection; its flush status
+                // is unknown, so the conservative phase is `PostFlush`.
+                Err(AttemptFailure::post_flush(err))
             }
         }
     }
@@ -628,66 +880,107 @@ impl RedisCommandExecutor for MultiplexedExecutor {
 /// This is the core retry logic extracted for testability.
 ///
 /// - `policy`: reconnection policy (max attempts, backoff, jitter, etc.)
-/// - `is_idempotent`: whether the command is safe to retry
+/// - `is_idempotent`: whether the command may be replayed after an
+///   outcome-unknown failure. The producer resolves this eligibility BEFORE
+///   calling this loop, because the loop wraps dispatch.
+/// - `kind`: which classifier to use. Plain commands trust server reply codes
+///   (`LOADING`/`BUSY` prove non-execution); script requests cannot, so they
+///   use [`retry_class_script`](crate::transport_error::retry_class_script),
+///   whose atomic provenance pair resolves every reply before classification.
 ///
-/// # Implementation note
+/// # Three replay buckets
 ///
-/// Invalidation happens inside [`RedisCommandExecutor::execute_command`] (or
-/// the producer's health check) on the FIRST failure, regardless of retry
-/// policy: a transport failure evicts the cached connection immediately, so a
-/// retry only reconnects when the policy actually allows it, and a
-/// non-retryable failure leaves the cache already clean for the next command.
+/// Each failed attempt is classified by
+/// [`retry_class`](crate::transport_error::retry_class) (or the script
+/// classifier for [`RequestKind::Script`]) into one of:
+///
+/// - `NotExecuted` — the request provably never ran (pre-send dial/checkout
+///   failures, `LOADING`/`BUSY` whole-request rejections). Always replayed,
+///   whatever the command's idempotence, subject to the policy budget.
+/// - `OutcomeUnknown` — the request was handed to the connection and may have
+///   run. Replayed only when `is_idempotent`.
+/// - `NeverTransient` — setup/auth defects and semantic/business replies.
+///   Never replayed; the error surfaces immediately.
+///
+/// # Redial and invalidation
+///
+/// Invalidation is its own track: a failure that proves the connection dead
+/// ([`invalidates_connection`](crate::transport_error::invalidates_connection))
+/// is evicted inside `execute_command` even when it is never replayed, and the
+/// next attempt redials first. Non-invalidating rejections (`LOADING`,
+/// `BUSY`) reuse the current connection, so its generation tag stays valid.
+/// A failed redial is itself a pre-send attempt and consumes the budget like
+/// any other attempt — it cannot loop unbounded.
 ///
 /// Uses a manual retry loop calling [`NetworkRetryPolicy::should_retry`] and
 /// [`NetworkRetryPolicy::delay_for`] rather than the shared [`retry_async`](camel_component_api::retry_async)
-/// helper. Manual loop needed because: (a) `executor.reconnect()` must run
-/// before each retry attempt (not the first attempt), so `retry_async`'s
-/// "always invoke op" model doesn't fit; (b) `&mut executor` / `&mut exchange`
-/// borrows cannot be re-borrowed through `FnMut() -> async move { ... }` —
-/// the Future returned by the closure holds the borrow past the closure body,
-/// which the borrow checker rejects. `retry_async_cancelable` has the same
-/// FnMut constraint so it is also excluded.
+/// helper, because `&mut executor` / `&mut exchange` borrows cannot be
+/// re-borrowed through `FnMut() -> async move { ... }`: the Future returned by
+/// the closure holds the borrow past the closure body, which the borrow
+/// checker rejects. `retry_async_cancelable` has the same FnMut constraint so
+/// it is also excluded.
 pub async fn execute_with_retry<E: RedisCommandExecutor>(
     executor: &mut E,
     cmd: &RedisCommand,
     exchange: &mut Exchange,
     is_idempotent: bool,
+    kind: RequestKind,
     policy: &NetworkRetryPolicy,
 ) -> Result<(), CamelError> {
-    // Non-idempotent commands must not be retried — use a disabled policy.
-    let effective_policy = if is_idempotent {
-        policy.clone()
-    } else {
-        NetworkRetryPolicy::disabled()
-    };
-
+    // Failures consumed from the attempt budget so far.
     let mut attempt: u32 = 0;
+    // Whether the previous failure proved the cached connection dead, so the
+    // next attempt must redial before dispatching.
+    let mut needs_redial = false;
 
     loop {
-        // Reconnect before retries (attempt > 0), not on the initial try.
-        // This preserves the existing reconnect-before-retry semantics.
-        if attempt > 0 {
-            executor.reconnect().await?;
+        let outcome = if needs_redial {
+            match executor.reconnect().await {
+                Ok(()) => executor.execute_command(cmd, exchange).await,
+                // A failed redial is a pre-send failure: the request was
+                // never handed to a connection.
+                Err(err) => Err(AttemptFailure::pre_send(err)),
+            }
+        } else {
+            executor.execute_command(cmd, exchange).await
+        };
+
+        let failure = match outcome {
+            Ok(()) => return Ok(()),
+            Err(failure) => failure,
+        };
+
+        let class = match kind {
+            RequestKind::Plain => crate::transport_error::retry_class(&failure.err, failure.phase),
+            RequestKind::Script => {
+                crate::transport_error::retry_class_script(&failure.err, failure.phase)
+            }
+        };
+        // Keep invalidation on its own track: whether or not this failure is
+        // replayed, a dead connection is never reused by the next attempt.
+        needs_redial = crate::transport_error::invalidates_connection(&failure.err);
+
+        let replayable = match class {
+            RetryClass::NotExecuted => true,
+            RetryClass::OutcomeUnknown => is_idempotent,
+            RetryClass::NeverTransient => false,
+        };
+        if !replayable || !policy.should_retry(attempt + 1) {
+            return Err(failure.err);
         }
 
-        match executor.execute_command(cmd, exchange).await {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                if !is_transient_redis_error(&err) || !effective_policy.should_retry(attempt + 1) {
-                    return Err(err);
-                }
-                let delay = effective_policy.delay_for(attempt);
-                // log-policy: outside-contract
-                tracing::warn!(
-                    attempt,
-                    delay_ms = delay.as_millis(),
-                    error = %err,
-                    "transient error — retrying"
-                );
-                tokio::time::sleep(delay).await;
-                attempt += 1;
-            }
-        }
+        let delay = policy.delay_for(attempt);
+        // log-policy: outside-contract
+        tracing::warn!(
+            attempt,
+            delay_ms = delay.as_millis(),
+            class = ?class,
+            phase = ?failure.phase,
+            error = %failure.err,
+            "transient error — retrying"
+        );
+        tokio::time::sleep(delay).await;
+        attempt += 1;
     }
 }
 
@@ -729,17 +1022,56 @@ pub(crate) mod test_stub {
     pub(crate) enum AppReply {
         /// `+OK` — accepted by `SET` and other unit-expecting commands.
         Ok,
+        /// `$<len>\r\n<payload>\r\n` — a bulk-string reply, required by
+        /// commands that read a value (`GET`, `GETDEL`).
+        Bulk(&'static str),
         /// A RESP error reply; the line is sent with a leading `-` and a
         /// trailing CRLF, e.g. `WRONGTYPE Operation against a key holding
         /// the wrong kind of value`.
         Error(&'static str),
+        /// Exact wire bytes, for replies the typed variants cannot express
+        /// (nested arrays such as an `EXEC` result carrying a per-entry
+        /// error).
+        Raw(&'static [u8]),
+        /// Close the connection after reading the command, without replying:
+        /// the peer observed the request and then died, so the client fails
+        /// with a transport error (the post-flush shape). Deterministic
+        /// alternative to `hold_replies` + `kill` when only ONE command must
+        /// die.
+        Close,
+        /// A queue-time rejection for ONE staged command inside a
+        /// transaction.
+        ///
+        /// Only meaningful on the in-`MULTI` staging path: the stub answers
+        /// that staged command with this error instead of `+QUEUED`, and the
+        /// following `EXEC` reply must be the matching `EXECABORT` (faithful
+        /// Redis behavior). Scripting `EXEC` itself as the error instead
+        /// makes redis-rs raise `UnexpectedReturnType`, hiding the driver's
+        /// real `Server(ExecAbort)` classification.
+        QueueTimeError(&'static str),
+        /// A consumed `+QUEUED` acknowledgement on the in-`MULTI` staging
+        /// path.
+        ///
+        /// Consumes this scripted slot and answers `+QUEUED`, so a scripted
+        /// transaction can reject a LATER staged command by position (for
+        /// example the `EVALSHA` of a provenance pair, not its preceding
+        /// existence check).
+        Queued,
     }
 
     impl AppReply {
         fn wire(self) -> Vec<u8> {
             match self {
                 AppReply::Ok => b"+OK\r\n".to_vec(),
+                AppReply::Bulk(payload) => {
+                    format!("${}\r\n{}\r\n", payload.len(), payload).into_bytes()
+                }
                 AppReply::Error(line) => format!("-{line}\r\n").into_bytes(),
+                AppReply::Raw(bytes) => bytes.to_vec(),
+                AppReply::QueueTimeError(line) => format!("-{line}\r\n").into_bytes(),
+                AppReply::Queued => b"+QUEUED\r\n".to_vec(),
+                // Never written: `read_frames` closes the socket instead.
+                AppReply::Close => Vec::new(),
             }
         }
     }
@@ -767,17 +1099,31 @@ pub(crate) mod test_stub {
     impl StubServer {
         /// Bind an ephemeral loopback port and start serving `reply`.
         pub(crate) async fn start(reply: AppReply) -> Self {
+            Self::start_scripted(vec![reply]).await
+        }
+
+        /// Bind an ephemeral loopback port and answer application commands
+        /// with `replies` in order; the last entry repeats once the script is
+        /// exhausted.
+        pub(crate) async fn start_scripted(replies: Vec<AppReply>) -> Self {
+            assert!(
+                !replies.is_empty(),
+                "a stub script needs at least one reply"
+            );
             let listener = TcpListener::bind("127.0.0.1:0")
                 .await
                 .expect("bind loopback stub listener");
             let addr = listener.local_addr().expect("stub listener local addr");
             let state = Arc::new(StubState {
-                reply,
+                replies,
+                reply_index: AtomicUsize::new(0),
                 commands: AtomicUsize::new(0),
                 command_notify: Notify::new(),
                 hold: AtomicBool::new(false),
                 gate_notify: Notify::new(),
                 connections: Mutex::new(Vec::new()),
+                recording: AtomicBool::new(false),
+                recorded: Mutex::new(Vec::new()),
             });
             let accept_state = Arc::clone(&state);
             let accept = tokio::spawn(async move {
@@ -824,6 +1170,34 @@ pub(crate) mod test_stub {
             self.state.hold.store(true, Ordering::SeqCst);
         }
 
+        /// Open the reply gate again after [`Self::hold_replies`], releasing
+        /// the replies that were withheld.
+        pub(crate) fn release_replies(&self) {
+            self.state.hold.store(false, Ordering::SeqCst);
+            self.state.gate_notify.notify_waiters();
+        }
+
+        /// Start recording the raw bytes of every application command frame
+        /// (handshake frames excluded), discarding anything recorded before.
+        pub(crate) fn record_frames(&self) {
+            self.state
+                .recorded
+                .lock()
+                .expect("stub recording registry poisoned")
+                .clear();
+            self.state.recording.store(true, Ordering::SeqCst);
+        }
+
+        /// Raw bytes of every recorded application command frame, in arrival
+        /// order. Each entry is one complete RESP array frame.
+        pub(crate) fn recorded_frames(&self) -> Vec<Vec<u8>> {
+            self.state
+                .recorded
+                .lock()
+                .expect("stub recording registry poisoned")
+                .clone()
+        }
+
         /// Drop every accepted socket and wait until the stub confirms that
         /// both halves are closed.
         pub(crate) async fn kill(&self) {
@@ -850,12 +1224,36 @@ pub(crate) mod test_stub {
 
     /// State shared by the accept loop and every connection task.
     struct StubState {
-        reply: AppReply,
+        replies: Vec<AppReply>,
+        reply_index: AtomicUsize,
         commands: AtomicUsize,
         command_notify: Notify,
         hold: AtomicBool,
         gate_notify: Notify,
         connections: Mutex<Vec<Arc<ConnKill>>>,
+        recording: AtomicBool,
+        recorded: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl StubState {
+        /// Next scripted reply without consuming it.
+        fn peek_reply(&self) -> Option<AppReply> {
+            self.replies
+                .get(self.reply_index.load(Ordering::SeqCst))
+                .copied()
+        }
+
+        /// Next scripted reply: entries are consumed in order and the last
+        /// one repeats.
+        fn next_reply(&self) -> AppReply {
+            let index = self.reply_index.fetch_add(1, Ordering::SeqCst);
+            self.replies.get(index).copied().unwrap_or_else(|| {
+                self.replies
+                    .last()
+                    .copied()
+                    .expect("stub script is non-empty")
+            })
+        }
     }
 
     /// Per-connection kill/closed handshake.
@@ -935,6 +1333,11 @@ pub(crate) mod test_stub {
         // frames.
         let mut buf: Vec<u8> = Vec::with_capacity(64);
         let mut chunk = [0u8; 256];
+        // Transaction staging: inside `MULTI` every command but `EXEC` is
+        // answered `+QUEUED` (the server queues it and reports its real
+        // result inside the `EXEC` array), so a scripted reply describes the
+        // `EXEC` result, not the queued commands.
+        let mut in_multi = false;
         loop {
             tokio::select! {
                 _ = conn.wait_kill() => break,
@@ -946,13 +1349,63 @@ pub(crate) mod test_stub {
             loop {
                 match parse_frame(&buf) {
                     Ok(Some((frame_len, verb))) => {
-                        let _ = buf.drain(..frame_len);
+                        let frame: Vec<u8> = buf.drain(..frame_len).collect();
                         let bytes = if is_handshake_command(&verb) {
                             b"+OK\r\n".to_vec()
                         } else {
                             state.commands.fetch_add(1, Ordering::SeqCst);
                             state.command_notify.notify_waiters();
-                            state.reply.wire()
+                            if state.recording.load(Ordering::SeqCst) {
+                                state
+                                    .recorded
+                                    .lock()
+                                    .expect("stub recording registry poisoned")
+                                    .push(frame);
+                            }
+                            match verb.as_str() {
+                                "MULTI" => {
+                                    in_multi = true;
+                                    b"+OK\r\n".to_vec()
+                                }
+                                "DISCARD" => {
+                                    in_multi = false;
+                                    b"+OK\r\n".to_vec()
+                                }
+                                "EXEC" => {
+                                    in_multi = false;
+                                    state.next_reply().wire()
+                                }
+                                _ if in_multi => match state.peek_reply() {
+                                    // A queue-time rejection consumes its
+                                    // scripted reply and replaces the
+                                    // `+QUEUED` the server never sent for
+                                    // this command; the transaction then
+                                    // aborts at `EXEC`.
+                                    Some(AppReply::QueueTimeError(line)) => {
+                                        state.next_reply();
+                                        format!("-{line}\r\n").into_bytes()
+                                    }
+                                    // A consumed `+QUEUED` slot lets a
+                                    // scripted transaction reject a later
+                                    // staged command by position.
+                                    Some(AppReply::Queued) => {
+                                        state.next_reply();
+                                        b"+QUEUED\r\n".to_vec()
+                                    }
+                                    _ => b"+QUEUED\r\n".to_vec(),
+                                },
+                                _ => {
+                                    let reply = state.next_reply();
+                                    if matches!(reply, AppReply::Close) {
+                                        // The peer died before answering the
+                                        // command it just read: drop the
+                                        // socket without a reply so the
+                                        // client surfaces a transport error.
+                                        return;
+                                    }
+                                    reply.wire()
+                                }
+                            }
                         };
                         if reply_tx.send(bytes).is_err() {
                             return;
@@ -1086,6 +1539,7 @@ pub(crate) mod test_stub {
 mod tests {
     use super::*;
     use crate::config::is_idempotent_command;
+    use crate::config::is_transient_redis_error;
     use crate::executor::test_stub;
     use crate::topology::FakeTopology;
     use camel_component_api::{Body, Message};
@@ -1118,6 +1572,9 @@ mod tests {
         Err(FakeError {
             message: msg.to_string(),
             is_transient: true,
+            // The fake reports failures after the request was handed to the
+            // connection, so they classify as outcome-unknown.
+            phase: SendPhase::PostFlush,
         })
     }
 
@@ -1125,6 +1582,7 @@ mod tests {
         Err(FakeError {
             message: msg.to_string(),
             is_transient: false,
+            phase: SendPhase::PostFlush,
         })
     }
 
@@ -1156,6 +1614,7 @@ mod tests {
             &cmd,
             &mut exchange,
             true, // is_idempotent
+            RequestKind::Plain,
             &policy,
         )
         .await;
@@ -1163,8 +1622,11 @@ mod tests {
         assert!(result.is_ok(), "should succeed after retries: {:?}", result);
         // 4 execute calls total: 1 initial + 3 retries
         assert_eq!(call_count.load(Ordering::SeqCst), 4);
-        // 3 reconnects (one per retry attempt)
-        assert_eq!(reconnect_count.load(Ordering::SeqCst), 3);
+        // No redial: these fake failures are transient by prose, which does
+        // not invalidate the cached connection, so every retry reuses it
+        // (redisfc task 1.2 — redial is driven by invalidation, not by the
+        // retry count).
+        assert_eq!(reconnect_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1185,8 +1647,15 @@ mod tests {
             ..NetworkRetryPolicy::default()
         };
 
-        let result =
-            execute_with_retry(&mut { executor }, &cmd, &mut exchange, true, &policy).await;
+        let result = execute_with_retry(
+            &mut { executor },
+            &cmd,
+            &mut exchange,
+            true,
+            RequestKind::Plain,
+            &policy,
+        )
+        .await;
 
         assert!(result.is_err(), "should fail after exhausting retries");
         // 1 initial + 10 retries = 11 calls
@@ -1213,6 +1682,7 @@ mod tests {
             &cmd,
             &mut exchange,
             false, // NOT idempotent
+            RequestKind::Plain,
             &policy,
         )
         .await;
@@ -1253,6 +1723,7 @@ mod tests {
                 &cmd,
                 &mut exchange,
                 is_idempotent_command(&cmd),
+                RequestKind::Plain,
                 &policy,
             )
             .await;
@@ -1294,6 +1765,7 @@ mod tests {
             &cmd,
             &mut exchange,
             true, // is_idempotent
+            RequestKind::Plain,
             &policy,
         )
         .await;
@@ -1327,6 +1799,7 @@ mod tests {
             &cmd,
             &mut exchange,
             is_idempotent_command(&cmd),
+            RequestKind::Plain,
             &policy,
         )
         .await;
@@ -1352,8 +1825,15 @@ mod tests {
             ..NetworkRetryPolicy::default()
         };
 
-        let result =
-            execute_with_retry(&mut { executor }, &cmd, &mut exchange, true, &policy).await;
+        let result = execute_with_retry(
+            &mut { executor },
+            &cmd,
+            &mut exchange,
+            true,
+            RequestKind::Plain,
+            &policy,
+        )
+        .await;
 
         assert!(result.is_ok());
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
@@ -1423,10 +1903,14 @@ mod tests {
         assert!(
             matches!(
                 result,
-                Err(CamelError::ProcessorError(_))
-                    | Err(CamelError::ProcessorErrorWithSource(_, _))
+                Err(AttemptFailure {
+                    err: CamelError::ProcessorError(_) | CamelError::ProcessorErrorWithSource(_, _),
+                    // Checkout failures happen before any request byte is
+                    // written.
+                    phase: SendPhase::PreSend,
+                })
             ),
-            "expected ProcessorError connecting to dead port, got: {result:?}"
+            "expected a PreSend ProcessorError connecting to dead port, got: {result:?}"
         );
     }
 
@@ -1576,10 +2060,16 @@ mod tests {
         // The next command on the cached generation fails with an
         // invalidating io error and evicts the cache.
         let mut exchange = set_exchange("k");
-        let err = executor
+        let failure = executor
             .execute_command(&RedisCommand::Set, &mut exchange)
             .await
             .expect_err("a killed socket must fail the command");
+        assert_eq!(
+            failure.phase,
+            SendPhase::PostFlush,
+            "the request was handed to the connection before the socket died"
+        );
+        let err = failure.err;
         assert!(
             crate::transport_error::invalidates_connection(&err),
             "socket death must be an invalidating io error: {err}"
@@ -1635,7 +2125,8 @@ mod tests {
         let err = executor
             .execute_command(&RedisCommand::Set, &mut exchange)
             .await
-            .expect_err("a server error reply must surface");
+            .expect_err("a server error reply must surface")
+            .err;
         assert!(
             err.to_string().contains("WRONGTYPE"),
             "the server error text must come back unchanged: {err}"
@@ -1715,7 +2206,9 @@ mod tests {
         let (mut alive, a_result) = task_a.await.expect("A task must not panic"); // allow-test-wait: socket killed; join returns the in-flight failure
         let (mut clone_b, b_result) = task_b.await.expect("B task must not panic"); // allow-test-wait: socket killed; join returns the in-flight failure
         for (who, result) in [("A", a_result), ("B", b_result)] {
-            let err = result.expect_err("a killed socket must fail the command");
+            let err = result
+                .expect_err("a killed socket must fail the command")
+                .err;
             assert!(
                 crate::transport_error::invalidates_connection(&err),
                 "{who}: socket death must be an invalidating io error: {err}"
@@ -1799,7 +2292,8 @@ mod tests {
         let err = executor
             .execute_command(&RedisCommand::Set, &mut exchange)
             .await
-            .expect_err("a server error reply must surface");
+            .expect_err("a server error reply must surface")
+            .err;
         let source = err
             .source()
             .expect("the wrap site must preserve the RedisError as source");
@@ -1903,6 +2397,300 @@ mod tests {
             Some(Duration::from_millis(100)),
             "a non-blocking endpoint must keep the seam value"
         );
+    }
+
+    // ── Three-bucket retry split (redisfc task 1.2) ─────────────────────
+
+    /// Budget-4 policy: enough to cover one dial plus three redials.
+    fn split_policy(max_attempts: u32) -> NetworkRetryPolicy {
+        NetworkRetryPolicy {
+            max_attempts,
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(5),
+            ..NetworkRetryPolicy::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn not_executed_failure_retries_non_idempotent_command() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Bulk("v")).await;
+        // First checkout resolves a dead address: the dial fails before any
+        // byte is written (PreSend). The second resolution reaches the stub.
+        let topology = Arc::new(FakeTopology::addrs(vec![
+            "redis://127.0.0.1:1".to_string(),
+            stub.url(),
+        ]));
+        let mut executor = stub_executor(&stub.url(), topology.clone());
+        let mut exchange = set_exchange("k");
+
+        let result = execute_with_retry(
+            &mut executor,
+            &RedisCommand::Getdel,
+            &mut exchange,
+            false, // GETDEL is not idempotent
+            RequestKind::Plain,
+            &split_policy(3),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "a not-executed attempt must be replayed even for a non-idempotent command: {result:?}"
+        );
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "two connection attempts must be observed"
+        );
+        assert_eq!(
+            stub.command_count(),
+            1,
+            "only the successful attempt reaches the wire"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_flush_drop_does_not_replay_non_idempotent_command() {
+        let dead = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let fresh = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![dead.url(), fresh.url()]));
+        let mut executor = stub_executor(&dead.url(), topology.clone());
+        executor
+            .get_conn()
+            .await
+            .expect("the live stub answers the handshake");
+        assert_eq!(cached_generation(&executor).await, Some(1));
+
+        // Hold every application reply, then kill the socket once the request
+        // is in flight: the command fails after the flush.
+        dead.hold_replies();
+        let task = tokio::spawn(async move {
+            let mut exchange = set_exchange("k");
+            let result = execute_with_retry(
+                &mut executor,
+                &RedisCommand::Getdel,
+                &mut exchange,
+                false, // GETDEL is not idempotent
+                RequestKind::Plain,
+                &split_policy(5),
+            )
+            .await;
+            (executor, result)
+        });
+        dead.wait_for_commands(1).await;
+        dead.kill().await;
+
+        let (executor, result) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the retry task must settle after the socket kill")
+            .expect("the retry task must not panic");
+        let err =
+            result.expect_err("a post-flush drop must surface for the non-idempotent command");
+        assert!(
+            crate::transport_error::invalidates_connection(&err),
+            "socket death must invalidate the connection: {err}"
+        );
+        assert_eq!(
+            dead.command_count(),
+            1,
+            "the post-flush drop must not replay the non-idempotent request"
+        );
+        assert_eq!(
+            cached_generation(&executor).await,
+            None,
+            "invalidation runs independently of replay: the cache must be cleared"
+        );
+
+        // The invalidation was a decision, not a dial: the next checkout
+        // resolves the fresh stub and bumps the generation.
+        executor
+            .get_conn()
+            .await
+            .expect("the fresh stub answers the handshake");
+        assert_eq!(
+            cached_generation(&executor).await,
+            Some(2),
+            "the next dial must allocate a new generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_flush_drop_replays_idempotent_command() {
+        let dead = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let fresh = test_stub::StubServer::start(test_stub::AppReply::Bulk("v")).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![dead.url(), fresh.url()]));
+        let mut executor = stub_executor(&dead.url(), topology.clone());
+        executor
+            .get_conn()
+            .await
+            .expect("the live stub answers the handshake");
+
+        dead.hold_replies();
+        let task = tokio::spawn(async move {
+            let mut exchange = set_exchange("k");
+            let result = execute_with_retry(
+                &mut executor,
+                &RedisCommand::Get,
+                &mut exchange,
+                true, // GET is idempotent
+                RequestKind::Plain,
+                &split_policy(5),
+            )
+            .await;
+            (executor, result)
+        });
+        dead.wait_for_commands(1).await;
+        dead.kill().await;
+
+        let (executor, result) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the retry task must settle after the socket kill")
+            .expect("the retry task must not panic");
+        assert!(
+            result.is_ok(),
+            "an idempotent command must replay after a post-flush drop: {result:?}"
+        );
+        assert_eq!(
+            dead.command_count(),
+            1,
+            "exactly one request reached the killed stub"
+        );
+        assert_eq!(
+            fresh.command_count(),
+            1,
+            "the replay must reach a live connection after the kill"
+        );
+        assert_eq!(
+            topology.resolve_call_count(),
+            2,
+            "the replay redials exactly once"
+        );
+        assert_eq!(
+            cached_generation(&executor).await,
+            Some(2),
+            "the replay is served by a fresh generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn loading_reply_retries_without_invalidating() {
+        let stub = test_stub::StubServer::start_scripted(vec![
+            test_stub::AppReply::Error("LOADING Redis is loading the dataset in memory"),
+            test_stub::AppReply::Bulk("v"),
+        ])
+        .await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let mut executor = stub_executor(&stub.url(), topology.clone());
+        let mut exchange = set_exchange("k");
+
+        let result = execute_with_retry(
+            &mut executor,
+            &RedisCommand::Get,
+            &mut exchange,
+            true,
+            RequestKind::Plain,
+            &split_policy(3),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "a LOADING rejection must be retried: {result:?}"
+        );
+        assert_eq!(stub.command_count(), 2, "two attempts must be observed");
+        assert_eq!(
+            topology.resolve_call_count(),
+            1,
+            "a whole-request rejection must reuse the current connection"
+        );
+        assert_eq!(
+            cached_generation(&executor).await,
+            Some(1),
+            "the connection generation must stay unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_budget_covers_failed_redials() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Bulk("v")).await;
+        let dead = "redis://127.0.0.1:1".to_string();
+        // The first three dials fail; the fourth reaches the stub.
+        let topology = Arc::new(FakeTopology::addrs(vec![
+            dead.clone(),
+            dead.clone(),
+            dead,
+            stub.url(),
+        ]));
+        let mut executor = stub_executor(&stub.url(), topology.clone());
+        let mut exchange = set_exchange("k");
+
+        let result = execute_with_retry(
+            &mut executor,
+            &RedisCommand::Get,
+            &mut exchange,
+            true,
+            RequestKind::Plain,
+            &split_policy(4),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "a budget of 4 must cover the initial dial plus three failed redials: {result:?}"
+        );
+        assert_eq!(
+            topology.resolve_call_count(),
+            4,
+            "exactly four connection attempts: the failed redials consume the budget"
+        );
+
+        // Companion: a budget of 2 surfaces the dial error after two attempts
+        // instead of redialing forever.
+        let exhausted = Arc::new(FakeTopology::addrs(vec![
+            "redis://127.0.0.1:1".to_string(),
+            "redis://127.0.0.1:1".to_string(),
+            "redis://127.0.0.1:1".to_string(),
+        ]));
+        let mut executor = stub_executor(&stub.url(), exhausted.clone());
+        let mut exchange = set_exchange("k");
+
+        let result = execute_with_retry(
+            &mut executor,
+            &RedisCommand::Get,
+            &mut exchange,
+            true,
+            RequestKind::Plain,
+            &split_policy(2),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a budget of 2 must surface the dial error instead of redialing"
+        );
+        assert_eq!(
+            exhausted.resolve_call_count(),
+            2,
+            "no unbounded redial loop: the second dial failure exhausts the budget"
+        );
+    }
+
+    #[test]
+    fn is_idempotent_command_corpus_unchanged() {
+        for (cmd, expected) in [
+            (RedisCommand::Lmpop, false),
+            (RedisCommand::Set, false),
+            (RedisCommand::Getdel, false),
+            (RedisCommand::Get, true),
+            (RedisCommand::Smismember, true),
+            (RedisCommand::Setrange, true),
+        ] {
+            assert_eq!(
+                is_idempotent_command(&cmd),
+                expected,
+                "{cmd:?} retry classification must stay {expected}"
+            );
+        }
     }
 
     #[test]

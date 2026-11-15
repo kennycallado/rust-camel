@@ -135,6 +135,72 @@ pub(crate) fn json_from_move_result(result: i64) -> serde_json::Value {
     serde_json::json!(result == 1)
 }
 
+// ── Pure command encoders (redisfc 3.2) ─────────────────────────────────────
+
+// These build the wire command from already-resolved operands: the single
+// dispatch path below resolves them from headers, while the batch path
+// resolves them from validated entry fields. Both call the same `encode_*`
+// function, so the two paths cannot drift.
+
+/// Builds `DEL key [key ...]`.
+pub(crate) fn encode_del(keys: &[String]) -> redis::Cmd {
+    let mut command = redis::cmd("DEL");
+    for key in keys {
+        command.arg(key);
+    }
+    command
+}
+
+/// Builds `UNLINK key [key ...]`.
+pub(crate) fn encode_unlink(keys: &[String]) -> redis::Cmd {
+    let mut command = redis::cmd("UNLINK");
+    for key in keys {
+        command.arg(key);
+    }
+    command
+}
+
+/// Builds `EXPIRE key seconds`.
+pub(crate) fn encode_expire(key: &str, seconds: i64) -> redis::Cmd {
+    let mut command = redis::cmd("EXPIRE");
+    command.arg(key).arg(seconds);
+    command
+}
+
+/// Builds `PERSIST key`.
+pub(crate) fn encode_persist(key: &str) -> redis::Cmd {
+    let mut command = redis::cmd("PERSIST");
+    command.arg(key);
+    command
+}
+
+/// Builds `COPY source destination [DB n] [REPLACE]`.
+pub(crate) fn encode_copy(
+    source: &str,
+    destination: &str,
+    db: Option<i64>,
+    replace: bool,
+) -> redis::Cmd {
+    let mut command = redis::cmd("COPY");
+    command.arg(source).arg(destination);
+    if let Some(db) = db {
+        command.arg("DB").arg(db);
+    }
+    if replace {
+        command.arg("REPLACE");
+    }
+    command
+}
+
+/// Builds `TOUCH key [key ...]`.
+pub(crate) fn encode_touch(keys: &[String]) -> redis::Cmd {
+    let mut command = redis::cmd("TOUCH");
+    for key in keys {
+        command.arg(key);
+    }
+    command
+}
+
 #[allow(dead_code)]
 pub(crate) fn build_redis_cmd(
     cmd: &RedisCommand,
@@ -287,8 +353,8 @@ pub async fn dispatch(
         }
         RedisCommand::Del => {
             let keys = resolve_del_keys(exchange)?;
-            let n: i64 = conn
-                .del(&keys)
+            let n: i64 = encode_del(&keys)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("DEL", e))?;
             serde_json::json!(n)
@@ -296,8 +362,8 @@ pub async fn dispatch(
         RedisCommand::Expire => {
             let key = require_key(exchange)?;
             let secs = resolve_expire_timeout(exchange)?;
-            let ok: bool = conn
-                .expire(&key, secs)
+            let ok: bool = encode_expire(&key, secs)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("EXPIRE", e))?;
             serde_json::json!(ok)
@@ -372,8 +438,8 @@ pub async fn dispatch(
         }
         RedisCommand::Persist => {
             let key = require_key(exchange)?;
-            let ok: bool = conn
-                .persist(&key)
+            let ok: bool = encode_persist(&key)
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("PERSIST", e))?;
             serde_json::json!(ok)
@@ -401,23 +467,15 @@ pub async fn dispatch(
         }
         RedisCommand::Unlink => {
             let key = require_key(exchange)?;
-            let n: i64 = conn
-                .unlink(&key)
+            let n: i64 = encode_unlink(&[key])
+                .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("UNLINK", e))?;
             serde_json::json!(n)
         }
         RedisCommand::Copy => {
             let (src, dst, db, replace) = resolve_copy_args(exchange)?;
-            let mut c = redis::cmd("COPY");
-            c.arg(&src).arg(&dst);
-            if let Some(db) = db {
-                c.arg("DB").arg(db);
-            }
-            if replace {
-                c.arg("REPLACE");
-            }
-            let n: i64 = c
+            let n: i64 = encode_copy(&src, &dst, db, replace)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("COPY", e))?;
@@ -426,8 +484,7 @@ pub async fn dispatch(
         RedisCommand::Touch => {
             let keys = require_key_list(exchange, "TOUCH")?;
             // TOUCH is not exposed in AsyncCommands, use raw command
-            let n: i64 = redis::cmd("TOUCH")
-                .arg(&keys)
+            let n: i64 = encode_touch(&keys)
                 .query_async(conn)
                 .await
                 .map_err(|e| crate::transport_error::redis_error_to_camel("TOUCH", e))?;

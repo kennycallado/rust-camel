@@ -78,7 +78,7 @@ routes:
 ## URI
 
 ```text
-redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&group=<name>][&consumer=<name>][&count=<n>][&block=<ms>][&createGroup=<bool>][&groupStart=<latest|earliest>][&streamRecoverEnabled=<bool>][&streamRecoverMinIdleMs=<ms>][&streamRecoverBatch=<n>][&password=<pwd>][&db=<n>][&ssl=<bool>]
+redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&group=<name>][&consumer=<name>][&count=<n>][&block=<ms>][&createGroup=<bool>][&groupStart=<latest|earliest>][&streamRecoverEnabled=<bool>][&streamRecoverMinIdleMs=<ms>][&streamRecoverBatch=<n>][&script=<source>][&scriptFile=<path>][&function=<name>][&idempotent=<bool>][&atomic=<bool>][&password=<pwd>][&db=<n>][&ssl=<bool>]
 ```
 
 | Parameter | Required | Default | Description |
@@ -99,8 +99,13 @@ redis://host:port?command=<cmd>[&key=<key>][&channels=<list>][&timeout=<secs>][&
 | `password` | no | none | Redis password |
 | `db` | no | `0` | Redis database number (0-16383) |
 | `ssl` | no | auto | Force TLS on or off |
+| `script` | `eval`, `fcall` (one source) | none | Inline Lua script or function-library source |
+| `scriptFile` | `eval`, `fcall` (one source) | none | Path to the script or function-library source; a relative path resolves against the route-file directory |
+| `function` | `fcall` | none | Registered function name to invoke |
+| `idempotent` | no | `false` | Declare the script replay-safe after an outcome-unknown transport failure |
+| `atomic` | no | `true` | Run a `command=multi` batch inside one `MULTI`/`EXEC` transaction |
 
-The `command` parameter picks the Redis command at Endpoint creation. Exchange data never becomes a command name. Dynamic values like keys, fields, values, channels, and scores cross the trust boundary as length-prefixed Redis protocol arguments. Argument contents cannot inject a second command or change the selected command (CONTEXT "Trust boundary"). Missing required headers return `CamelError`.
+The `command` parameter picks the Redis command at Endpoint creation. For an ordinary single-command endpoint, exchange data never becomes a command name. Two bounded exceptions exist. A `command=multi` endpoint selects each entry command from the `CamelRedis.Batch` header, and the component validates every entry against the typed allowlist (see [Batch (multi)](#batch-multi)). An `eval` or `fcall` endpoint binds its keys and arguments from the Exchange body (see [Script commands](#script-commands)). Script text never comes from exchange data. Dynamic values like keys, fields, values, channels, and scores cross the trust boundary as length-prefixed Redis protocol arguments. Argument contents cannot inject a second command or change the selected command (CONTEXT "Trust boundary"). Missing required headers return `CamelError`.
 
 ## Header values and timeouts
 
@@ -179,7 +184,7 @@ For a computed value, use a Rhai expression. `parse_int` converts the string to 
 
 ## Commands
 
-The component exposes 120+ commands across ten groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`. The component does not expose `EVAL`, `EVALSHA`, or script-loading commands. Script injection through the public surface is not possible.
+The component exposes 120+ commands across twelve groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`.
 
 | Group | Commands |
 | --- | --- |
@@ -192,9 +197,11 @@ The component exposes 120+ commands across ten groups. The enum is exhaustive: a
 | Pub/Sub | `PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE` |
 | Stream | `XREADGROUP`, `XADD`, `XLEN` |
 | Geospatial | `GEOADD`, `GEOPOS`, `GEODIST`, `GEOSEARCH`, `GEOHASH` |
+| Script | `eval`, `fcall` |
+| Batch | `multi` |
 | Other | `PING`, `ECHO` |
 
-Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLEN` are Producer commands. `XREADGROUP` is Consumer-only. The component does not expose `ACKED` or `IDMP`.
+Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLEN` are Producer commands. `XREADGROUP` is Consumer-only. The component does not expose `ACKED` or `IDMP`. `eval` and `fcall` are Producer commands with their own operand contract; see [Script commands](#script-commands). `multi` is a Producer batch request rather than a Redis verb: it runs the entries of the `CamelRedis.Batch` header as one pipeline, see [Batch (multi)](#batch-multi).
 
 ### String command inputs
 
@@ -339,6 +346,209 @@ Result shapes follow the splitbody rule: plain string elements stay strings, and
 
 The `member` field is a plain string. `distance` is a number in the requested unit. `longitude` and `latitude` are numbers rounded to six decimals. A structured row is a proper JSON object, never a quoted JSON string.
 
+## Script commands
+
+`command=eval` runs a Lua script through `EVALSHA`. `command=fcall` runs a registered Redis function through `FCALL`. Both read their keys and arguments from the Exchange body as one JSON object:
+
+```text
+{"keys": ["lock:orders"], "args": ["owner-1", 30]}
+```
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `keys` | array of strings | Key names, passed positionally before the arguments |
+| `args` | array of strings and numbers | Arguments, passed positionally after the keys |
+
+Both fields are required. A body that is not a JSON object with both arrays fails before send. The error names the expected shape and the offending element. Numbers encode as decimal strings. This body form is the documented exception to header-sourced key addressing ([ADR-0098](../adr/0098-redis-value-contract.md)).
+
+Replies map per the reply rule: nil to JSON `null`, integer to a JSON number, status and UTF-8 bulk string to text, non-UTF-8 bulk string to bytes, and nested arrays recursively.
+
+### Script source and trust boundary
+
+The source comes from the URI only: the inline `script` parameter or the `scriptFile` path, and exactly one of them. Script text in an Exchange header (`CamelRedis.Script`) is rejected before send with an error that names the header. Exchange data is untrusted, and executable text is an interpretable sink ([ADR-0032](../adr/0032-exchange-data-trust-boundary.md)).
+
+A relative `scriptFile` path resolves against the route-file directory, the same rule the DSL applies to `source_file`. Without a route-file context (programmatic endpoint construction), a relative path resolves against the process working directory. Every failure names the resolved path.
+
+### eval
+
+`eval` sends `SCRIPT EXISTS` and `EVALSHA` in one `MULTI`/`EXEC` transaction, so the observation and the invocation cannot interleave with another client. When the script is absent and Redis answers `NOSCRIPT`, the component sends `SCRIPT LOAD` and invokes once more. A second `NOSCRIPT` is a named error. An error reply from a cached script is a business error: the script ran, so the component never re-invokes it.
+
+### fcall
+
+`function` names the invoked function and is required. `fcall` without `function` fails URI parsing with a named error. The library loads on first use with `FUNCTION LOAD REPLACE`; repeat exchanges reuse it. `REPLACE` is required because `FCALL` binds by function name: a pre-existing function with the same name would otherwise run instead of the configured code.
+
+`fcall` sends `FUNCTION LIST` and `FCALL` in one transaction. When the list does not contain the function and Redis answers "function not found", the component reloads the library and invokes once more. A repeated missing function is a named terminal error. An error reply from a registered function is a business error: the function ran, so the component never re-invokes it.
+
+### Retry
+
+`eval` and `fcall` are non-idempotent by default. After a transport failure with unknown flush status, the component surfaces the error and does not replay the request, because a script can perform arbitrary side effects. `idempotent=true` declares the script replay-safe and allows replay under the configured retry budget.
+
+The NOSCRIPT and function-not-found recovery is a separate bound. It permits one reload and one re-invocation per attempt, independent of the retry budget.
+
+The three replay buckets and the connection-invalidation rule are described in [Retry semantics](#retry-semantics).
+
+## Batch (multi)
+
+`command=multi` runs several commands per Exchange as one pipeline. The batch
+comes from the `CamelRedis.Batch` header, so the command list is per-exchange
+route data while the payloads stay in the Exchange body (ADR-0098). Nothing is
+sent until every entry and the body have been validated.
+
+```text
+redis://host:port?command=multi[&atomic=<true|false>]
+```
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `atomic` | `true` | Wrap the batch in `MULTI`/`EXEC`; `false` sends a plain pipeline |
+
+### Entry shape
+
+`CamelRedis.Batch` is a JSON array of entry objects. Each entry names its
+command in `command` and carries that command's operands as sibling fields:
+
+```json
+[
+  {"command": "set", "key": "orders:1"},
+  {"command": "incr", "key": "orders:count"},
+  {"command": "getrange", "key": "orders:log", "start": 0, "end": -1}
+]
+```
+
+Field names mirror the `CamelRedis.*` headers of the single-command path, and a
+numeric field accepts a JSON number or a numeric string, exactly like a header.
+
+The batch is aligned with the body: the body must be a `Body::Json` array with
+exactly one element per entry, in entry order.
+
+```json
+["paid", null, null]
+```
+
+An entry that takes no value still needs its `null` placeholder. An entry that
+takes a value (see the contract below) requires a non-null element; a string
+element contributes its raw UTF-8 characters and any other scalar its compact
+JSON form, per the [value payload rule](#value-payload-and-reply-rule). A JSON
+object or array element is rejected before send: the v1 allowlist has no
+multi-value command. A body that is not a JSON array (including an empty body),
+or a body array whose length does not match the entry count, fails before send
+with an error naming `CamelRedis.Batch` and the expected count.
+
+### Typed allowlist
+
+An entry's `command` must be one of the eighteen batchable commands. The
+allowlist is exactly the set of commands with a batch encoder:
+
+`GET`, `SET`, `GETDEL`, `GETEX`, `SETRANGE`, `GETRANGE`, `INCR`, `INCRBY`,
+`DECR`, `DECRBY`, `APPEND`, `MGET`, `DEL`, `UNLINK`, `EXPIRE`, `PERSIST`,
+`COPY`, `TOUCH`.
+
+Every other command — the blocking pops, the consumer commands, Pub/Sub,
+streams, and `eval`/`fcall` — is rejected at plan time with an error naming the
+entry index, because a command without a batch encoder has no way to encode its
+entry. An unknown command name, an unknown field, a wrong-typed field, a missing
+required field, and a batch above the cap of 256 entries
+(`MAX_BATCH_ENTRIES`) are rejected the same way. The whole batch is preflighted
+before any command is sent, so a rejected batch cannot leave a partially applied
+command list behind.
+
+### Per-command field contract
+
+| Command | Entry fields | Body slot |
+| --- | --- | --- |
+| `GET`, `GETDEL`, `INCR`, `DECR`, `PERSIST` | `key` (string) | `null` |
+| `SET` | `key` (string) | value (required) |
+| `GETEX` | `key` (string), optional `timeout` (positive integer, seconds) | `null` |
+| `SETRANGE` | `key` (string), `offset` (non-negative integer) | value (required) |
+| `GETRANGE` | `key` (string), `start`, `end` (integers) | `null` |
+| `INCRBY`, `DECRBY` | `key` (string), `increment` (integer) | `null` |
+| `APPEND` | `key` (string) | value (required) |
+| `MGET`, `DEL`, `UNLINK`, `TOUCH` | `keys` (non-empty array of strings) | `null` |
+| `EXPIRE` | `key` (string), `timeout` (positive integer, seconds) | `null` |
+| `COPY` | `key`, `destination` (strings) | `null` |
+
+`COPY` inside a batch copies within the current database and never replaces an
+existing destination: `db` and `replace` are not expressible per entry.
+
+### Reply
+
+The body becomes a JSON array with one element per entry, in entry order.
+Elements map by the reply rule: status to text (`"OK"`), integer to a number,
+nil to `null`, and a non-UTF-8 bulk value to `{"bytes": "<base64>"}`.
+
+### atomic
+
+With `atomic=true`, the default, the entries run inside one `MULTI`/`EXEC`
+transaction: no other client observes a state between the entries, and the reply
+array is the `EXEC` result. A queue-time rejection makes Redis discard the whole
+transaction (`EXECABORT`), so no entry runs.
+
+With `atomic=false`, the entries run as one pipelined batch without a
+transaction: they still travel as one write and one read, but another client can
+interleave, and earlier entries stay applied when a later one fails. A
+queue-time rejection does not exist on this form.
+
+### Error precedence
+
+A per-entry error reply is a business outcome, and the entries before the
+failing one already executed. The batch is therefore never replayed wholesale:
+
+- the first failing entry (lowest index) is surfaced as an error that names the
+  entry index and the server text;
+- that error is never transient, including a per-entry `LOADING`/`BUSY` reply:
+  after a partial success those codes describe the rejected entry, not a
+  whole-request rejection;
+- invalidation evidence is independent of the surfaced entry: a `READONLY`
+  reply from any entry evicts the demoted-master connection even when a
+  different entry's error is the one reported;
+- a pipeline-level driver failure is classified as usual: `EXECABORT` is a
+  settled server verdict and is never replayed, while a connection failure
+  after the batch was flushed is outcome-unknown. An `EXECABORT` aggregate that
+  retains a queue-time `READONLY` reply also evicts the demoted-master
+  connection, so the next exchange redials despite the terminal replay
+  verdict.
+
+### Idempotence aggregation
+
+A batch is replay-safe only when every entry is. After an outcome-unknown
+failure — a connection that died after the batch was flushed, so the atomic
+`EXEC` may have committed or the plain pipeline may have partially executed —
+the component replays the batch only when all its entries are idempotent.
+
+| Idempotent entries | Non-idempotent entries |
+| --- | --- |
+| `GET`, `MGET`, `GETRANGE`, `DEL`, `UNLINK`, `TOUCH`, `EXPIRE`, `PERSIST`, `SETRANGE` | `SET`, `GETDEL`, `GETEX`, `INCR`, `INCRBY`, `DECR`, `DECRBY`, `APPEND`, `COPY` |
+
+One non-idempotent entry makes the whole batch replay-unsafe. A failure that
+proves the batch never ran — a checkout or dial failure before any byte was
+written — is replayed whatever the entries are.
+
+## Retry semantics
+
+The Producer retries transport failures under the `NetworkRetryPolicy`
+(`[components.redis.reconnect]` in `Camel.toml`). Each failed attempt is
+classified into one of three buckets:
+
+| Bucket | Meaning | Replayed |
+| --- | --- | --- |
+| `NotExecuted` | The request provably never ran: a checkout or dial failure before any byte was written. | Always, within the retry budget, whatever the command |
+| `OutcomeUnknown` | The request was handed to the connection and may have run. | Only when the request is replay-safe: an idempotent command, a script with `idempotent=true`, or a batch whose entries are all idempotent |
+| `NeverTransient` | A setup or auth defect, or a settled server verdict such as `WRONGTYPE` or `EXECABORT`. | Never; the error surfaces immediately |
+
+Invalidation is a separate track. A failure that proves the connection dead — a
+reset socket, a refused or dropped connection, a `READONLY` reply from a demoted
+master — evicts the cached connection even when the request is not replayed, so
+the next attempt, or the next exchange, redials and re-resolves the master
+through the topology. A `READONLY` rejected at transaction queue time still
+counts: redis-rs reports it inside one `EXECABORT` aggregate and keeps the
+individual replies, so the component inspects them. A redial that fails is
+itself a pre-send attempt and consumes the budget, so it cannot loop unbounded.
+
+The per-command notes in this page state the bucket a command falls into. They
+all come from one classifier, so an option-blind command takes its worst-case
+form. See [ADR-0013](../adr/0013-network-retry-policy-and-migration.md) for the
+policy and its migration boundaries.
+
 ## Producer
 
 The Producer sends the command named by `command=`. A writing command takes its
@@ -347,21 +557,33 @@ connection per Endpoint. The connection opens lazily on the first call and
 stays open for the route lifetime.
 
 The `command` parameter picks one of the 120+ commands listed above. The
-Exchange body, headers, and the URI parameters supply the command arguments.
+Exchange body, headers, and URI parameters supply the command arguments.
 Different commands read different headers. For example, `HSET` reads
 `CamelRedis.Key` and `CamelRedis.Field`, and takes its value from the Exchange
 body. `LRANGE` reads `CamelRedis.Start` and `CamelRedis.End`. Missing required
 headers return `CamelError`. A send failure returns `Err` to the route
 `ErrorHandler`.
 
+The `multi`, `eval`, and `fcall` endpoints keep their documented bounded
+exceptions: entry commands come from the validated `CamelRedis.Batch` header,
+and script keys and arguments come from the Exchange body. See
+[Batch (multi)](#batch-multi) and [Script commands](#script-commands).
+
 The Producer is a Tower `Service<Exchange>`. It composes with any pipeline step and reports per-route metrics.
 
 ### Value payload and reply rule
 
 A payload command takes its single payload argument from the Exchange body
-only. No value header exists. An addressing operand, such as the key, the
-destination, the score, or the timeout, never comes from the body
+only. No value header exists. For an ordinary single-command endpoint, an
+addressing operand, such as the key, the destination, the score, or the
+timeout, never comes from the body
 ([ADR-0098](../adr/0098-redis-value-contract.md)).
+
+Two endpoint families are bounded exceptions to that split. `command=multi`
+takes each entry command name from the `CamelRedis.Batch` header, validated
+against the typed allowlist, and each entry value from its index-aligned body
+slot. `eval` and `fcall` bind their script keys and arguments from the body.
+See [Batch (multi)](#batch-multi) and [Script commands](#script-commands).
 
 The body codec is shared by every payload command.
 

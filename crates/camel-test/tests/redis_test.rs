@@ -1393,3 +1393,233 @@ async fn health_recovers_after_client_kill() {
         .await
         .expect("the second health check must rebuild the connection and succeed");
 }
+
+// ===========================================================================
+// Script commands: eval and fcall (redisfc 2.3)
+// ===========================================================================
+
+/// Producer for one endpoint URI, with a fresh lazily-connected executor.
+fn redis_producer(uri: &str) -> RedisProducer {
+    RedisProducer::new(
+        RedisEndpointConfig::from_uri(uri).expect("endpoint config"),
+        Arc::new(NoopRuntimeObservability),
+    )
+    .expect("producer")
+}
+
+/// One script exchange carrying `{"keys": [...], "args": [...]}`.
+fn script_exchange(keys: &[&str], args: &[&str]) -> Exchange {
+    Exchange::new(Message::new(Body::Json(json!({
+        "keys": keys,
+        "args": args,
+    }))))
+}
+
+/// Encodes a script source for the `script=` query value.
+fn encode_script(source: &str) -> String {
+    percent_encoding::utf8_percent_encode(source, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_eval_script_roundtrip() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await;
+
+    let script = "redis.call('set',KEYS[1],ARGV[1]) return 1";
+    let uri = format!(
+        "redis://{conn_str}?command=eval&script={}",
+        encode_script(script)
+    );
+    let mut producer = redis_producer(&uri);
+
+    let out = producer
+        .call(script_exchange(&["live:k"], &["v"]))
+        .await
+        .expect("the script sets the key and answers 1");
+    assert_eq!(
+        out.input.body,
+        Body::Json(json!(1)),
+        "the script reply maps to a JSON number"
+    );
+
+    let mut get = redis_producer(&format!("redis://{conn_str}?command=GET&key=live:k"));
+    let got = get
+        .call(Exchange::new(Message::new(Body::Empty)))
+        .await
+        .expect("the follow-up GET succeeds");
+    assert_eq!(
+        got.input.body,
+        Body::Text("v".into()),
+        "the script's write is visible to a later GET"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_fcall_function_roundtrip() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await;
+
+    let dir = tempfile::tempdir().expect("create the library temp dir");
+    let library = dir.path().join("echo_rt.lua");
+    let source = "#!lua name=echo_rt\n\
+                  redis.register_function('echo_rt', function(keys, args) return args[1] end)\n";
+    std::fs::write(&library, source).expect("write the function library");
+
+    let uri = format!(
+        "redis://{conn_str}?command=fcall&function=echo_rt&scriptFile={}",
+        encode_script(&library.display().to_string())
+    );
+    let mut producer = redis_producer(&uri);
+
+    let out = producer
+        .call(script_exchange(&[], &["hi"]))
+        .await
+        .expect("the first-use load registers the function and it answers");
+    assert_eq!(
+        out.input.body,
+        Body::Text("hi".into()),
+        "the function returns its first argument"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_fcall_missing_function_recovery() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await;
+
+    let dir = tempfile::tempdir().expect("create the library temp dir");
+    let library = dir.path().join("echo_rec.lua");
+    let source = "#!lua name=echo_rec\n\
+                  redis.register_function('echo_rec', function(keys, args) return args[1] end)\n";
+    std::fs::write(&library, source).expect("write the function library");
+
+    let uri = format!(
+        "redis://{conn_str}?command=fcall&function=echo_rec&scriptFile={}",
+        encode_script(&library.display().to_string())
+    );
+    let mut producer = redis_producer(&uri);
+
+    producer
+        .call(script_exchange(&[], &["first"]))
+        .await
+        .expect("the first exchange loads the library and invokes the function");
+
+    // Evict every library, as a restart would: the next invocation must see
+    // the function absent in FUNCTION LIST, reload, and re-invoke once.
+    let mut admin = admin_connection(conn_str).await;
+    redis::cmd("FUNCTION")
+        .arg("FLUSH")
+        .query_async::<redis::Value>(&mut admin)
+        .await
+        .expect("FUNCTION FLUSH must evict the libraries");
+
+    let out = producer
+        .call(script_exchange(&[], &["again"]))
+        .await
+        .expect("the provenance pair recovers the missing function");
+    assert_eq!(
+        out.input.body,
+        Body::Text("again".into()),
+        "the re-invocation's reply is the exchange result"
+    );
+}
+
+// ===========================================================================
+// Batch commands: multi (redisfc 3.3)
+// ===========================================================================
+
+/// One batch exchange: `entries` as `CamelRedis.Batch`, `body` as the
+/// index-aligned value array.
+fn batch_exchange(entries: serde_json::Value, body: serde_json::Value) -> Exchange {
+    let mut message = Message::new(Body::Json(body));
+    message.set_header("CamelRedis.Batch", entries);
+    Exchange::new(message)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_multi_atomic_batch_roundtrip() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await;
+
+    let mut producer = redis_producer(&format!("redis://{conn_str}?command=multi"));
+    let exchange = batch_exchange(
+        json!([
+            {"command": "set", "key": "live:b1"},
+            {"command": "incr", "key": "live:b2"},
+        ]),
+        json!(["v1", null]),
+    );
+
+    let out = producer
+        .call(exchange)
+        .await
+        .expect("the atomic batch applies both entries");
+
+    let Body::Json(replies) = &out.input.body else {
+        panic!("a batch reply is a JSON array, got {:?}", out.input.body);
+    };
+    assert_eq!(
+        replies.as_array().map(Vec::len),
+        Some(2),
+        "the EXEC array carries one reply per entry, got {replies}"
+    );
+
+    let mut get_b1 = redis_producer(&format!("redis://{conn_str}?command=GET&key=live:b1"));
+    let b1 = get_b1
+        .call(Exchange::new(Message::new(Body::Empty)))
+        .await
+        .expect("the follow-up GET of the SET key succeeds");
+    assert_eq!(
+        b1.input.body,
+        Body::Text("v1".into()),
+        "entry 0's SET applied inside the batch"
+    );
+
+    let mut get_b2 = redis_producer(&format!("redis://{conn_str}?command=GET&key=live:b2"));
+    let b2 = get_b2
+        .call(Exchange::new(Message::new(Body::Empty)))
+        .await
+        .expect("the follow-up GET of the INCR key succeeds");
+    assert_eq!(
+        b2.input.body,
+        Body::Text("1".into()),
+        "entry 1's INCR applied inside the batch"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn live_multi_partial_entry_error_is_named() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await;
+
+    // Arrange: `live:b3` holds a list, so INCR fails with WRONGTYPE inside
+    // the transaction (a per-entry error, not a queue-time rejection).
+    let mut admin = admin_connection(conn_str).await;
+    redis::cmd("LPUSH")
+        .arg("live:b3")
+        .arg("x")
+        .query_async::<i64>(&mut admin)
+        .await
+        .expect("LPUSH must make live:b3 a list");
+
+    let mut producer = redis_producer(&format!("redis://{conn_str}?command=multi"));
+    let exchange = batch_exchange(
+        json!([{"command": "incr", "key": "live:b3"}]),
+        json!([null]),
+    );
+
+    let err = producer
+        .call(exchange)
+        .await
+        .expect_err("INCR on a list key is a WRONGTYPE entry error");
+
+    let message = err.to_string();
+    assert!(
+        message.contains("entry 0"),
+        "the error must name the failing entry index, got: {message}"
+    );
+    assert!(
+        message.contains("WRONGTYPE"),
+        "the error must carry the server error text, got: {message}"
+    );
+}

@@ -760,7 +760,7 @@ pub(crate) fn route_dsl_to_declarative_route(
         .map(|step| route_step_to_declarative_step(step, script_ctx))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let from = merge_endpoint_uri(&route.from, route.parameters)?;
+    let from = merge_endpoint_uri(&route.from, route.parameters, script_ctx)?;
 
     Ok(DeclarativeRoute {
         from,
@@ -836,22 +836,150 @@ fn parse_multicast_aggregation(s: &str) -> Result<MulticastAggregationDef, Camel
     }
 }
 
+/// The redis endpoint query parameter naming a script file on disk.
+const REDIS_SCRIPT_FILE_PARAM: &str = "scriptFile";
+
+/// The redis URI schemes whose endpoints accept `script`/`scriptFile`.
+///
+/// Mirrors `RedisEndpointConfig::from_uri`, which parses script parameters for
+/// BOTH the plain schemes and the sentinel schemes (the sentinel pair fails
+/// closed at endpoint build when the component's `sentinel` feature is off).
+/// Every scheme listed here must get the same route-relative anchoring.
+const REDIS_SCRIPT_SCHEMES: [&str; 4] = ["redis", "rediss", "redis-sentinel", "rediss-sentinel"];
+
 /// Merge a raw endpoint URI with its `parameters:` map into the canonical
-/// merged URI. An empty map passes the raw URI through byte-identical (no
-/// parse/render round-trip), preserving existing routes exactly. A non-empty
-/// map goes through [`EndpointUri`]'s fail-closed merge; duplicate keys across
-/// the query and the map surface as `CamelError::EndpointUri` (its `Display`
-/// names the offending key).
+/// merged URI, then resolve a redis `scriptFile` against the route document.
+///
+/// An empty map passes the raw URI through byte-identical (no parse/render
+/// round-trip), preserving existing routes exactly. A non-empty map goes
+/// through [`EndpointUri`]'s fail-closed merge; duplicate keys across the
+/// query and the map surface as `CamelError::EndpointUri` (its `Display`
+/// names the offending key). Template substitution already ran before
+/// parsing, so the merge sees the substituted value.
 fn merge_endpoint_uri(
     raw_uri: &str,
     params: BTreeMap<String, String>,
+    script_ctx: &ScriptLoadContext,
 ) -> Result<String, CamelError> {
-    if params.is_empty() {
-        return Ok(raw_uri.to_string());
+    let merged = if params.is_empty() {
+        raw_uri.to_string()
+    } else {
+        EndpointUri::try_from_uri_and_params(raw_uri, params)
+            .map(|uri| uri.to_canonical_string())
+            .map_err(CamelError::EndpointUri)?
+    };
+    resolve_endpoint_script_file(&merged, script_ctx)
+}
+
+/// Resolve a redis endpoint's `scriptFile` path BEFORE the endpoint is built.
+///
+/// The value is a filesystem path authored in the route document, so it
+/// follows the `source_file` rules: relative paths join the route file's
+/// directory (`script_ctx.base_dir`), absolute paths stay as-is, and no
+/// multi-directory guessing happens. Reading the file here (rather than only
+/// rewriting the URI) records it in `script_ctx`, so the watch registry and
+/// the document source hash see it exactly like a script `source_file`.
+///
+/// Non-redis URIs, URIs without `scriptFile`, and absolute paths already
+/// reachable by the component pass through unchanged. Every scheme the
+/// component accepts script parameters on is treated as redis:
+/// `redis`, `rediss`, and the two sentinel schemes (the sentinel pair fails
+/// closed at endpoint build when the feature is off, but the path anchoring
+/// must still happen at route load).
+fn resolve_endpoint_script_file(
+    uri: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<String, CamelError> {
+    let Some(colon) = uri.find(':') else {
+        return Ok(uri.to_string());
+    };
+    if !REDIS_SCRIPT_SCHEMES.contains(&&uri[..colon]) {
+        return Ok(uri.to_string());
     }
-    EndpointUri::try_from_uri_and_params(raw_uri, params)
-        .map(|uri| uri.to_canonical_string())
-        .map_err(CamelError::EndpointUri)
+    let Some((_, query)) = uri[colon..].split_once('?') else {
+        return Ok(uri.to_string());
+    };
+    let pairs = camel_endpoint::raw_query_pairs(query)?;
+    if !pairs.iter().any(|(key, _)| key == REDIS_SCRIPT_FILE_PARAM) {
+        return Ok(uri.to_string());
+    }
+    // The component consumes the DECODED value, so resolve the decoded one.
+    let parsed = camel_endpoint::parse_uri(uri)?;
+    let Some(raw_value) = parsed.params.get(REDIS_SCRIPT_FILE_PARAM) else {
+        return Ok(uri.to_string());
+    };
+    let resolved = resolve_redis_script_path(raw_value, script_ctx)?;
+    let encoded = encode_uri_value(&resolved.to_string_lossy());
+
+    // Splice the encoded value over the authored value span only: every other
+    // query byte — `&` separators, empty segments, a trailing `&` — survives
+    // exactly as written.
+    let Some((_, span)) = pairs.iter().find(|(key, _)| key == REDIS_SCRIPT_FILE_PARAM) else {
+        return Ok(uri.to_string());
+    };
+    let span_start = span.as_ptr() as usize - query.as_ptr() as usize;
+    // `pairs` holds `key=value` spans; `parse_uri` already rejected bare keys,
+    // so the separator is present. `authored_key` keeps any authored key
+    // percent-encoding byte-for-byte.
+    let Some((authored_key, _)) = span.split_once('=') else {
+        return Ok(uri.to_string());
+    };
+    let value_start = span_start + authored_key.len() + 1;
+    let value_end = span_start + span.len();
+
+    let prefix_len = uri.len() - query.len();
+    let mut rebuilt = String::with_capacity(prefix_len + query.len() + encoded.len());
+    rebuilt.push_str(&uri[..prefix_len]);
+    rebuilt.push_str(&query[..value_start]);
+    rebuilt.push_str(&encoded);
+    rebuilt.push_str(&query[value_end..]);
+    Ok(rebuilt)
+}
+
+/// Resolve and read a redis `scriptFile` value, recording the contents under
+/// the canonicalized path. A read failure names the resolved path.
+fn resolve_redis_script_path(
+    raw: &str,
+    script_ctx: &ScriptLoadContext,
+) -> Result<PathBuf, CamelError> {
+    if raw.trim().is_empty() {
+        return Err(CamelError::RouteError(
+            "redis endpoint `scriptFile` must not be empty".into(),
+        ));
+    }
+    let resolved = script_ctx.resolve(raw)?;
+    let contents = camel_api::read_script_source(&resolved)?;
+    script_ctx.record(resolved.clone(), contents);
+    Ok(resolved)
+}
+
+/// Percent-encode a filesystem path for a Camel URI query value.
+///
+/// Deliberately stricter than `camel_api::endpoint_uri`'s param renderer,
+/// which leaves `(`, `)` and multi-byte UTF-8 verbatim. That set is a syntax
+/// hazard here: a path containing `RAW(` makes `camel_endpoint`'s scanner
+/// swallow the following `&`-separated pairs into the filename, and any
+/// non-ASCII byte panics the byte-indexed scanner. Only RFC 3986 unreserved
+/// bytes plus `/` and `:` pass through; everything else — `&`, `=`, `%`, `#`,
+/// `?`, `+`, space, parentheses, and every non-ASCII UTF-8 byte — is encoded
+/// as uppercase `%XX`, so the value round-trips through `parse_uri` as ONE
+/// opaque value.
+fn encode_uri_value(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                out.push(char::from(byte));
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(HEX[usize::from(byte >> 4)]));
+                out.push(char::from(HEX[usize::from(byte & 0x0F)]));
+            }
+        }
+    }
+    out
 }
 
 /// Combine the full-form `config.parameters` map with the step-level
@@ -883,7 +1011,7 @@ pub(crate) fn route_step_to_declarative_step(
             if to.trim().is_empty() {
                 return Err(CamelError::RouteError("to: URI must not be empty".into()));
             }
-            let uri = merge_endpoint_uri(&to, parameters)?;
+            let uri = merge_endpoint_uri(&to, parameters, script_ctx)?;
             Ok(DeclarativeStep::To(ToStepDef::new(uri)))
         }
         RouteDslStep::WireTap(WireTapStep {
@@ -895,7 +1023,7 @@ pub(crate) fn route_step_to_declarative_step(
                     "wire_tap: URI must not be empty".into(),
                 ));
             }
-            let uri = merge_endpoint_uri(&wire_tap, parameters)?;
+            let uri = merge_endpoint_uri(&wire_tap, parameters, script_ctx)?;
             Ok(DeclarativeStep::WireTap(WireTapStepDef { uri }))
         }
         RouteDslStep::Stop(StopStep { stop }) => {
@@ -1380,7 +1508,8 @@ pub(crate) fn route_step_to_declarative_step(
                             "scatter_gather: endpoint URI must not be empty".into(),
                         ));
                     }
-                    Ok(DeclarativeStep::To(ToStepDef::new(endpoint)))
+                    let uri = merge_endpoint_uri(&endpoint, BTreeMap::new(), script_ctx)?;
+                    Ok(DeclarativeStep::To(ToStepDef::new(uri)))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -1692,7 +1821,7 @@ pub(crate) fn route_step_to_declarative_step(
         RouteDslStep::Enrich(EnrichStep { enrich, parameters }) => {
             let (uri, strategy, config_params) = unpack_enrich_body(enrich)?;
             let params = combine_params(config_params, parameters)?;
-            let uri = merge_endpoint_uri(&uri, params)?;
+            let uri = merge_endpoint_uri(&uri, params, script_ctx)?;
             Ok(DeclarativeStep::Enrich(EnrichStepDef {
                 uri,
                 strategy,
@@ -1705,7 +1834,7 @@ pub(crate) fn route_step_to_declarative_step(
         }) => {
             let (uri, strategy, timeout, config_params) = unpack_poll_enrich_body(poll_enrich)?;
             let params = combine_params(config_params, parameters)?;
-            let uri = merge_endpoint_uri(&uri, params)?;
+            let uri = merge_endpoint_uri(&uri, params, script_ctx)?;
             Ok(DeclarativeStep::PollEnrich(EnrichStepDef {
                 uri,
                 strategy,

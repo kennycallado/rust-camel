@@ -62,6 +62,21 @@ pub(super) struct RedisMetadataDescriptor {
 
     #[uri_param(name = "ssl")]
     pub _ssl: Option<bool>,
+
+    #[uri_param(name = "script")]
+    pub _script: Option<String>,
+
+    #[uri_param(name = "scriptFile")]
+    pub _script_file: Option<String>,
+
+    #[uri_param(name = "function")]
+    pub _function: Option<String>,
+
+    #[uri_param(name = "idempotent", default = "false")]
+    pub _idempotent: bool,
+
+    #[uri_param(name = "atomic", default = "true")]
+    pub _atomic: bool,
 }
 
 #[cfg(test)]
@@ -92,6 +107,11 @@ mod tests {
             "streamRecoverEnabled",
             "streamRecoverMinIdleMs",
             "streamRecoverBatch",
+            "script",
+            "scriptFile",
+            "function",
+            "idempotent",
+            "atomic",
         ];
         expected.sort();
 

@@ -33,6 +33,11 @@ fn cfg_with(
         reconnect: NetworkRetryPolicy::default(),
         connection_timeout_secs: 10,
         topology_kind: TopologyKind::Standalone,
+        script: None,
+        script_file: None,
+        function: None,
+        idempotent: false,
+        atomic: true,
     }
 }
 

@@ -223,9 +223,17 @@ configuration selects a command before exchange processing starts.
 
 ## Trust boundary
 
-ADR-0032 defines exchange headers and bodies as untrusted. camel-redis does not
-use exchange data as a Redis command name. The command comes from the
-operator-owned Endpoint URI and must parse as a `RedisCommand` variant.
+ADR-0032 defines exchange headers and bodies as untrusted. For an ordinary
+single-command endpoint, camel-redis does not use exchange data as a Redis
+command name. The command comes from the operator-owned Endpoint URI and must
+parse as a `RedisCommand` variant.
+
+Two bounded exceptions exist. A `command=multi` endpoint selects each entry
+command from the `CamelRedis.Batch` header. The component validates every entry
+against the typed allowlist before send, so the header cannot name a command
+outside that allowlist. An `eval` or `fcall` endpoint binds its keys and
+arguments from the exchange body, because a script declares its own multi-key
+operand layout.
 
 Keys, fields, values, channels, scores, and other dynamic values cross the
 boundary as command arguments. `redis::Cmd::arg` and `AsyncCommands` encode
@@ -234,8 +242,11 @@ concatenating them into command text. Argument contents therefore cannot add a
 second command or change the selected command. Missing required headers return
 `CamelError`.
 
-The component does not expose `EVAL`, `EVALSHA`, or script-loading commands.
-This argument framing prevents command-syntax injection. It does not make the
+The component exposes `eval` and `fcall` for operator-authored server-side code.
+The script or function-library text comes only from the Endpoint URI (`script` or
+`scriptFile`), never from an exchange header or body (ADR-0032). Script requests
+use the provenance-pair retry contract in ADR-0013. This argument framing
+prevents command-syntax injection. It does not make the
 operation or its target key semantically safe. Routes must still validate those
 values when their meaning creates a resource or authorization decision under
 ADR-0032.
