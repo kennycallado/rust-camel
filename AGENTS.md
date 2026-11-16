@@ -105,6 +105,8 @@
   run: cargo xtask lint-context-citations
 - name: lint-metric-labels
   run: cargo xtask lint-metric-labels
+- name: lint-gates-lanes
+  run: bash scripts/gates-lanes-test.sh
 - name: schema-check
   run: cargo xtask schema --check
 - name: doc-build
@@ -122,6 +124,96 @@ parsing the block above (it cannot drift). Network and docs-toolchain gates
 (`lint-commits`, `doc-guide-test`, `cargo-audit`, `audit`) are skipped by
 default and left to CI; `GATES_ONLY=`/`GATES_SKIP=` narrow or widen the run.
 The merge gate and any release bump require exit 0.
+
+## COMPONENT LANES
+
+Every workspace crate a change touches must declare its integration lane in the table below. `--lib` alone never compiles `tests/` or feature-gated test files — rc-2co7z: `tests/decision_http_resilience.rs` is `#![cfg(feature = "decisions")]`, so a `--lib` run stays green while the suite never builds.
+
+When a touched crate has no lane entry, the sweep prints `NO LANE for <crate> — add one to AGENTS.md ## COMPONENT LANES` and fails if and only if the crate has an integration surface — at least one `tests/**/*.rs` file (feature-gated or not) or an explicit `[[test]]` target. A crate with no integration surface prints the line but does not block.
+
+Add one `<crate> | <mode> | <command>` row per command (several rows per crate are normal and all run). Pick the feature set the code path needs by reading the tests' `#![cfg(feature = ...)]` gates and the crate's `[features]` — do not guess; keep cross-crate commands byte-identical to the CI step they come from.
+
+`docker` rows are infra-dependent (testcontainers, live services, prebuilt bridge/guests). They are DECLARED (so they never trip the NO LANE rule) but run only under `GATES_LANES=all`; CI owns them (`.github/workflows/integration-*.yml`, ci.yml container jobs), so a machine without Docker passes the registry sweep. `GATES_LANES=0` disables the lane phase; `GATES_SKIP`/`GATES_ONLY` treat it as gate name `lanes`.
+
+Justified exclusions:
+
+- `component_emission_test` and `cache_payload_offload` are cross-cutting (camel-core + camel-otel + camel-component-api / camel-config) with no single trigger crate — CI runs them.
+- The WASM per-target `-- --ignored` loop (ci.yml, allowlist-driven per ADR-0054) needs pre-built wasm32-wasip2 guests — CI's wasm job owns it; the `camel-component-wasm` local row covers the non-ignored surface.
+- `camel-cli` as a trigger keeps the fail-safe until a mission declares its lane deliberately.
+
+```lanes
+# Format: one row per command, `<crate> | <mode> | <command>`.
+# mode `local`  -> runs in every local sweep
+# mode `docker` -> infra-dependent (testcontainers, live services, prebuilt
+#                  bridge/guests): declared, runs only under GATES_LANES=all
+# The parser splits on the FIRST TWO `|` only, so a command may contain `|`.
+# Several rows per crate are normal; all of them run. Blank lines and lines
+# starting with `#` are ignored.
+
+# --- camel-component-llm: own tests/ + feature-gated suite (rc-2co7z)
+camel-component-llm | local | cargo test -p camel-component-llm --features decisions
+# --- camel-core: ci.yml:146 boundary suite
+camel-core | local | cargo test -p camel-core --test hexagonal_architecture_boundaries_test
+# --- own tests/ suites (default features)
+camel-component-redis | local | cargo test -p camel-component-redis
+camel-component-mail | local | cargo test -p camel-component-mail
+camel-component-http | local | cargo test -p camel-component-http
+camel-component-jms | local | cargo test -p camel-component-jms
+camel-component-cxf | local | cargo test -p camel-component-cxf
+camel-xj | local | cargo test -p camel-xj
+camel-xslt | local | cargo test -p camel-xslt
+camel-component-validator | local | cargo test -p camel-component-validator
+camel-language-rhai | local | cargo test -p camel-language-rhai
+camel-auth | local | cargo test -p camel-auth
+camel-bundles | local | cargo test -p camel-bundles
+# own tests/ (#[ignore] targets excluded by default)
+camel-component-wasm | local | cargo test -p camel-component-wasm
+
+# --- integration-ollama-smoke.yml:64 (docker)
+camel-component-llm | docker | cargo test -p camel-component-llm --test ollama_live --features ollama -- --ignored ollama_embed
+# --- integration-sql.yml (docker)
+camel-component-sql | docker | cargo test -p camel-cli --no-default-features --features integration-sql,itest-e2e --test test_scenario_cli_e2e
+# --- integration-redis.yml (docker)
+camel-component-redis | docker | cargo test -p camel-cli --no-default-features --features integration-redis,itest-e2e --test test_scenario_cli_e2e
+camel-component-redis | docker | cargo test -p camel-integration-test --features redis,redis-live --lib
+camel-component-redis | docker | cargo test -p camel-integration-test --features redis --test redis_state_test
+# --- ci.yml container job suites (docker)
+camel-component-redis | docker | cargo test -p camel-test --features integration-tests --test redis_test
+camel-redis-repo | docker | cargo test -p camel-test --features integration-tests --test redis_repositories_test
+camel-component-kafka | docker | cargo test -p camel-test --features integration-tests --test kafka_test
+camel-component-opensearch | docker | cargo test -p camel-test --features integration-tests --test opensearch_test
+camel-component-container | docker | cargo test -p camel-test --features integration-tests --test container_test
+camel-component-cxf | docker | cargo test -p camel-test --features integration-tests --test cxf_test
+camel-component-jms | docker | cargo test -p camel-test --features integration-tests --test jms_test
+camel-xj | docker | cargo test -p camel-test --features integration-tests --test xml_bridge_xj_test
+camel-xslt | docker | cargo test -p camel-test --features integration-tests --test xml_bridge_xslt_test
+camel-component-validator | docker | cargo test -p camel-test --features integration-tests --test xml_bridge_validator_test
+# ci.yml:193 (soft-skips without the native xml-bridge binary)
+camel-component-validator | docker | cargo test -p camel-test --features integration-tests --test xml_bridge_xerces_diagnostics_test
+# ci.yml:235 (HTTP consumer kernel auth)
+camel-component-http | docker | cargo test -p camel-test --features integration-tests --test kernel_fail_closed_test
+# ci.yml:235 (kernel_authenticate side; duplicate owner row is intentional)
+camel-auth | docker | cargo test -p camel-test --features integration-tests --test kernel_fail_closed_test
+# ci.yml:233
+camel-auth | docker | cargo test -p camel-test --features integration-tests --test auth_multi_credential_test
+# ci.yml:231
+camel-platform-kubernetes | docker | cargo test -p camel-test --features integration-tests --test kubernetes_test
+# --- integration-mail.yml (docker)
+camel-component-mail | docker | MAIL_ITEST=1 cargo test -p camel-component-mail --test greenmail_tier --test mailpit_tier
+# --- integration-http.yml (docker)
+camel-component-http | docker | cargo test -p camel-integration-test --features http
+camel-component-http | docker | cargo test -p camel-cli --features integration-http,itest-e2e --test test_tier_filters
+camel-component-http | docker | cargo test -p camel-cli --features integration-http,itest-e2e --test test_scenario_cli_e2e
+# --- integration-http.yml:47 (docker)
+camel-bundles | docker | cargo test -p camel-bundles --features kafka
+# --- integration-rhai.yml (docker)
+camel-language-rhai | docker | cargo test -p camel-integration-test --features lang-rhai --test reconcile_budget_test
+# --- integration-surreal.yml (docker)
+camel-component-surrealdb | docker | cargo test -p camel-cli --no-default-features --features integration-surreal,itest-e2e --test test_scenario_cli_e2e
+camel-component-surrealdb | docker | cargo test -p camel-integration-test --features surreal --test surreal_state_test
+# --- integration-wasm.yml (docker)
+camel-component-wasm | docker | cargo test -p camel-integration-test --features wasm
+```
 
 ## NEW-CODE-ONLY STYLE NORMS (ADR-0091)
 

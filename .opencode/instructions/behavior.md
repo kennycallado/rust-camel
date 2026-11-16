@@ -29,6 +29,7 @@
 - Security best practices (no exposed secrets)
 - Modular and maintainable structure
 - Follow project's lint/format rules
+- **Integration lanes before done:** before reporting a task done or parking a mission, run the integration lane of every component the change touches (AGENTS.md `## COMPONENT LANES`), not just `--lib` — `--lib` never compiles `tests/` or feature-gated test files.
 
 ## 4. DESIGN PHILOSOPHY: "INTENTIONAL MINIMALISM"
 
