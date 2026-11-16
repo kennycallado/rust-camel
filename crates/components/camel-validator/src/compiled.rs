@@ -9,6 +9,11 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use camel_component_api::template_reload::{TemplateReloadStaged, TemplateReloadTarget};
 use camel_component_api::{Body, CamelError};
+use camel_json_schema::CompiledSchema;
+use camel_json_schema::FormatMode;
+use camel_json_schema::SchemaError;
+use camel_json_schema::SchemaSource;
+use camel_json_schema::SchemaSyntax;
 use prost_reflect::MessageDescriptor;
 // serde_yml migrated to noyalib (compat-serde-yaml shim) — closes RUSTSEC-2025-0068.
 // Module alias preserves call-site paths byte-for-byte.
@@ -17,7 +22,7 @@ use serde_yml::Value as YamlValue;
 
 use crate::config::{SchemaType, ValidatorConfig};
 use crate::error::ValidatorError;
-use crate::resolver::{FilesystemResolver, MAX_SCHEMA_BYTES, ResourceResolver};
+use crate::resolver::MAX_SCHEMA_BYTES;
 use crate::schema_set::{
     SchemaSet, discover_embedded_schema_set, discover_schema_set, embedded_ref_bytes,
     embedded_ref_name, is_embedded_ref,
@@ -40,24 +45,6 @@ pub(crate) fn approx_body_byte_len(body: &Body) -> Option<usize> {
     }
 }
 
-/// Compile a JSON Schema with `format` keyword validation controlled by
-/// `validate_formats`.
-///
-/// Format validation is enabled by default for every draft, while the schema's
-/// `$schema` key keeps selecting draft semantics (draft 2020-12 when absent).
-///
-/// Twin of the helper in `crates/camel-processor/src/json_schema_validate.rs`:
-/// no common crate exists that both consumers could share without a new
-/// dependency edge.
-fn compile_json_schema(
-    schema: &serde_json::Value,
-    validate_formats: bool,
-) -> Result<jsonschema::Validator, jsonschema::ValidationError<'static>> {
-    jsonschema::options()
-        .should_validate_formats(validate_formats)
-        .build(schema)
-}
-
 pub(crate) enum CompiledValidator {
     Xml {
         /// Discovered schema set (root bytes, transitive imports/includes, and
@@ -69,11 +56,11 @@ pub(crate) enum CompiledValidator {
         max_payload_bytes: Option<usize>,
     },
     Json {
-        validator: Arc<jsonschema::Validator>,
+        validator: Arc<CompiledSchema>,
         max_payload_bytes: Option<usize>,
     },
     Yaml {
-        validator: Arc<jsonschema::Validator>,
+        validator: Arc<CompiledSchema>,
         max_payload_bytes: Option<usize>,
     },
     Protobuf {
@@ -258,7 +245,6 @@ impl CompiledValidator {
                 config.max_payload_bytes,
             ),
             SchemaType::Json | SchemaType::Yaml => {
-                let resolver = FilesystemResolver;
                 let path_str = path.to_str().ok_or_else(|| {
                     CamelError::EndpointCreationFailed(
                         "schema path contains non-UTF-8 characters".into(),
@@ -267,7 +253,7 @@ impl CompiledValidator {
                 // Embedded references resolve from the process-global registry
                 // before any filesystem attempt; the shared cap keeps registry
                 // bytes bounded exactly like disk bytes.
-                let content =
+                let (source, syntax) =
                     match embedded_ref_bytes(path_str).map_err(|e| e.to_endpoint_error())? {
                         Some(bytes) => {
                             if bytes.len() as u64 > MAX_SCHEMA_BYTES {
@@ -275,19 +261,40 @@ impl CompiledValidator {
                                     "schema file '{path_str}' exceeds {MAX_SCHEMA_BYTES} bytes"
                                 )));
                             }
-                            bytes
+                            // Registry content has no filesystem root: parse it
+                            // here and compile it as an inline document. Syntax
+                            // is meaningless once the document is a `Value`.
+                            (
+                                SchemaSource::Inline(Self::parse_embedded_schema(
+                                    &bytes,
+                                    path,
+                                    &config.schema_type,
+                                )?),
+                                SchemaSyntax::Auto,
+                            )
                         }
-                        None => resolver.resolve(path_str)?,
+                        // File-backed schemas are compiled in place, never
+                        // pre-parsed, so sibling references resolve under the
+                        // crate's confinement rules.
+                        None => (
+                            SchemaSource::File(path.clone()),
+                            match config.schema_type {
+                                SchemaType::Json => SchemaSyntax::Json,
+                                _ => SchemaSyntax::Yaml,
+                            },
+                        ),
                     };
                 match config.schema_type {
                     SchemaType::Json => Self::compile_json(
-                        &content,
+                        &source,
+                        syntax,
                         path,
                         config.max_payload_bytes,
                         config.validate_formats,
                     ),
                     SchemaType::Yaml => Self::compile_yaml_schema(
-                        &content,
+                        &source,
+                        syntax,
                         path,
                         config.max_payload_bytes,
                         config.validate_formats,
@@ -336,24 +343,13 @@ impl CompiledValidator {
     }
 
     fn compile_json(
-        content: &[u8],
+        source: &SchemaSource,
+        syntax: SchemaSyntax,
         path: &Path,
         max_payload_bytes: Option<usize>,
         validate_formats: bool,
     ) -> Result<Self, CamelError> {
-        let schema_value: serde_json::Value = serde_json::from_slice(content).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "invalid JSON schema '{}': {e}",
-                path.display()
-            ))
-        })?;
-
-        let validator = compile_json_schema(&schema_value, validate_formats).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "failed to compile JSON schema '{}': {e}",
-                path.display()
-            ))
-        })?;
+        let validator = Self::compile_document(source, syntax, "JSON", path, validate_formats)?;
 
         Ok(CompiledValidator::Json {
             validator: Arc::new(validator),
@@ -362,43 +358,89 @@ impl CompiledValidator {
     }
 
     fn compile_yaml_schema(
-        content: &[u8],
+        source: &SchemaSource,
+        syntax: SchemaSyntax,
         path: &Path,
         max_payload_bytes: Option<usize>,
         validate_formats: bool,
     ) -> Result<Self, CamelError> {
-        let yaml_str = std::str::from_utf8(content).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "YAML schema '{}' is not valid UTF-8: {e}",
-                path.display()
-            ))
-        })?;
-
-        let yaml_value: YamlValue = serde_yml::from_str(yaml_str).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "invalid YAML schema '{}': {e}",
-                path.display()
-            ))
-        })?;
-
-        let schema_value: serde_json::Value = serde_json::to_value(&yaml_value).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "failed to convert YAML schema to JSON '{}': {e}",
-                path.display()
-            ))
-        })?;
-
-        let validator = compile_json_schema(&schema_value, validate_formats).map_err(|e| {
-            CamelError::EndpointCreationFailed(format!(
-                "failed to compile YAML schema '{}': {e}",
-                path.display()
-            ))
-        })?;
+        let validator = Self::compile_document(source, syntax, "YAML", path, validate_formats)?;
 
         Ok(CompiledValidator::Yaml {
             validator: Arc::new(validator),
             max_payload_bytes,
         })
+    }
+
+    /// Compiles `source` while keeping every pre-migration literal byte-exact.
+    ///
+    /// `kind` names the schema type in the compile-failure literal (`JSON` or
+    /// `YAML`) and `path` is the configured path that literal names.
+    fn compile_document(
+        source: &SchemaSource,
+        syntax: SchemaSyntax,
+        kind: &str,
+        path: &Path,
+        validate_formats: bool,
+    ) -> Result<CompiledSchema, CamelError> {
+        let format = if validate_formats {
+            FormatMode::Enforce
+        } else {
+            FormatMode::Annotate
+        };
+
+        camel_json_schema::compile(source, syntax, format).map_err(|error| match error {
+            // The parse text already carries the complete final message.
+            SchemaError::Parse { message, .. } => CamelError::EndpointCreationFailed(message),
+            SchemaError::Compile { message } => CamelError::EndpointCreationFailed(format!(
+                "failed to compile {kind} schema '{}': {message}",
+                path.display()
+            )),
+            other => CamelError::EndpointCreationFailed(other.to_string()),
+        })
+    }
+
+    /// Parses registry bytes into the `Value` an inline source compiles.
+    ///
+    /// Embedded content has no filesystem path the shared crate could re-read,
+    /// so the wrapper parses it here and keeps the pre-migration parse-failure
+    /// literals byte for byte.
+    fn parse_embedded_schema(
+        content: &[u8],
+        path: &Path,
+        schema_type: &SchemaType,
+    ) -> Result<serde_json::Value, CamelError> {
+        match schema_type {
+            SchemaType::Json => serde_json::from_slice(content).map_err(|e| {
+                CamelError::EndpointCreationFailed(format!(
+                    "invalid JSON schema '{}': {e}",
+                    path.display()
+                ))
+            }),
+            SchemaType::Yaml => {
+                let yaml_str = std::str::from_utf8(content).map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!(
+                        "YAML schema '{}' is not valid UTF-8: {e}",
+                        path.display()
+                    ))
+                })?;
+
+                let yaml_value: YamlValue = serde_yml::from_str(yaml_str).map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!(
+                        "invalid YAML schema '{}': {e}",
+                        path.display()
+                    ))
+                })?;
+
+                serde_json::to_value(&yaml_value).map_err(|e| {
+                    CamelError::EndpointCreationFailed(format!(
+                        "failed to convert YAML schema to JSON '{}': {e}",
+                        path.display()
+                    ))
+                })
+            }
+            _ => unreachable!("caller restricts this branch to JSON and YAML"),
+        }
     }
 
     /// Canonicalizes an embedded protobuf reference for the proto compiler.
@@ -548,7 +590,7 @@ impl CompiledValidator {
             .map_err(|e| e.to_processor_error())
     }
 
-    fn validate_json(validator: &jsonschema::Validator, body: &Body) -> Result<(), CamelError> {
+    fn validate_json(validator: &CompiledSchema, body: &Body) -> Result<(), CamelError> {
         let json_value = match body {
             Body::Json(v) => v.clone(),
             Body::Text(s) => serde_json::from_str(s)
@@ -564,10 +606,7 @@ impl CompiledValidator {
             }
         };
 
-        let messages: Vec<String> = validator
-            .iter_errors(&json_value)
-            .map(|e| format!("{e} at {}", e.instance_path()))
-            .collect();
+        let messages = violation_messages(validator, &json_value);
 
         if messages.is_empty() {
             Ok(())
@@ -579,7 +618,7 @@ impl CompiledValidator {
         }
     }
 
-    fn validate_yaml(validator: &jsonschema::Validator, body: &Body) -> Result<(), CamelError> {
+    fn validate_yaml(validator: &CompiledSchema, body: &Body) -> Result<(), CamelError> {
         let yaml_str = match body {
             Body::Text(s) => s.as_str(),
             _ => {
@@ -595,10 +634,7 @@ impl CompiledValidator {
         let json_value: serde_json::Value = serde_json::to_value(&yaml_value)
             .map_err(|e| CamelError::ProcessorError(format!("YAML→JSON conversion failed: {e}")))?;
 
-        let messages: Vec<String> = validator
-            .iter_errors(&json_value)
-            .map(|e| format!("{e} at {}", e.instance_path()))
-            .collect();
+        let messages = violation_messages(validator, &json_value);
 
         if messages.is_empty() {
             Ok(())
@@ -644,6 +680,16 @@ impl CompiledValidator {
         tail.map_err(|e| CamelError::ValidationError(format!("protobuf validation failed: {e}")))?;
         Ok(())
     }
+}
+
+/// Format every violation as `"{message} at {instance_path}"`, the exact shape
+/// this component has always reported.
+fn violation_messages(validator: &CompiledSchema, instance: &serde_json::Value) -> Vec<String> {
+    validator
+        .violations(instance)
+        .into_iter()
+        .map(|violation| format!("{} at {}", violation.message, violation.instance_path))
+        .collect()
 }
 
 #[cfg(test)]
@@ -777,6 +823,101 @@ mod tests {
                 .validate(&Body::Text("\"anything\"".into()))
                 .await
                 .is_ok()
+        );
+    }
+
+    /// Sibling `$ref`s of a file-backed schema resolve next to the root, and
+    /// the compiled validator enforces them.
+    #[tokio::test]
+    async fn validator_sibling_ref_resolves_from_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("defs.json"),
+            r#"{"$defs":{"int":{"type":"integer"}}}"#,
+        )
+        .expect("write defs.json");
+        let root = dir.path().join("root.json");
+        std::fs::write(
+            &root,
+            r#"{"type":"object","properties":{"x":{"$ref":"defs.json#/$defs/int"}}}"#,
+        )
+        .expect("write root.json");
+
+        let compiled = compile_temp_schema(&root, DEFAULT_VALIDATE_FORMATS);
+        assert!(
+            compiled
+                .validate(&Body::Text(r#"{"x":1}"#.into()))
+                .await
+                .is_ok(),
+            "an integer must satisfy the sibling-ref schema"
+        );
+        assert!(
+            compiled
+                .validate(&Body::Text(r#"{"x":"s"}"#.into()))
+                .await
+                .is_err(),
+            "a string must fail the sibling-ref schema"
+        );
+    }
+
+    /// `schemaType` beats the file extension: `root.json` is parsed as YAML and
+    /// its sibling reference still resolves inside the confined root.
+    #[tokio::test]
+    async fn schema_type_override_yaml_root_with_sibling_ref() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("defs.yaml"),
+            "definitions:\n  int:\n    type: integer\n",
+        )
+        .expect("write defs.yaml");
+        let root = dir.path().join("root.json");
+        std::fs::write(
+            &root,
+            "type: object\nproperties:\n  x:\n    $ref: defs.yaml#/definitions/int\n",
+        )
+        .expect("write root.json");
+
+        let cfg =
+            ValidatorConfig::from_uri(&format!("validator:{}?schemaType=yaml", root.display()))
+                .expect("validator URI must parse");
+        assert_eq!(cfg.schema_type, SchemaType::Yaml);
+
+        let compiled =
+            CompiledValidator::compile(&cfg, Arc::new(MockBridge { register_err: None }))
+                .expect("a YAML root with a .json extension must compile");
+        assert!(matches!(compiled, CompiledValidator::Yaml { .. }));
+        assert!(
+            compiled.validate(&Body::Text("x: 1".into())).await.is_ok(),
+            "an integer must satisfy the YAML sibling-ref schema"
+        );
+        assert!(
+            compiled.validate(&Body::Text("x: s".into())).await.is_err(),
+            "a string must fail the YAML sibling-ref schema"
+        );
+    }
+
+    /// Byte-identity guard for the JSON validation-failure message.
+    ///
+    /// The migrated `camel-json-schema` path must reproduce the pre-migration
+    /// `CamelError` text exactly: header line, upstream error text, `at`, and
+    /// the instance pointer.
+    #[tokio::test]
+    async fn validation_failure_message_byte_identical() {
+        let schema = write_temp_schema(
+            ".json",
+            r#"{"type":"object","properties":{"x":{"type":"integer"}}}"#,
+        );
+        let compiled = compile_temp_schema(schema.path(), DEFAULT_VALIDATE_FORMATS);
+        let err = compiled
+            .validate(&Body::Text(r#"{"x":"s"}"#.into()))
+            .await
+            .expect_err("a string must fail an integer schema");
+        assert_eq!(
+            err.to_string(),
+            concat!(
+                "Processor error: JSON Schema validation failed:\n",
+                "\"s\" is not of type \"integer\" at /x"
+            )
         );
     }
 
@@ -1169,6 +1310,27 @@ message Person {
         .expect("a registered YAML schema must compile");
         assert!(matches!(compiled, CompiledValidator::Yaml { .. }));
         assert!(compiled.validate(&Body::Text("id: 1".into())).await.is_ok());
+    }
+
+    /// Embedded schemas are inline: they have no filesystem root, so a sibling
+    /// `$ref` must fail closed with the named rejection (not a parse error).
+    #[test]
+    fn embedded_schema_external_ref_rejected() {
+        let key = "assets/fixture58/schema.json";
+        register_embedded(
+            key,
+            br#"{"type":"object","properties":{"x":{"$ref":"defs.json#/$defs/x"}}}"#,
+        );
+        let err = compile_embedded(
+            "validator:camel-embedded%3Aassets%2Ffixture58%2Fschema.json?schemaType=json",
+        )
+        .expect_err("an external $ref must be rejected for an embedded schema");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("defs.json"),
+            "must name the rejected reference: {msg}"
+        );
+        assert!(msg.contains("rejected"), "must name the rejection: {msg}");
     }
 
     /// Protobuf seam: the validator forwards a shared-registry registration

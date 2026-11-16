@@ -163,6 +163,11 @@ camel-component-cxf | local | cargo test -p camel-component-cxf
 camel-xj | local | cargo test -p camel-xj
 camel-xslt | local | cargo test -p camel-xslt
 camel-component-validator | local | cargo test -p camel-component-validator
+camel-component-mcp | local | cargo test -p camel-component-mcp
+camel-processor | local | cargo test -p camel-processor
+camel-json-schema | local | cargo test -p camel-json-schema
+# --- xtask: own tests/ (triggered by trustpub-registrations.toml edits)
+xtask | local | cargo test -p xtask
 camel-language-rhai | local | cargo test -p camel-language-rhai
 camel-auth | local | cargo test -p camel-auth
 camel-bundles | local | cargo test -p camel-bundles

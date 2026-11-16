@@ -159,6 +159,44 @@ async fn draft07_schema_enforces_format() {
 }
 
 #[tokio::test]
+async fn request_schema_internal_ref_works() {
+    let s = json!({
+        "$defs": { "obj": { "type": "object", "required": ["a"] } },
+        "$ref": "#/$defs/obj"
+    });
+    let svc = JsonSchemaValidateService::new(IdentityProcessor, &s).unwrap();
+
+    let ex = Exchange::new(Message::new(Body::Json(json!({ "a": 1 }))));
+    assert!(svc.clone().oneshot(ex).await.is_ok());
+
+    let ex = Exchange::new(Message::new(Body::Json(json!({}))));
+    let err = svc.oneshot(ex).await.unwrap_err();
+    assert!(matches!(err, CamelError::ValidationError(_)));
+}
+
+#[test]
+fn request_schema_external_ref_rejected_at_build() {
+    let s = json!({ "$ref": "defs.json#/$defs/x" });
+    let err = JsonSchemaValidateService::new(IdentityProcessor, &s).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("defs.json"), "msg: {msg}");
+    assert!(msg.contains("rejected"), "msg: {msg}");
+}
+
+#[test]
+fn request_schema_remote_ref_error_preserves_literal() {
+    let s = json!({ "$ref": "https://example.com/s.json" });
+    let err = JsonSchemaValidateService::new(IdentityProcessor, &s).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains(
+            "remote $ref 'https://example.com/s.json' rejected: schemas resolve from local files only (ADR-0100); vendor the file"
+        ),
+        "msg: {msg}"
+    );
+}
+
+#[tokio::test]
 async fn schema_without_dollar_schema_enforces_format_2020_12() {
     let s = json!({
         "type": "object",

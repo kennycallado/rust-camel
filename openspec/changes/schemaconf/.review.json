@@ -1,0 +1,20 @@
+{
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "kind": "holistic",
+  "impl_hash": "sha256:9cc5d851b9b9517ad6a045ea2b53d2e7b27648b9fda832f77d0c8862ef2cd49e",
+  "change_hash": "sha256:b00a025ef082f7d7214ce174cd321e4ac5102434879d2830b5cee7e31ed74330",
+  "findings": {
+    "critical": 0,
+    "important": 0,
+    "minors_resolved": [
+      "fifo test #[cfg(unix)] gate",
+      "SchemaError #[must_use]"
+    ],
+    "minors_tracked": [
+      "rc-pbhff: retire/gate unconfined FilesystemResolver",
+      "rc-674q0: trustpub first publish (degraded lint-publish-registration gate)"
+    ]
+  },
+  "impl_hash_definition": "sha256 of `git diff df0507cb2...HEAD` excluding .review.json itself (implementation diff as approved)"
+}

@@ -22,6 +22,12 @@ state = "registered"
 name = "camel-endpoint-macros"
 state = "registered"
 
+# Never published: manual first publish with CARGO_REGISTRY_TOKEN, then
+# register trustpub, then flip this entry to `registered`.
+[[crates]]
+name = "camel-json-schema"
+state = "new-unpublished"
+
 [[crates]]
 name = "camel-matchers"
 state = "registered"

@@ -93,6 +93,7 @@ camel-dsl = { path = "crates/camel-dsl", version = "=0.69.0" }
 camel-builder = { path = "crates/camel-builder", version = "=0.69.0" }
 camel-bundles = { path = "crates/camel-bundles", version = "=0.69.0", default-features = false }
 camel-lint = { path = "crates/camel-lint", version = "=0.69.0" }
+camel-json-schema = { path = "crates/camel-json-schema", version = "=0.69.0" }
 camel-lsp = { path = "crates/camel-lsp", version = "=0.69.0" }
 camel-component-api = { path = "crates/components/camel-component-api", version = "=0.69.0" }
 camel-endpoint = { path = "crates/camel-endpoint", version = "=0.69.0" }
@@ -299,7 +300,7 @@ rcgen = { version = "0.14", features = ["pem", "x509-parser"] }
 sqlx = "0.9"
 sxd-document = "0.3"
 syn = "3"
-jsonschema = { version = "0.60", default-features = false, features = ["resolve-file"] }
+jsonschema = { version = "0.60", default-features = false }
 ariadne = "0.6"
 ron = "0.12"
 noyalib = { version = "=0.0.54", features = ["compat-serde-yaml"] }

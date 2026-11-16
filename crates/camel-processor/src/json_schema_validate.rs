@@ -1,11 +1,16 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use tower::Service;
 
 use camel_api::body::Body;
 use camel_api::{CamelError, Exchange};
+use camel_json_schema::CompiledSchema;
+use camel_json_schema::FormatMode;
+use camel_json_schema::SchemaSource;
+use camel_json_schema::SchemaSyntax;
 
 /// Tower Service that validates the exchange body against a compiled JSON
 /// Schema. Returns `CamelError::ValidationError` if the body does not match.
@@ -17,7 +22,7 @@ use camel_api::{CamelError, Exchange};
 /// must first run an Unmarshal step that produces Body::Json.
 pub struct JsonSchemaValidateService<P> {
     inner: P,
-    validator: jsonschema::Validator,
+    validator: Arc<CompiledSchema>,
 }
 
 impl<P> std::fmt::Debug for JsonSchemaValidateService<P> {
@@ -39,29 +44,24 @@ where
     }
 }
 
-/// Compile a JSON Schema with `format` keyword validation forced on.
-///
-/// Format validation is enabled for every draft, while the schema's `$schema`
-/// key keeps selecting draft semantics (draft 2020-12 when absent).
-///
-/// `crates/components/camel-validator/src/compiled.rs` carries the twin
-/// helper: no common crate exists that both consumers could share without a
-/// new dependency edge.
-fn compile_json_schema(
-    schema: &serde_json::Value,
-) -> Result<jsonschema::Validator, jsonschema::ValidationError<'static>> {
-    jsonschema::options()
-        .should_validate_formats(true)
-        .build(schema)
-}
-
 impl<P> JsonSchemaValidateService<P> {
     /// Compile a JSON Schema and wrap the given inner service. Returns
     /// `CamelError::RouteError` if the schema is not a valid JSON Schema.
+    ///
+    /// The schema is an inline document, so it resolves same-document
+    /// references only: every external `$ref` fails at construction with the
+    /// named confinement rejection (ADR-0100).
     pub fn new(inner: P, schema: &serde_json::Value) -> Result<Self, CamelError> {
-        let validator = compile_json_schema(schema)
-            .map_err(|e| CamelError::RouteError(format!("invalid JSON schema: {e}")))?;
-        Ok(Self { inner, validator })
+        let validator = camel_json_schema::compile(
+            &SchemaSource::Inline(schema.clone()),
+            SchemaSyntax::Auto,
+            FormatMode::Enforce,
+        )
+        .map_err(|e| CamelError::RouteError(format!("invalid JSON schema: {e}")))?;
+        Ok(Self {
+            inner,
+            validator: Arc::new(validator),
+        })
     }
 }
 
@@ -84,8 +84,11 @@ where
             Body::Json(v) => {
                 let errors: Vec<String> = self
                     .validator
-                    .iter_errors(v)
-                    .map(|e| format!("{e} at {}", e.instance_path()))
+                    .violations(v)
+                    .into_iter()
+                    .map(|violation| {
+                        format!("{} at {}", violation.message, violation.instance_path)
+                    })
                     .collect();
                 if errors.is_empty() {
                     Ok(())

@@ -71,6 +71,9 @@ use camel_api::CamelError;
 use camel_api::security_policy::AccessMode;
 use camel_auth::AuthenticatedPrincipal;
 use camel_auth::{extract_token_multi, kernel_authenticate};
+use camel_json_schema::FormatMode;
+use camel_json_schema::SchemaSource;
+use camel_json_schema::SchemaSyntax;
 
 /// The sole protocol version this server speaks (spec: baseline 2026-07-28).
 const SUPPORTED_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
@@ -492,27 +495,35 @@ async fn dispatch_bound<T, R>(
 /// Validate `tools/call` arguments against the tool's registered input
 /// schema (spec: Tool argument JSON Schema validation).
 ///
-/// Compiles the schema per call (`jsonschema::validator_for`). Uses the same
-/// crate as `camel-processor` (which caches its compiled validator at
+/// Compiles the schema per call via `camel-json-schema` (the shared crate also
+/// used by `camel-processor`, which caches its compiled validator at
 /// construction); tool schemas are small and per-listener, so per-call
-/// compilation is an accepted tradeoff here. An invalid schema itself is a
-/// clean `invalid_params` error naming the tool; validation failures travel
-/// in the error's `data.violations` array. No Exchange is created for a
-/// rejected call.
+/// compilation is an accepted tradeoff here. `SchemaSource::Inline` keeps
+/// external `$ref`s fail-closed, and `FormatMode::DraftDefault` leaves format
+/// handling to upstream's native draft and vocabulary defaults. An invalid
+/// schema itself is a clean `invalid_params` error naming the tool; validation
+/// failures travel in the error's `data.violations` array. No Exchange is
+/// created for a rejected call.
 fn validate_arguments(
     name: &str,
     input_schema: &serde_json::Value,
     arguments: &serde_json::Value,
 ) -> Result<(), ErrorData> {
-    let validator = jsonschema::validator_for(input_schema).map_err(|error| {
+    let schema = camel_json_schema::compile(
+        &SchemaSource::Inline(input_schema.clone()),
+        SchemaSyntax::Auto,
+        FormatMode::DraftDefault,
+    )
+    .map_err(|error| {
         ErrorData::invalid_params(
             format!("tool '{name}' has an invalid input schema: {error}"),
             None,
         )
     })?;
-    let violations: Vec<String> = validator
-        .iter_errors(arguments)
-        .map(|error| format!("{error} at {}", error.instance_path()))
+    let violations: Vec<String> = schema
+        .violations(arguments)
+        .into_iter()
+        .map(|violation| format!("{} at {}", violation.message, violation.instance_path))
         .collect();
     if violations.is_empty() {
         Ok(())
@@ -808,5 +819,135 @@ mod tests {
             let contents = resource_contents(resource("file:///case.txt", text.as_bytes(), mime));
             assert_eq!(expect_text(contents), text);
         }
+    }
+
+    /// Validate `argument` against `schema` and report acceptance.
+    fn validation_accepts(schema: &serde_json::Value, argument: &str) -> bool {
+        validate_arguments("tool", schema, &serde_json::json!(argument)).is_ok()
+    }
+
+    #[test]
+    fn validate_arguments_internal_ref_works() {
+        let schema = serde_json::json!({
+            "$defs": { "identifier": { "type": "string" } },
+            "$ref": "#/$defs/identifier"
+        });
+        validate_arguments("tool", &schema, &serde_json::json!("abc"))
+            .expect("same-document $ref must resolve");
+    }
+
+    #[test]
+    fn validate_arguments_external_ref_rejected() {
+        let schema = serde_json::json!({ "$ref": "defs.json#/$defs/x" });
+        let error = validate_arguments("tool", &schema, &serde_json::json!("abc"))
+            .expect_err("external $ref must be rejected");
+        assert!(
+            error.message.contains("defs.json"),
+            "message must name the rejected reference: {}",
+            error.message
+        );
+        assert!(
+            error.message.contains("rejected"),
+            "message must say the reference was rejected: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn validate_arguments_violation_shape_unchanged() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "name": { "type": "string" } },
+            "required": ["name"]
+        });
+        let error = validate_arguments("tool", &schema, &serde_json::json!({}))
+            .expect_err("missing required property must be rejected");
+        assert_eq!(
+            error.message,
+            "tool 'tool' arguments failed input schema validation"
+        );
+        let violations = error
+            .data
+            .as_ref()
+            .and_then(|data| data.get("violations"))
+            .and_then(serde_json::Value::as_array)
+            .expect("violations array");
+        assert_eq!(
+            violations,
+            &vec![serde_json::json!("\"name\" is a required property at ")]
+        );
+    }
+
+    #[test]
+    fn format_default_absent_schema_is_annotation() {
+        let schema = serde_json::json!({ "type": "string", "format": "email" });
+        assert!(
+            validation_accepts(&schema, "not-an-email"),
+            "without $schema the 2020-12 default treats format as an annotation"
+        );
+    }
+
+    #[test]
+    fn format_default_2020_12_is_annotation() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "string",
+            "format": "email"
+        });
+        assert!(
+            validation_accepts(&schema, "not-an-email"),
+            "2020-12 leaves format as an annotation"
+        );
+    }
+
+    #[test]
+    fn format_default_draft07_enforces() {
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "string",
+            "format": "email"
+        });
+        assert!(
+            !validation_accepts(&schema, "not-an-email"),
+            "draft-07 asserts formats"
+        );
+    }
+
+    #[test]
+    fn format_default_bundled_format_assertion_enforces() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/meta/format-assertion",
+            "type": "string",
+            "format": "ipv4"
+        });
+        assert!(
+            !validation_accepts(&schema, "not-an-ipv4"),
+            "the format-assertion vocabulary asserts formats despite 2020-12"
+        );
+    }
+
+    #[test]
+    fn format_default_mixed_draft_inline_resources_match_native() {
+        // Pin the native default: the embedded resource declares draft-07, but
+        // upstream derives format handling from the root dialect (2020-12), so
+        // the embedded `format` stays an annotation and the argument is
+        // accepted. Observed against the pre-migration validator; direction
+        // must stay identical across the migration.
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$ref": "#/$defs/legacy",
+            "$defs": {
+                "legacy": {
+                    "$id": "https://example.com/legacy",
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "type": "string",
+                    "format": "email"
+                }
+            }
+        });
+        assert!(
+            validation_accepts(&schema, "not-an-email"),
+            "mixed-draft inline resource keeps the root dialect's format annotation"
+        );
     }
 }

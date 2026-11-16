@@ -2084,8 +2084,8 @@ dependencies = [
  "camel-builder",
  "camel-component-api",
  "camel-dsl",
+ "camel-json-schema",
  "http",
- "jsonschema",
  "percent-encoding",
  "reqwest",
  "rmcp",
@@ -2317,10 +2317,10 @@ dependencies = [
  "camel-component-direct",
  "camel-core",
  "camel-dsl",
+ "camel-json-schema",
  "camel-proto-compiler",
  "dashmap 6.2.1",
  "hex",
- "jsonschema",
  "noyalib",
  "percent-encoding",
  "prost",
@@ -2678,6 +2678,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "camel-json-schema"
+version = "0.69.0"
+dependencies = [
+ "jsonschema",
+ "noyalib",
+ "percent-encoding",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "camel-language-api"
 version = "0.69.0"
 dependencies = [
@@ -2910,6 +2922,7 @@ dependencies = [
  "camel-api",
  "camel-auth",
  "camel-component-api",
+ "camel-json-schema",
  "camel-language-api",
  "camel-language-rhai",
  "camel-language-simple",
@@ -2917,7 +2930,6 @@ dependencies = [
  "csv",
  "flate2",
  "futures",
- "jsonschema",
  "mail-parser",
  "rand 0.10.3",
  "regex",

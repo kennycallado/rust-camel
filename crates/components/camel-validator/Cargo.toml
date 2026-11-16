@@ -15,6 +15,7 @@ categories.workspace = true
 [dependencies]
 camel-api.workspace = true
 camel-component-api.workspace = true
+camel-json-schema.workspace = true
 arc-swap = { workspace = true }
 camel-bridge = { workspace = true }
 camel-proto-compiler = { workspace = true }
@@ -27,7 +28,6 @@ prost = { workspace = true }
 prost-reflect = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-jsonschema = { workspace = true }
 noyalib = { workspace = true }
 serde_json.workspace = true
 percent-encoding.workspace = true
