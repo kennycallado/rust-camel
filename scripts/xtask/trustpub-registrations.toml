@@ -26,7 +26,7 @@ state = "registered"
 # register trustpub, then flip this entry to `registered`.
 [[crates]]
 name = "camel-json-schema"
-state = "new-unpublished"
+state = "registered"
 
 [[crates]]
 name = "camel-matchers"
