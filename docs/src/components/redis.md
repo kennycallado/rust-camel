@@ -184,11 +184,13 @@ For a computed value, use a Rhai expression. `parse_int` converts the string to 
 
 ## Commands
 
-The component exposes 120+ commands across twelve groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`.
+The component exposes 120+ commands across fourteen groups. The enum is exhaustive: an unknown command fails URI parsing with `CamelError::InvalidUri`.
 
 | Group | Commands |
 | --- | --- |
 | String | `SET`, `GET`, `GETDEL`, `GETEX`, `GETSET`, `SETNX`, `SETEX`, `SETRANGE`, `GETRANGE`, `MGET`, `MSET`, `INCR`, `INCRBY`, `DECR`, `DECRBY`, `APPEND`, `STRLEN` |
+| Bitmap | `SETBIT`, `GETBIT`, `BITCOUNT`, `BITPOS`, `BITOP`, `BITFIELD`, `BITFIELD_RO` |
+| HyperLogLog | `PFADD`, `PFCOUNT`, `PFMERGE` |
 | Key | `EXISTS`, `DEL`, `UNLINK`, `EXPIRE`, `EXPIREAT`, `PEXPIRE`, `PEXPIREAT`, `TTL`, `KEYS`, `RENAME`, `RENAMENX`, `COPY`, `TYPE`, `PERSIST`, `MOVE`, `TOUCH`, `SORT` |
 | List | `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP`, `RPOP`, `BLPOP`, `BRPOP`, `LLEN`, `LRANGE`, `LINDEX`, `LINSERT`, `LSET`, `LREM`, `LTRIM`, `RPOPLPUSH`, `LMPOP`, `BLMPOP`, `LMOVE`, `BLMOVE`, `LPOS` |
 | Hash | `HSET`, `HGET`, `HSETNX`, `HMSET`, `HMGET`, `HDEL`, `HEXISTS`, `HLEN`, `HKEYS`, `HVALS`, `HGETALL`, `HINCRBY`, `HRANDFIELD`, `HINCRBYFLOAT` |
@@ -199,9 +201,17 @@ The component exposes 120+ commands across twelve groups. The enum is exhaustive
 | Geospatial | `GEOADD`, `GEOPOS`, `GEODIST`, `GEOSEARCH`, `GEOHASH` |
 | Script | `eval`, `fcall` |
 | Batch | `multi` |
-| Other | `PING`, `ECHO` |
+| Other | `PING`, `ECHO`, `WAIT` |
 
 Stream commands require Redis >= 7.0 (Valkey >= 7.2 compatible). `XADD` and `XLEN` are Producer commands. `XREADGROUP` is Consumer-only. The component does not expose `ACKED` or `IDMP`. `eval` and `fcall` are Producer commands with their own operand contract; see [Script commands](#script-commands). `multi` is a Producer batch request rather than a Redis verb: it runs the entries of the `CamelRedis.Batch` header as one pipeline, see [Batch (multi)](#batch-multi).
+
+### Phase 1b part 2 decisions
+
+Three decisions govern the bitmap and WAIT commands. The per-family sections below restate each rule with its error cases.
+
+- **BITFIELD overflow is always explicit.** `CamelRedis.BitFieldOverflow` (`WRAP`, `SAT`, or `FAIL`) sets the initial mode. An inline `OVERFLOW` entry switches the mode for the entries that follow it. A `SET` or `INCRBY` entry with no effective mode fails before send. There is no default, because the server default `WRAP` would silently wrap counters. See [Bitmap command inputs](#bitmap-command-inputs).
+- **WAIT is a connection-local acknowledgement probe.** It acknowledges the writes that the invoking connection sent before the `WAIT` command. A different pooled connection or a reconnect resets that scope, so `WAIT` is not a durability guarantee for earlier route writes. The reply is the count of acknowledged replicas as a JSON number. `WAIT` is idempotent: it is a barrier, so a replay is safe. `CamelRedis.WaitTimeout` bounds the probe: the value is required, greater than `0`, and in milliseconds. A WAIT-only aggregate deadline of `WaitTimeout` plus the endpoint `timeout` also bounds the exchange, so the probe can never hang forever. The WAIT connection carries no driver response deadline, so the driver never aborts a valid slow probe inside its server-side timeout. See [WAIT durability probe](#wait-durability-probe).
+- **`#<n>` BITFIELD offsets are independent.** The offset is `n × <entry width>` bits, evaluated for that entry alone. The product is never accumulated across entries. See [Bitmap command inputs](#bitmap-command-inputs).
 
 ### String command inputs
 
@@ -221,6 +231,70 @@ These four string commands read their addressing operands from headers. `SETRANG
 `CamelRedis.Start` defaults to `0` and `CamelRedis.End` defaults to `-1`. A negative bound counts from the end of the string. A range with no overlap with the string returns an empty body.
 
 `GETDEL` and `GETEX` are not retried after a transport error. `GETDEL` consumes the key, so a retry reports a null body. A retry of `GETEX` reports a null body when the value lapses between attempts. The first reply is not reproducible, so the component does not repeat the command. `SETRANGE` and `GETRANGE` are retried.
+
+### Bitmap command inputs
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `SETBIT` | `CamelRedis.Key`, `CamelRedis.BitOffset`, `CamelRedis.BitValue` | — | previous bit as a JSON number (`0` or `1`) |
+| `GETBIT` | `CamelRedis.Key`, `CamelRedis.BitOffset` | — | current bit as a JSON number (`0` or `1`) |
+| `BITCOUNT` | `CamelRedis.Key` | `CamelRedis.Start`, `CamelRedis.End`, `CamelRedis.BitRangeUnit` | number of set bits as a JSON number |
+| `BITPOS` | `CamelRedis.Key`, `CamelRedis.BitValue` | `CamelRedis.Start`, `CamelRedis.End`, `CamelRedis.BitRangeUnit` | position of the first matching bit as a JSON number; `-1` when the bit is never set in the range |
+| `BITOP` | `CamelRedis.BitOperation`, `CamelRedis.Destination`, `CamelRedis.Keys` | — | destination length in bytes as a JSON number |
+| `BITFIELD` | `CamelRedis.Key`, `CamelRedis.BitFieldOps` | `CamelRedis.BitFieldOverflow` | JSON array of integers and nulls |
+| `BITFIELD_RO` | `CamelRedis.Key`, `CamelRedis.BitFieldOps` | — | JSON array of integers and nulls |
+
+`CamelRedis.BitOffset` is a required bit position in `0..=4294967295`, the 512 MB bitstring cap. An offset outside that range fails locally, before any command reaches Redis. `CamelRedis.BitValue` is required for `SETBIT` and `BITPOS` and accepts only `0` or `1`; the bit value is an argument header, not a body payload.
+
+`CamelRedis.Start` and `CamelRedis.End` are signed (`i64`): a negative index counts from the end of the bitstring, matching Redis bounds. The range grammar follows Redis 7 and fails locally, before send, when violated:
+
+- `BITCOUNT` requires `Start` and `End` together.
+- `BITPOS` accepts `Start` alone. `End` always requires `Start`.
+- `CamelRedis.BitRangeUnit` (`BYTE` or `BIT`) applies only to a complete range, so a unit without both endpoints is an error.
+
+`CamelRedis.BitRangeUnit` defaults to `BYTE` when absent. That is the Redis default for the range unit, not a default bit value; it is documented so the unit in force is never an accident. For a complete range (both endpoints) the component always emits the unit token explicitly (`BITCOUNT k 0 2 BYTE`), so the wire frame states the unit it counted in. A start-only `BITPOS` range emits no unit token — `BITPOS key bit start` — because Redis 7 accepts a unit only after both endpoints. A present but malformed unit (`42`, `NIBBLE`) is a named `CamelRedis.BitRangeUnit` error rather than a silent fallback to `BYTE`.
+
+`CamelRedis.BitOperation` is required for `BITOP` and accepts `AND`, `OR`, `XOR`, or `NOT`. `CamelRedis.Destination` names the key that receives the result. `CamelRedis.Keys` lists the source keys, as in `SINTERSTORE`. `NOT` requires exactly one source key. `AND`, `OR`, and `XOR` require one or more source keys. A missing or malformed operation, destination, or source list fails locally, before any command reaches Redis. The reply is the destination's new length in bytes.
+
+`CamelRedis.BitFieldOps` lists `BITFIELD` sub-commands. Each list element is one entry: `GET <type> <offset>`, `SET <type> <offset> <value>`, `INCRBY <type> <offset> <increment>`, or `OVERFLOW <WRAP|SAT|FAIL>`. `<type>` is `[iu]<width>`. Signed widths are `1..=64` and unsigned widths are `1..=63`. `u64` is rejected because `i64` represents the signed 64-bit case. An absolute offset is a non-negative integer that fits `i64`. A `#<n>` offset addresses `n × <this entry's width>` bits from the start. The multiplication is independent for each entry, so two `GET u8 #1` entries read the same bits. An offset above `i64::MAX` or an `n × width` product that overflows fails locally, before any command reaches Redis.
+
+Overflow behaviour is always explicit. Every `SET` or `INCRBY` entry needs an effective mode before it runs. The mode comes from `CamelRedis.BitFieldOverflow` (`WRAP`, `SAT`, or `FAIL`) or from an earlier `OVERFLOW` entry. A mutation with no mode in force fails locally with a `CamelRedis.BitFieldOverflow` error. There is no default. The server default `WRAP` would silently wrap counters. A trailing `OVERFLOW` entry does not cover a preceding mutation. `GET` entries need no mode. A present but malformed overflow header (`42`, `SOMETIMES`) is a named error even when an inline `OVERFLOW` entry exists.
+
+`BITFIELD_RO` accepts only `GET` entries. It rejects `SET`, `INCRBY`, and `OVERFLOW` entries. It also rejects `CamelRedis.BitFieldOverflow`. The reply is a JSON array of numbers and nulls.
+
+`GETBIT`, `BITCOUNT`, `BITPOS`, and `BITFIELD_RO` are retried after a transport error: they only read. `SETBIT`, `BITOP`, and `BITFIELD` are not retried: they write bits or the destination key, so the retry classification follows their worst-case form.
+
+### HyperLogLog command inputs
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `PFADD` | `CamelRedis.Key` | — | `1` when the structure changed and `0` otherwise, as a JSON number |
+| `PFCOUNT` | `CamelRedis.Keys` | — | estimated cardinality as a JSON number |
+| `PFMERGE` | `CamelRedis.Destination`, `CamelRedis.Keys` | — | `OK` as text |
+
+`PFADD` takes its element from the Exchange body under the [value payload and reply rule](#value-payload-and-reply-rule). The element follows the shared body codec. A route that still sets `CamelRedis.Value` fails before send with the tombstone error.
+
+`PFCOUNT` and `PFMERGE` take one or more source keys in `CamelRedis.Keys`. A single-key `PFCOUNT` is a one-element list. `PFMERGE` reads the sources and writes the merged HyperLogLog to `CamelRedis.Destination`.
+
+A missing, empty, or malformed `CamelRedis.Keys` list fails before send with a named `CamelRedis.Keys` error. The list parser rejects any non-string entry, so the command never runs against fewer keys than the route configured ([ADR-0032](../adr/0032-exchange-data-trust-boundary.md)).
+
+`PFCOUNT` is retried after a transport error: it only reads its sources. Its single-key form can refresh the cached cardinality inside the HyperLogLog, which is a converging internal write. `PFADD` and `PFMERGE` are not retried: they write the structure or the destination key.
+
+### WAIT durability probe
+
+| Command | Required headers | Optional headers | Reply body |
+| --- | --- | --- | --- |
+| `WAIT` | `CamelRedis.NumReplicas`, `CamelRedis.WaitTimeout` | — | number of acknowledged replicas as a JSON number |
+
+`CamelRedis.NumReplicas` is the number of replicas to wait for. `CamelRedis.WaitTimeout` is the timeout in milliseconds. It is distinct from the TTL header `CamelRedis.Timeout`. Both headers accept a `u64`. Redis parses the WAIT arguments as signed 64-bit integers. A value above `i64::MAX` therefore fails before send with a named error. A missing header also fails before send. A zero `CamelRedis.WaitTimeout` fails too, because Redis reads `WAIT ... 0` as a wait with no limit.
+
+The wire frame is `WAIT <numreplicas> <timeout>`. The integer reply becomes the Exchange body as a JSON number.
+
+WAIT is a connection-local acknowledgement probe. It reports the writes that the invoking connection sent before the WAIT command. It is not a durability guarantee for an earlier route write. A different pooled connection does not acknowledge that write. A reconnect loses the write offset too. The component shares one multiplexed connection per endpoint ([camel-redis CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-redis/CONTEXT.md)).
+
+The exchange has a bounded deadline. A WAIT-only aggregate deadline covers connection checkout, retries, backoff and replies. The deadline is `CamelRedis.WaitTimeout` plus the endpoint `timeout`. An unrepresentable deadline fails before send with a named error. On expiry the exchange fails with a named timeout error that names `CamelRedis.WaitTimeout`. The WAIT connection carries no driver response deadline, so the driver never aborts a valid probe that is still inside its server-side timeout.
+
+WAIT is retried after a transport error. It changes no server state. A replay probes the current connection's offset again. The count can differ between attempts, like the count reply of `DEL` ([ADR-0013](../adr/0013-network-retry-policy-and-migration.md)).
 
 ### Key command inputs
 
@@ -604,7 +678,7 @@ The scalar payload commands are `SET`, `SETEX`, `SETNX`, `SETRANGE`, `GETSET`, `
 `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LINSERT`, `LSET`, `LREM`, `SADD`,
 `SREM`, `SISMEMBER`, `SMOVE`, the `ZADD` member, `ZREM`, `ZRANK`, `ZREVRANK`,
 `ZSCORE`, `ZINCRBY`, `HSET`, `HSETNX`, the `GEOADD` member, the `LPOS`
-element, and `PUBLISH`.
+element, the `PFADD` element, and `PUBLISH`.
 
 Three payload headers are removed: `CamelRedis.Value`, `CamelRedis.Values`,
 and `CamelRedis.Member` as the `GEOADD` payload. A route that still sets one

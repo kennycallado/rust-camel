@@ -30,6 +30,20 @@ pub enum RedisCommand {
     Append,
     Strlen,
 
+    // Bitmap operations
+    Setbit,
+    Getbit,
+    Bitcount,
+    Bitpos,
+    Bitop,
+    Bitfield,
+    BitfieldRo,
+
+    // HyperLogLog operations
+    Pfadd,
+    Pfcount,
+    Pfmerge,
+
     // Key operations
     Exists,
     Del,
@@ -158,6 +172,7 @@ pub enum RedisCommand {
     // Other operations
     Ping,
     Echo,
+    Wait,
 }
 
 impl FromStr for RedisCommand {
@@ -183,6 +198,20 @@ impl FromStr for RedisCommand {
             "DECRBY" => Ok(RedisCommand::Decrby),
             "APPEND" => Ok(RedisCommand::Append),
             "STRLEN" => Ok(RedisCommand::Strlen),
+
+            // Bitmap operations
+            "SETBIT" => Ok(RedisCommand::Setbit),
+            "GETBIT" => Ok(RedisCommand::Getbit),
+            "BITCOUNT" => Ok(RedisCommand::Bitcount),
+            "BITPOS" => Ok(RedisCommand::Bitpos),
+            "BITOP" => Ok(RedisCommand::Bitop),
+            "BITFIELD" => Ok(RedisCommand::Bitfield),
+            "BITFIELD_RO" => Ok(RedisCommand::BitfieldRo),
+
+            // HyperLogLog operations
+            "PFADD" => Ok(RedisCommand::Pfadd),
+            "PFCOUNT" => Ok(RedisCommand::Pfcount),
+            "PFMERGE" => Ok(RedisCommand::Pfmerge),
 
             // Key operations
             "EXISTS" => Ok(RedisCommand::Exists),
@@ -312,6 +341,7 @@ impl FromStr for RedisCommand {
             // Other operations
             "PING" => Ok(RedisCommand::Ping),
             "ECHO" => Ok(RedisCommand::Echo),
+            "WAIT" => Ok(RedisCommand::Wait),
 
             _ => Err(CamelError::InvalidUri(format!(
                 "Unknown Redis command: {}",
@@ -350,6 +380,20 @@ impl RedisCommand {
             RedisCommand::Decrby => "DECRBY",
             RedisCommand::Append => "APPEND",
             RedisCommand::Strlen => "STRLEN",
+
+            // Bitmap operations
+            RedisCommand::Setbit => "SETBIT",
+            RedisCommand::Getbit => "GETBIT",
+            RedisCommand::Bitcount => "BITCOUNT",
+            RedisCommand::Bitpos => "BITPOS",
+            RedisCommand::Bitop => "BITOP",
+            RedisCommand::Bitfield => "BITFIELD",
+            RedisCommand::BitfieldRo => "BITFIELD_RO",
+
+            // HyperLogLog operations
+            RedisCommand::Pfadd => "PFADD",
+            RedisCommand::Pfcount => "PFCOUNT",
+            RedisCommand::Pfmerge => "PFMERGE",
 
             // Key operations
             RedisCommand::Exists => "EXISTS",
@@ -479,6 +523,7 @@ impl RedisCommand {
             // Other operations
             RedisCommand::Ping => "PING",
             RedisCommand::Echo => "ECHO",
+            RedisCommand::Wait => "WAIT",
         }
     }
 }
@@ -1938,9 +1983,22 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Hgetall
             | RedisCommand::Strlen
             | RedisCommand::Getrange
+            | RedisCommand::Getbit
+            | RedisCommand::Bitcount
+            | RedisCommand::Bitpos
+            // BITFIELD_RO accepts only GET entries, so it only reads
+            | RedisCommand::BitfieldRo
+            // PFCOUNT's single-key form may refresh the HLL's cached
+            // cardinality (a converging internal write); the multi-key form
+            // only reads its sources.
+            | RedisCommand::Pfcount
             | RedisCommand::Xlen
             | RedisCommand::Ping
             | RedisCommand::Echo
+            // WAIT is a connection-local acknowledgement probe: it changes no
+            // server state, and a replay re-probes the current connection's
+            // offset, whose count-style reply may differ (DEL precedent).
+            | RedisCommand::Wait
             | RedisCommand::Smismember
             | RedisCommand::Sintercard
             | RedisCommand::Zdiff
@@ -3497,6 +3555,44 @@ mod tests {
     }
 
     #[test]
+    fn test_is_idempotent_command_bit_access() {
+        assert!(is_idempotent_command(&RedisCommand::Getbit));
+        assert!(!is_idempotent_command(&RedisCommand::Setbit));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_bitmap_reads() {
+        assert!(is_idempotent_command(&RedisCommand::Bitcount));
+        assert!(is_idempotent_command(&RedisCommand::Bitpos));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_bitop() {
+        assert!(!is_idempotent_command(&RedisCommand::Bitop));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_bitfield() {
+        assert!(!is_idempotent_command(&RedisCommand::Bitfield));
+        assert!(is_idempotent_command(&RedisCommand::BitfieldRo));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_hll() {
+        assert!(is_idempotent_command(&RedisCommand::Pfcount));
+        assert!(!is_idempotent_command(&RedisCommand::Pfadd));
+        assert!(!is_idempotent_command(&RedisCommand::Pfmerge));
+    }
+
+    #[test]
+    fn test_is_idempotent_command_wait() {
+        assert!(
+            is_idempotent_command(&RedisCommand::Wait),
+            "WAIT only probes the connection-local acknowledgement offset; a replay re-probes and may report a different count"
+        );
+    }
+
+    #[test]
     fn generic_key_commands_parse_and_classify() {
         let cases = [
             ("UNLINK", RedisCommand::Unlink),
@@ -4276,6 +4372,16 @@ mod tests {
             ("DECRBY", RedisCommand::Decrby),
             ("APPEND", RedisCommand::Append),
             ("STRLEN", RedisCommand::Strlen),
+            ("SETBIT", RedisCommand::Setbit),
+            ("GETBIT", RedisCommand::Getbit),
+            ("BITCOUNT", RedisCommand::Bitcount),
+            ("BITPOS", RedisCommand::Bitpos),
+            ("BITOP", RedisCommand::Bitop),
+            ("BITFIELD", RedisCommand::Bitfield),
+            ("BITFIELD_RO", RedisCommand::BitfieldRo),
+            ("PFADD", RedisCommand::Pfadd),
+            ("PFCOUNT", RedisCommand::Pfcount),
+            ("PFMERGE", RedisCommand::Pfmerge),
             ("EXISTS", RedisCommand::Exists),
             ("DEL", RedisCommand::Del),
             ("EXPIRE", RedisCommand::Expire),
@@ -4380,6 +4486,7 @@ mod tests {
             ("PSUBSCRIBE", RedisCommand::Psubscribe),
             ("PING", RedisCommand::Ping),
             ("ECHO", RedisCommand::Echo),
+            ("WAIT", RedisCommand::Wait),
             // Script operations render lowercase (see `as_str`).
             ("eval", RedisCommand::Eval),
             ("fcall", RedisCommand::Fcall),
@@ -4387,7 +4494,7 @@ mod tests {
         ];
         assert_eq!(
             cases.len(),
-            124,
+            135,
             "table must list every RedisCommand variant"
         );
         for (token, expected) in cases {

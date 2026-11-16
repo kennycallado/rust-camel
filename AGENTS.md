@@ -213,6 +213,11 @@ camel-component-surrealdb | docker | cargo test -p camel-cli --no-default-featur
 camel-component-surrealdb | docker | cargo test -p camel-integration-test --features surreal --test surreal_state_test
 # --- integration-wasm.yml (docker)
 camel-component-wasm | docker | cargo test -p camel-integration-test --features wasm
+# --- camel-test owns the live suites above; a change that edits camel-test
+#     itself must still compile its whole integration surface locally
+#     (rc-2co7z: --lib never compiles tests/), and runs it under GATES_LANES=all
+camel-test | local | cargo test -p camel-test --features integration-tests --no-run
+camel-test | docker | cargo test -p camel-test --features integration-tests
 ```
 
 ## NEW-CODE-ONLY STYLE NORMS (ADR-0091)

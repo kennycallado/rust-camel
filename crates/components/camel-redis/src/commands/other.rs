@@ -3,7 +3,75 @@ use camel_component_api::{Body, CamelError, Exchange};
 use redis::aio::MultiplexedConnection;
 
 pub(crate) fn is_other_command(cmd: &RedisCommand) -> bool {
-    matches!(cmd, RedisCommand::Ping | RedisCommand::Echo)
+    matches!(
+        cmd,
+        RedisCommand::Ping | RedisCommand::Echo | RedisCommand::Wait
+    )
+}
+
+/// Header that carries WAIT's replica count.
+const NUM_REPLICAS_HEADER: &str = "CamelRedis.NumReplicas";
+
+/// Header that carries WAIT's per-attempt timeout in milliseconds.
+///
+/// Deliberately distinct from the TTL header `CamelRedis.Timeout`: a WAIT
+/// timeout bounds an acknowledgement probe, it does not expire a key.
+const WAIT_TIMEOUT_HEADER: &str = "CamelRedis.WaitTimeout";
+
+/// Named error for a missing WAIT operand.
+fn missing_required(header: &str) -> CamelError {
+    CamelError::ProcessorError(format!("Missing required header: {header}"))
+}
+
+/// Named error for a WAIT operand above Redis's signed 64-bit wire range.
+///
+/// Redis parses `WAIT`'s arguments as signed 64-bit integers, so a `u64`
+/// above `i64::MAX` cannot travel on the wire. The parsed value is numeric,
+/// so the diagnostic is bounded even though the header is untrusted.
+fn wait_wire_range(header: &str, value: u64) -> CamelError {
+    CamelError::ProcessorError(format!(
+        "Invalid {header}: value {value} exceeds the signed 64-bit Redis wire range (i64::MAX = {}); refusing to send an unparseable WAIT argument",
+        i64::MAX
+    ))
+}
+
+/// Resolves `CamelRedis.NumReplicas` for `WAIT`.
+///
+/// Missing, a non-`u64` value, and a value above `i64::MAX` all fail closed
+/// with a named error before send (ADR-0032).
+pub(crate) fn resolve_num_replicas(exchange: &Exchange) -> Result<u64, CamelError> {
+    let value = super::get_u64_header(exchange, NUM_REPLICAS_HEADER)?
+        .ok_or_else(|| missing_required(NUM_REPLICAS_HEADER))?;
+    if i64::try_from(value).is_err() {
+        return Err(wait_wire_range(NUM_REPLICAS_HEADER, value));
+    }
+    Ok(value)
+}
+
+/// Resolves `CamelRedis.WaitTimeout`, WAIT's timeout in milliseconds.
+///
+/// A missing or zero value fails closed before send: Redis `WAIT ... 0`
+/// blocks forever. A value above `i64::MAX` is outside the signed wire range
+/// and fails with a named error (ADR-0032).
+pub(crate) fn resolve_wait_timeout(exchange: &Exchange) -> Result<u64, CamelError> {
+    let value = super::get_u64_header(exchange, WAIT_TIMEOUT_HEADER)?
+        .ok_or_else(|| missing_required(WAIT_TIMEOUT_HEADER))?;
+    if value == 0 {
+        return Err(CamelError::ProcessorError(format!(
+            "Invalid {WAIT_TIMEOUT_HEADER}: a zero timeout makes Redis WAIT block forever; set a positive millisecond timeout"
+        )));
+    }
+    if i64::try_from(value).is_err() {
+        return Err(wait_wire_range(WAIT_TIMEOUT_HEADER, value));
+    }
+    Ok(value)
+}
+
+/// Builds `WAIT numreplicas timeout`.
+pub(crate) fn encode_wait(num_replicas: u64, timeout_ms: u64) -> redis::Cmd {
+    let mut command = redis::cmd("WAIT");
+    command.arg(num_replicas).arg(timeout_ms);
+    command
 }
 
 pub(crate) fn extract_echo_message(exchange: &mut Exchange) -> String {
@@ -34,6 +102,11 @@ pub(crate) fn build_redis_cmd(
             let mut c = redis::cmd("ECHO");
             c.arg(message);
             c
+        }
+        RedisCommand::Wait => {
+            let num_replicas = resolve_num_replicas(exchange)?;
+            let timeout_ms = resolve_wait_timeout(exchange)?;
+            encode_wait(num_replicas, timeout_ms)
         }
         _ => unreachable!("non-other commands rejected above"),
     };
@@ -78,6 +151,17 @@ pub async fn dispatch(
 
             serde_json::Value::String(response)
         }
+        RedisCommand::Wait => {
+            // Resolve both operands before the command reaches the
+            // connection: a bad WAIT argument must never be sent (ADR-0032).
+            let num_replicas = resolve_num_replicas(exchange)?;
+            let timeout_ms = resolve_wait_timeout(exchange)?;
+            let acked: i64 = encode_wait(num_replicas, timeout_ms)
+                .query_async(conn)
+                .await
+                .map_err(|e| crate::transport_error::redis_error_to_camel("WAIT", e))?;
+            serde_json::json!(acked)
+        }
         _ => unreachable!("non-other commands rejected above"),
     };
 
@@ -94,6 +178,7 @@ mod tests {
     fn test_is_other_command() {
         assert!(is_other_command(&RedisCommand::Ping));
         assert!(is_other_command(&RedisCommand::Echo));
+        assert!(is_other_command(&RedisCommand::Wait));
         assert!(!is_other_command(&RedisCommand::Set));
     }
 
@@ -191,5 +276,50 @@ mod tests {
         assert!(!is_other_command(&RedisCommand::Hget));
         assert!(!is_other_command(&RedisCommand::Publish));
         assert!(!is_other_command(&RedisCommand::Del));
+    }
+
+    // ── redisbmp task 4.1: WAIT wire frame and pre-send header checks ───────
+
+    #[test]
+    fn test_wait_encodes_wire_frame() {
+        let command = super::encode_wait(1, 1000);
+        assert_eq!(cmd_name(&command), "WAIT");
+        assert_eq!(cmd_args(&command), vec!["1", "1000"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_wait_ok() {
+        let ex = ex_with(&[
+            ("CamelRedis.NumReplicas", serde_json::json!(1u64)),
+            ("CamelRedis.WaitTimeout", serde_json::json!(1000u64)),
+        ]);
+
+        let command = build_redis_cmd(&RedisCommand::Wait, &ex)
+            .expect("valid WAIT headers must encode without hitting the unreachable arm");
+
+        assert_eq!(cmd_name(&command), "WAIT");
+        assert_eq!(cmd_args(&command), vec!["1", "1000"]);
+    }
+
+    #[test]
+    fn test_build_redis_cmd_wait_invalid_headers_no_panic() {
+        let zero = ex_with(&[
+            ("CamelRedis.NumReplicas", serde_json::json!(1u64)),
+            ("CamelRedis.WaitTimeout", serde_json::json!(0u64)),
+        ]);
+        let err = build_redis_cmd(&RedisCommand::Wait, &zero)
+            .expect_err("a zero WaitTimeout must be refused, not reach the unreachable arm");
+        assert!(
+            err.to_string().contains("CamelRedis.WaitTimeout"),
+            "error must name CamelRedis.WaitTimeout: {err}"
+        );
+
+        let missing = ex_with(&[("CamelRedis.NumReplicas", serde_json::json!(1u64))]);
+        let err = build_redis_cmd(&RedisCommand::Wait, &missing)
+            .expect_err("a missing WaitTimeout must be refused, not reach the unreachable arm");
+        assert!(
+            err.to_string().contains("CamelRedis.WaitTimeout"),
+            "error must name CamelRedis.WaitTimeout: {err}"
+        );
     }
 }

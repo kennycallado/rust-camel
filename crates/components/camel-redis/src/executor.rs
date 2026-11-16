@@ -226,6 +226,20 @@ pub async fn dispatch_command(
         | RedisCommand::Setrange
         | RedisCommand::Getrange => commands::string::dispatch(cmd, conn, exchange).await,
 
+        // Bitmap commands
+        RedisCommand::Setbit
+        | RedisCommand::Getbit
+        | RedisCommand::Bitcount
+        | RedisCommand::Bitpos
+        | RedisCommand::Bitop
+        | RedisCommand::Bitfield
+        | RedisCommand::BitfieldRo => commands::bitmap::dispatch(cmd, conn, exchange).await,
+
+        // HyperLogLog commands
+        RedisCommand::Pfadd | RedisCommand::Pfcount | RedisCommand::Pfmerge => {
+            commands::hll::dispatch(cmd, conn, exchange).await
+        }
+
         // Key commands
         RedisCommand::Exists
         | RedisCommand::Del
@@ -378,7 +392,7 @@ pub async fn dispatch_command(
         }
 
         // Other commands
-        RedisCommand::Ping | RedisCommand::Echo => {
+        RedisCommand::Ping | RedisCommand::Echo | RedisCommand::Wait => {
             commands::other::dispatch(cmd, conn, exchange).await
         }
     }
@@ -506,11 +520,12 @@ async fn dispatch_batch(
 /// Driver response-deadline policy for a newly built connection.
 ///
 /// Spells out the three distinct meanings that a bare `Option<Duration>`
-/// conflates: deadline-free (blocking pops must wait without any driver
+/// conflates: deadline-free (blocking commands must wait without any driver
 /// deadline), an explicit deadline, and the redis driver default.
 enum Deadline {
-    /// No driver response deadline at all; blocking pops rely on their own
-    /// Redis-side timeout (or wait forever when it is 0).
+    /// No driver response deadline at all; blocking commands rely on their own
+    /// Redis-side timeout (or wait forever when it is 0). `WAIT` relies on the
+    /// producer's aggregate deadline instead.
     Free,
     /// Explicit driver response deadline.
     Fixed(Duration),
@@ -611,10 +626,11 @@ impl MultiplexedExecutor {
     /// awaits a Redis reply fails once `timeout` elapses. The default `None`
     /// keeps the redis driver default (500ms in 1.6.0).
     ///
-    /// A blocking endpoint command (`BLPOP`/`BRPOP`/`BLMOVE`/`BLMPOP`/`BZMPOP`)
-    /// always builds deadline-free connections and ignores this seam value: its
-    /// blocking duration is governed by the Redis-side timeout, not by a driver
-    /// deadline.
+    /// A blocking endpoint command (`BLPOP`/`BRPOP`/`BLMOVE`/`BLMPOP`/`BZMPOP`,
+    /// and the `WAIT` acknowledgement probe) always builds deadline-free
+    /// connections and ignores this seam value: its blocking duration is
+    /// governed by the Redis-side timeout (or, for `WAIT`, by the producer's
+    /// aggregate deadline), not by a driver deadline.
     ///
     /// This does not affect `connection_timeout_secs` (TCP connect only).
     /// It is distinct from camel-redis-repo's
@@ -639,7 +655,13 @@ impl MultiplexedExecutor {
     }
 
     /// Whether this endpoint issues a blocking command (`BLPOP`, `BRPOP`,
-    /// `BLMOVE`, `BLMPOP`, `BZMPOP`).
+    /// `BLMOVE`, `BLMPOP`, `BZMPOP`, or `WAIT`).
+    ///
+    /// `WAIT` belongs here because a valid `WAIT <replicas> <timeout>` legitimately
+    /// blocks up to its server-side timeout. The redis driver's default response
+    /// deadline is shorter than a common `CamelRedis.WaitTimeout`, so leaving
+    /// `WAIT` on the driver default would abort and retry a valid probe. Its only
+    /// local bound is the producer's aggregate deadline.
     fn is_blocking_endpoint(&self) -> bool {
         matches!(
             self.config.command,
@@ -648,6 +670,7 @@ impl MultiplexedExecutor {
                 | RedisCommand::Blmove
                 | RedisCommand::Blmpop
                 | RedisCommand::Bzmpop
+                | RedisCommand::Wait
         )
     }
 
@@ -2684,6 +2707,15 @@ mod tests {
             (RedisCommand::Get, true),
             (RedisCommand::Smismember, true),
             (RedisCommand::Setrange, true),
+            (RedisCommand::Getbit, true),
+            (RedisCommand::Bitcount, true),
+            (RedisCommand::Bitpos, true),
+            (RedisCommand::Setbit, false),
+            (RedisCommand::Bitfield, false),
+            (RedisCommand::BitfieldRo, true),
+            (RedisCommand::Pfadd, false),
+            (RedisCommand::Pfcount, true),
+            (RedisCommand::Pfmerge, false),
         ] {
             assert_eq!(
                 is_idempotent_command(&cmd),
@@ -2728,6 +2760,37 @@ mod tests {
         assert!(
             !matches!(non_blocking.deadline(), Deadline::Free),
             "LMOVE must not get the blocking bypass"
+        );
+    }
+
+    /// A valid `WAIT <replicas> <timeout>` blocks server-side for up to
+    /// `CamelRedis.WaitTimeout`, which commonly exceeds the redis driver's
+    /// default response deadline. `Wait` must select the blocking
+    /// deadline-free policy, so no shorter driver deadline aborts a valid
+    /// probe; the producer's aggregate deadline is its only local bound.
+    #[test]
+    fn test_wait_selects_blocking_deadline_policy() {
+        let config = RedisEndpointConfig::from_uri("redis://127.0.0.1:6379?command=WAIT")
+            .expect("a WAIT endpoint URI must parse");
+        let executor = MultiplexedExecutor::new(
+            config,
+            Arc::new(FakeTopology::addrs(vec![
+                "redis://127.0.0.1:6379".to_string(),
+            ])),
+        );
+
+        assert!(
+            executor.is_blocking_endpoint(),
+            "WAIT must be a blocking endpoint: a valid probe may block past the driver default"
+        );
+        assert!(
+            matches!(executor.deadline(), Deadline::Free),
+            "WAIT must select the deadline-free policy, never Deadline::DriverDefault"
+        );
+        assert_eq!(
+            executor.effective_response_timeout(),
+            None,
+            "the driver must apply no response deadline to WAIT"
         );
     }
 }

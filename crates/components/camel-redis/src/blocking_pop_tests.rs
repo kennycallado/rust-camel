@@ -28,7 +28,7 @@ use tower::Service;
 use crate::producer::RedisProducer;
 use crate::queue::{QueueConsumerParams, QueuePopCommand, RedisQueueIo, queue_session};
 use crate::stream_fake_tests::{
-    ScriptedAction, StreamFakeServer, args_as_strings, resp_array, resp_bulk,
+    ScriptedAction, StreamFakeServer, args_as_strings, resp_array, resp_bulk, resp_int,
 };
 use crate::topology::FakeTopology;
 
@@ -689,5 +689,49 @@ async fn blmove_bypasses_driver_response_deadline() {
         server.connection_count(),
         1,
         "a blocking endpoint must ride the same connection past the driver default"
+    );
+}
+
+// ── WAIT blocking deadline bypass (redisbmp 4.1 amendment) ─────────────────
+
+/// A valid `WAIT` blocks server-side for up to `CamelRedis.WaitTimeout`, which
+/// commonly exceeds the redis driver's 500 ms default response deadline. The
+/// `Wait` blocking-endpoint bypass must keep the connection deadline-free, so a
+/// reply that arrives after the driver default but inside the producer's
+/// aggregate deadline reaches the body instead of aborting and retrying.
+#[tokio::test]
+async fn test_wait_bypasses_driver_response_timeout() {
+    let mut exchange = Exchange::new(Message::default());
+    exchange
+        .input
+        .set_header("CamelRedis.NumReplicas", serde_json::json!(1u64));
+    exchange
+        .input
+        .set_header("CamelRedis.WaitTimeout", serde_json::json!(2000u64));
+
+    let (server, outcome) = producer_call_held_past_driver_default(
+        "WAIT",
+        "&timeout=5",
+        exchange,
+        resp_int(3),
+        Duration::from_millis(700),
+    )
+    .await;
+
+    let exchange = outcome.expect("WAIT held past the 500 ms driver default must succeed");
+    assert_eq!(
+        exchange.input.body,
+        Body::Json(serde_json::json!(3)),
+        "the delayed acked-replica count must reach the body as a JSON number"
+    );
+    assert_eq!(
+        args_as_strings(&server.args_of("WAIT")[0]),
+        vec!["1", "2000"],
+        "the delayed call must still carry the blessed WAIT frame"
+    );
+    assert_eq!(
+        server.connection_count(),
+        1,
+        "WAIT must ride the same connection past the driver default"
     );
 }

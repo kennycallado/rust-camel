@@ -184,6 +184,42 @@ fn script_kind(config: &RedisEndpointConfig) -> Result<ScriptKind, CamelError> {
     }
 }
 
+/// Aggregate deadline for a `WAIT` exchange: `CamelRedis.WaitTimeout` plus the
+/// endpoint `timeout`.
+///
+/// `execute_with_retry` is not bounded by [`RedisEndpointConfig::timeout`], so
+/// a WAIT exchange gets its own whole-exchange deadline that covers connection
+/// checkout, every attempt, backoff and replies. The sum is computed with
+/// checked arithmetic: an unrepresentable duration fails before send with a
+/// named error, never a panic.
+pub(crate) fn wait_aggregate_timeout(
+    wait_timeout_ms: u64,
+    endpoint_timeout_secs: u64,
+) -> Result<std::time::Duration, CamelError> {
+    std::time::Duration::from_millis(wait_timeout_ms)
+        .checked_add(std::time::Duration::from_secs(endpoint_timeout_secs))
+        .ok_or_else(unrepresentable_wait_deadline)
+}
+
+/// Named error for a WAIT deadline that cannot be represented.
+///
+/// Raised both when the summed [`std::time::Duration`] overflows and when the
+/// sum fits a duration but not an [`tokio::time::Instant`]; either way the
+/// exchange must fail before send and name `CamelRedis.WaitTimeout`.
+fn unrepresentable_wait_deadline() -> CamelError {
+    CamelError::ProcessorError(
+        "WAIT: the aggregate deadline (CamelRedis.WaitTimeout + endpoint timeout) is unrepresentable; refusing to send"
+            .to_string(),
+    )
+}
+
+/// Named error for an exchange that outlived its WAIT aggregate deadline.
+fn wait_deadline_exceeded() -> CamelError {
+    CamelError::ProcessorError(
+        "WAIT: aggregate deadline exceeded (CamelRedis.WaitTimeout + endpoint timeout)".to_string(),
+    )
+}
+
 impl Service<Exchange> for RedisProducer {
     type Response = Exchange;
     type Error = CamelError;
@@ -214,6 +250,25 @@ impl Service<Exchange> for RedisProducer {
             }
             Self::apply_default_channels(&mut exchange, &config);
 
+            // 2b. WAIT is a blocking acknowledgement probe, so it gets its own
+            //     whole-exchange deadline: `CamelRedis.WaitTimeout` + the
+            //     endpoint timeout. The deadline covers connection checkout,
+            //     every retry attempt, backoff and replies; `execute_with_retry`
+            //     alone is not bounded by `RedisEndpointConfig::timeout`. Both
+            //     the duration sum and the deadline instant are checked, so an
+            //     unrepresentable deadline fails before send, never panics.
+            let wait_deadline = if cmd == RedisCommand::Wait {
+                let wait_timeout_ms = crate::commands::other::resolve_wait_timeout(&exchange)?;
+                let aggregate = wait_aggregate_timeout(wait_timeout_ms, config.timeout)?;
+                Some(
+                    tokio::time::Instant::now()
+                        .checked_add(aggregate)
+                        .ok_or_else(unrepresentable_wait_deadline)?,
+                )
+            } else {
+                None
+            };
+
             // 3. Execute with retry. Retry eligibility is a producer-side
             //    preflight: the retry loop wraps dispatch, so the idempotence
             //    argument must be resolved BEFORE the loop runs. Script
@@ -242,15 +297,23 @@ impl Service<Exchange> for RedisProducer {
             if let Some(plan) = batch {
                 executor = executor.with_batch(plan);
             }
-            let command_outcome = execute_with_retry(
-                &mut executor,
-                &cmd,
-                &mut exchange,
-                is_idempotent,
-                kind,
-                &config.reconnect,
-            )
-            .await;
+            let command_outcome = {
+                let execute = execute_with_retry(
+                    &mut executor,
+                    &cmd,
+                    &mut exchange,
+                    is_idempotent,
+                    kind,
+                    &config.reconnect,
+                );
+                match wait_deadline {
+                    Some(deadline) => match tokio::time::timeout_at(deadline, execute).await {
+                        Ok(outcome) => outcome,
+                        Err(_) => Err(wait_deadline_exceeded()),
+                    },
+                    None => execute.await,
+                }
+            };
             component_metrics.observe("command", command_outcome.is_err());
             command_outcome?;
 
@@ -2806,6 +2869,138 @@ mod tests {
             frames.len(),
             2,
             "the killed pipeline plus exactly one replay; got {frames:?}"
+        );
+    }
+
+    // ── redisbmp task 4.1: WAIT aggregate deadline ─────────────────────────
+
+    #[test]
+    fn test_wait_aggregate_timeout_checked_overflow() {
+        let err = wait_aggregate_timeout(u64::MAX, u64::MAX)
+            .expect_err("the summed duration exceeds Duration::MAX");
+        assert!(
+            err.to_string().contains("CamelRedis.WaitTimeout"),
+            "the named error must reference CamelRedis.WaitTimeout: {err}"
+        );
+
+        let duration =
+            wait_aggregate_timeout(1500, 2).expect("1500ms + 2s is a representable duration");
+        assert_eq!(
+            duration,
+            std::time::Duration::from_millis(1500) + std::time::Duration::from_secs(2),
+            "a representable pair sums exactly"
+        );
+    }
+
+    /// A duration that fits `Duration` but not `Instant` must fail before
+    /// send with the named `CamelRedis.WaitTimeout` error, never panic.
+    #[tokio::test]
+    async fn test_wait_deadline_instant_unrepresentable() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let mut producer = stub_producer(
+            &format!("{}?command=WAIT&timeout={}", stub.url(), u64::MAX),
+            topology,
+        );
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.NumReplicas", serde_json::json!(1u64));
+        msg.set_header("CamelRedis.WaitTimeout", serde_json::json!(1u64));
+
+        let err = producer
+            .call(Exchange::new(msg))
+            .await
+            .expect_err("the aggregate deadline is not representable as an Instant");
+        assert!(
+            err.to_string().contains("CamelRedis.WaitTimeout"),
+            "the named error must reference CamelRedis.WaitTimeout: {err}"
+        );
+        assert_eq!(
+            stub.command_count(),
+            0,
+            "an unrepresentable deadline must fail before send"
+        );
+    }
+
+    /// The aggregate deadline wraps the producer path, so a server that stops
+    /// replying cannot hang the exchange.
+    #[tokio::test]
+    async fn test_wait_times_out_against_stalled_peer() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Ok).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let mut producer =
+            stub_producer(&format!("{}?command=WAIT&timeout=0", stub.url()), topology);
+
+        // Prime the connection so the handshake completes before the peer is
+        // told to withhold application replies.
+        producer
+            .check_connection()
+            .await
+            .expect("the stub answers the priming PING");
+        stub.hold_replies();
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.NumReplicas", serde_json::json!(1u64));
+        msg.set_header("CamelRedis.WaitTimeout", serde_json::json!(50u64));
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            producer.call(Exchange::new(msg)),
+        )
+        .await;
+        let err = outcome
+            .expect("the producer must return before the test bound")
+            .expect_err("a stalled peer must hit the aggregate deadline");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WAIT: aggregate deadline exceeded"),
+            "the timeout error must name the exceeded aggregate deadline: {msg}"
+        );
+        assert!(
+            msg.contains("CamelRedis.WaitTimeout"),
+            "the timeout error must name CamelRedis.WaitTimeout: {msg}"
+        );
+    }
+
+    /// The deadline bounds the whole retry loop: a transport failure on every
+    /// attempt stops at the deadline instead of exhausting the retry budget.
+    #[tokio::test]
+    async fn test_wait_deadline_bounds_producer_call_with_retries() {
+        let stub = test_stub::StubServer::start(test_stub::AppReply::Close).await;
+        let topology = Arc::new(FakeTopology::addrs(vec![stub.url()]));
+        let mut producer =
+            stub_producer(&format!("{}?command=WAIT&timeout=0", stub.url()), topology);
+
+        let mut msg = Message::default();
+        msg.set_header("CamelRedis.NumReplicas", serde_json::json!(1u64));
+        msg.set_header("CamelRedis.WaitTimeout", serde_json::json!(100u64));
+
+        let started = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            producer.call(Exchange::new(msg)),
+        )
+        .await;
+        let err = outcome
+            .expect("the producer must return, not retry past the deadline")
+            .expect_err("every attempt fails with a transport error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WAIT: aggregate deadline exceeded"),
+            "the timeout error must name the exceeded aggregate deadline: {msg}"
+        );
+        assert!(
+            msg.contains("CamelRedis.WaitTimeout"),
+            "the timeout error must name CamelRedis.WaitTimeout: {msg}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the call must return within the aggregate deadline, not the retry budget"
+        );
+        assert!(
+            stub.command_count() < producer.config.reconnect.max_attempts as usize,
+            "the retry loop must stop at the deadline, got {} attempts",
+            stub.command_count()
         );
     }
 }

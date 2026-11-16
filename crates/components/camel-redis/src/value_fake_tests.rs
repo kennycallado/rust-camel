@@ -2231,3 +2231,98 @@ async fn copy_missing_destination_fails_before_send() {
         server.args_of("COPY")
     );
 }
+
+// ── redisbmp task 3.1: HyperLogLog reply mapping ────────────────────────────
+
+#[tokio::test]
+async fn test_pfadd_reply_maps_integer_to_json_number() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "PFADD",
+        reply: resp_int(1),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "PFADD",
+        "",
+        keyed_exchange(Body::Text("café".to_string()), "k"),
+    )
+    .await
+    .expect("PFADD must succeed");
+
+    assert_eq!(
+        server.args_of("PFADD"),
+        vec![expect_args(&["k", "café"])],
+        "PFADD must send the key and the body element"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(1)),
+        "the PFADD integer reply must become a JSON number"
+    );
+}
+
+#[tokio::test]
+async fn test_pfcount_reply_maps_integer_to_json_number() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "PFCOUNT",
+        reply: resp_int(3),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "PFCOUNT",
+        "",
+        keys_with_headers(serde_json::json!(["h1", "h2"]), &[]),
+    )
+    .await
+    .expect("PFCOUNT must succeed");
+
+    assert_eq!(
+        server.args_of("PFCOUNT"),
+        vec![expect_args(&["h1", "h2"])],
+        "PFCOUNT must send each source key in order"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Json(serde_json::json!(3)),
+        "the PFCOUNT integer reply must become a JSON number"
+    );
+}
+
+#[tokio::test]
+async fn test_pfmerge_reply_maps_status_to_text() {
+    let server = StreamFakeServer::start(vec![ScriptedAction::Reply {
+        matches_command: "PFMERGE",
+        reply: b"+OK\r\n".to_vec(),
+    }])
+    .await
+    .expect("fake server must bind");
+
+    let outcome = call_producer(
+        &server,
+        "PFMERGE",
+        "",
+        keys_with_headers(
+            serde_json::json!(["h1", "h2"]),
+            &[("CamelRedis.Destination", serde_json::json!("h3"))],
+        ),
+    )
+    .await
+    .expect("PFMERGE must succeed");
+
+    assert_eq!(
+        server.args_of("PFMERGE"),
+        vec![expect_args(&["h3", "h1", "h2"])],
+        "PFMERGE must send the destination followed by each source key"
+    );
+    assert_eq!(
+        outcome.input.body,
+        Body::Text("OK".to_string()),
+        "the PFMERGE status reply must become the body as text"
+    );
+}

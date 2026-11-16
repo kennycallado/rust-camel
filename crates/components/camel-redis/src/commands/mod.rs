@@ -1,6 +1,8 @@
 pub mod batch;
+pub(crate) mod bitmap;
 pub mod geo;
 pub mod hash;
+pub(crate) mod hll;
 pub mod key;
 pub mod list;
 pub mod other;
@@ -1325,6 +1327,989 @@ mod tests {
         assert!(
             recorded.is_empty(),
             "no Redis command may be sent for an invalid TTL/timestamp: {recorded:?}"
+        );
+    }
+
+    // ── redisbmp task 1.1: bit access fails closed before send ──────────────
+
+    /// `SETBIT` with a non-binary `CamelRedis.BitValue` must be refused
+    /// locally, naming the header, before the driver writes a command byte.
+    #[tokio::test]
+    async fn test_setbit_rejects_non_binary_bit_value() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+            msg.set_header("CamelRedis.BitOffset", serde_json::json!(7u64));
+            msg.set_header("CamelRedis.BitValue", serde_json::json!(2u64));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Setbit, &mut conn, &mut exchange)
+                .await
+                .expect_err("SETBIT with a non-binary bit value must be refused locally");
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.BitValue"), "{msg}");
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("SETBIT bit-value rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a non-binary bit value: {recorded:?}"
+        );
+    }
+
+    /// `SETBIT` without `CamelRedis.BitOffset` must be refused locally: the
+    /// offset has no safe default, so it is a named missing-header error.
+    #[tokio::test]
+    async fn test_setbit_rejects_missing_bit_offset() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+            msg.set_header("CamelRedis.BitValue", serde_json::json!(1u64));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Setbit, &mut conn, &mut exchange)
+                .await
+                .expect_err("SETBIT without a bit offset must be refused locally");
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.BitOffset"), "{msg}");
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("SETBIT missing-offset rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent without a bit offset: {recorded:?}"
+        );
+    }
+
+    /// A bit offset above the 512 MB bitstring cap (`4294967295`) must be
+    /// refused locally, naming `CamelRedis.BitOffset`.
+    #[tokio::test]
+    async fn test_bit_offset_out_of_range_rejected() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+            msg.set_header("CamelRedis.BitOffset", serde_json::json!(4294967296u64));
+            msg.set_header("CamelRedis.BitValue", serde_json::json!(1u64));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Setbit, &mut conn, &mut exchange)
+                .await
+                .expect_err("an offset above the 512 MB bitstring cap must be refused locally");
+            let msg = err.to_string();
+            assert!(msg.contains("CamelRedis.BitOffset"), "{msg}");
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("bit-offset range rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for an out-of-range bit offset: {recorded:?}"
+        );
+    }
+
+    // ── redisbmp task 1.2: BITCOUNT / BITPOS ranges fail closed ─────────────
+
+    /// `BITCOUNT` needs `CamelRedis.Start` and `CamelRedis.End` together, so
+    /// either endpoint on its own must be refused locally with an error that
+    /// names both headers and the both-endpoints rule.
+    #[tokio::test]
+    async fn test_bitcount_rejects_incomplete_range() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            for only in ["CamelRedis.Start", "CamelRedis.End"] {
+                let mut msg = Message::default();
+                msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+                msg.set_header(only, serde_json::json!(0i64));
+                let mut exchange = Exchange::new(msg);
+
+                let err = bitmap::dispatch(&RedisCommand::Bitcount, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("BITCOUNT with only one endpoint must be refused locally");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("CamelRedis.Start"),
+                    "{only} rejection must name CamelRedis.Start: {msg}"
+                );
+                assert!(
+                    msg.contains("CamelRedis.End"),
+                    "{only} rejection must name CamelRedis.End: {msg}"
+                );
+                assert!(
+                    msg.contains("both"),
+                    "{only} rejection must state the both-endpoints rule: {msg}"
+                );
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITCOUNT incomplete-range rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for an incomplete range: {recorded:?}"
+        );
+    }
+
+    /// A `CamelRedis.BitRangeUnit` token is meaningful only for a complete
+    /// range: `BITPOS` with a bare start and a unit must fail locally, naming
+    /// `CamelRedis.End` and the unit-requires-both-endpoints rule.
+    #[tokio::test]
+    async fn test_bitpos_unit_requires_both_endpoints() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+            msg.set_header("CamelRedis.BitValue", serde_json::json!(1u64));
+            msg.set_header("CamelRedis.Start", serde_json::json!(0i64));
+            msg.set_header("CamelRedis.BitRangeUnit", serde_json::json!("BIT"));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitpos, &mut conn, &mut exchange)
+                .await
+                .expect_err("a unit without a complete range must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.End"),
+                "error must name CamelRedis.End: {msg}"
+            );
+            assert!(
+                msg.contains("both endpoints"),
+                "error must state the unit-requires-both-endpoints rule: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITPOS unit-without-range rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a unit without a full range: {recorded:?}"
+        );
+    }
+
+    /// A present-but-malformed `CamelRedis.BitRangeUnit` must fail closed: a
+    /// non-string (`42`) and an unknown token (`NIBBLE`) are named errors, not
+    /// a silent fallback to the documented `BYTE` default.
+    #[tokio::test]
+    async fn test_bitrange_unit_rejects_present_malformed_values() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            for unit in [serde_json::json!(42), serde_json::json!("NIBBLE")] {
+                let mut msg = Message::default();
+                msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+                msg.set_header("CamelRedis.Start", serde_json::json!(0i64));
+                msg.set_header("CamelRedis.End", serde_json::json!(2i64));
+                msg.set_header("CamelRedis.BitRangeUnit", unit.clone());
+                let mut exchange = Exchange::new(msg);
+
+                let err = bitmap::dispatch(&RedisCommand::Bitcount, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("a malformed range unit must be refused locally");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("CamelRedis.BitRangeUnit"),
+                    "{unit} rejection must name CamelRedis.BitRangeUnit: {msg}"
+                );
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("range-unit strictness test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a malformed range unit: {recorded:?}"
+        );
+    }
+
+    // ── redisbmp task 1.3: BITOP fails closed before send ───────────────────
+
+    /// `BITOP NOT` accepts exactly one source key, so a two-key `CamelRedis.Keys`
+    /// list must be refused locally with an error that names the header and the
+    /// single-source rule.
+    #[tokio::test]
+    async fn test_bitop_not_rejects_multiple_sources() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.BitOperation", serde_json::json!("NOT"));
+            msg.set_header("CamelRedis.Destination", serde_json::json!("d"));
+            msg.set_header("CamelRedis.Keys", serde_json::json!(["a", "b"]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitop, &mut conn, &mut exchange)
+                .await
+                .expect_err("BITOP NOT with two sources must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Keys"),
+                "error must name CamelRedis.Keys: {msg}"
+            );
+            assert!(
+                msg.contains("exactly one"),
+                "error must state the NOT single-source rule: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITOP NOT multi-source rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for BITOP NOT with two sources: {recorded:?}"
+        );
+    }
+
+    /// `BITOP AND` requires at least one source key, so an empty
+    /// `CamelRedis.Keys` array must be refused locally.
+    #[tokio::test]
+    async fn test_bitop_and_rejects_empty_sources() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.BitOperation", serde_json::json!("AND"));
+            msg.set_header("CamelRedis.Destination", serde_json::json!("d"));
+            msg.set_header("CamelRedis.Keys", serde_json::json!([]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitop, &mut conn, &mut exchange)
+                .await
+                .expect_err("BITOP AND with no sources must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Keys"),
+                "error must name CamelRedis.Keys: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITOP AND empty-source rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for BITOP AND with no sources: {recorded:?}"
+        );
+    }
+
+    /// A non-string entry in `CamelRedis.Keys` must fail closed: the strict list
+    /// resolver never drops it and runs the command against fewer sources.
+    #[tokio::test]
+    async fn test_bitop_rejects_non_string_key_entries() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.BitOperation", serde_json::json!("OR"));
+            msg.set_header("CamelRedis.Destination", serde_json::json!("d"));
+            msg.set_header("CamelRedis.Keys", serde_json::json!(["a", 42]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitop, &mut conn, &mut exchange)
+                .await
+                .expect_err("a non-string source key must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Keys"),
+                "error must name CamelRedis.Keys: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITOP non-string-source rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a non-string source key: {recorded:?}"
+        );
+    }
+
+    /// `CamelRedis.BitOperation` accepts only `AND`, `OR`, `XOR`, and `NOT`; an
+    /// unknown token or a non-string value is a named error listing the valid
+    /// operations.
+    #[tokio::test]
+    async fn test_bitop_rejects_unknown_operation() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            for operation in [serde_json::json!("NAND"), serde_json::json!(42)] {
+                let mut msg = Message::default();
+                msg.set_header("CamelRedis.BitOperation", operation.clone());
+                msg.set_header("CamelRedis.Destination", serde_json::json!("d"));
+                msg.set_header("CamelRedis.Keys", serde_json::json!(["a"]));
+                let mut exchange = Exchange::new(msg);
+
+                let err = bitmap::dispatch(&RedisCommand::Bitop, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("an unknown bit operation must be refused locally");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("CamelRedis.BitOperation"),
+                    "{operation} rejection must name CamelRedis.BitOperation: {msg}"
+                );
+                for valid in ["AND", "OR", "XOR", "NOT"] {
+                    assert!(
+                        msg.contains(valid),
+                        "{operation} rejection must list {valid}: {msg}"
+                    );
+                }
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITOP unknown-operation rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for an unknown bit operation: {recorded:?}"
+        );
+    }
+
+    /// `BITOP` without `CamelRedis.Destination` must be refused locally with a
+    /// missing-header error that names the header and differs from the invalid
+    /// type error.
+    #[tokio::test]
+    async fn test_bitop_rejects_missing_destination() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.BitOperation", serde_json::json!("OR"));
+            msg.set_header("CamelRedis.Keys", serde_json::json!(["a"]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitop, &mut conn, &mut exchange)
+                .await
+                .expect_err("BITOP without a destination must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Destination"),
+                "error must name CamelRedis.Destination: {msg}"
+            );
+            assert!(
+                msg.contains("Missing required header"),
+                "error must state that the destination is missing: {msg}"
+            );
+            assert!(
+                !msg.contains("expected a string"),
+                "a missing destination must not report an invalid-type cause: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITOP missing-destination rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent without a destination: {recorded:?}"
+        );
+    }
+
+    /// A non-string `CamelRedis.Destination` is present-but-invalid, not
+    /// missing: the strict resolver must name the header and the expected
+    /// string type instead of reporting an absent header.
+    #[tokio::test]
+    async fn test_bitop_rejects_non_string_destination() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.BitOperation", serde_json::json!("OR"));
+            msg.set_header("CamelRedis.Destination", serde_json::json!(42));
+            msg.set_header("CamelRedis.Keys", serde_json::json!(["a"]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitop, &mut conn, &mut exchange)
+                .await
+                .expect_err("a non-string destination must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Destination"),
+                "error must name CamelRedis.Destination: {msg}"
+            );
+            assert!(
+                msg.contains("expected a string"),
+                "error must state the expected string type: {msg}"
+            );
+            assert!(
+                !msg.contains("Missing required header"),
+                "a present non-string destination must not be reported as missing: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITOP non-string-destination rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a non-string destination: {recorded:?}"
+        );
+    }
+
+    // ── redisbmp task 2.1: BITFIELD fails closed before send ────────────────
+
+    /// A mutating `BITFIELD` entry with no effective overflow mode must be
+    /// refused locally: the server default `WRAP` must never apply by accident.
+    #[tokio::test]
+    async fn test_bitfield_dispatch_rejects_missing_overflow_before_send() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+            msg.set_header(
+                "CamelRedis.BitFieldOps",
+                serde_json::json!(["INCRBY u8 #0 1"]),
+            );
+            let mut exchange = Exchange::new(msg);
+
+            let err = bitmap::dispatch(&RedisCommand::Bitfield, &mut conn, &mut exchange)
+                .await
+                .expect_err("BITFIELD without an overflow mode must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.BitFieldOverflow"),
+                "error must name CamelRedis.BitFieldOverflow: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("BITFIELD missing-overflow rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent without an overflow mode: {recorded:?}"
+        );
+    }
+
+    /// A present but malformed `CamelRedis.BitFieldOverflow` must never be
+    /// treated as absent, even when an inline `OVERFLOW` entry supplies a mode.
+    #[tokio::test]
+    async fn test_bitfield_overflow_header_rejects_present_malformed_values() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            for value in [serde_json::json!(42), serde_json::json!("SOMETIMES")] {
+                let mut msg = Message::default();
+                msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+                msg.set_header("CamelRedis.BitFieldOverflow", value);
+                msg.set_header(
+                    "CamelRedis.BitFieldOps",
+                    serde_json::json!(["OVERFLOW SAT", "INCRBY u8 #0 1"]),
+                );
+                let mut exchange = Exchange::new(msg);
+
+                let err = bitmap::dispatch(&RedisCommand::Bitfield, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("a present but malformed overflow header must be refused locally");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("CamelRedis.BitFieldOverflow"),
+                    "error must name CamelRedis.BitFieldOverflow: {msg}"
+                );
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded =
+            outcome.expect("BITFIELD malformed-overflow-header rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a malformed overflow header: {recorded:?}"
+        );
+    }
+
+    // ── redisbmp task 3.1: HyperLogLog operands fail closed before send ─────
+
+    /// `PFADD` takes its element from the body (ADR-0098), so a route that
+    /// still sets the removed `CamelRedis.Value` header must fail locally with
+    /// the tombstone error before the driver writes a command byte.
+    #[tokio::test]
+    async fn test_pfadd_rejects_tombstoned_value_header() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::new(Body::Text("café".into()));
+            msg.set_header("CamelRedis.Key", serde_json::json!("k"));
+            msg.set_header(crate::HEADER_VALUE, serde_json::json!("café"));
+            let mut exchange = Exchange::new(msg);
+
+            let err = hll::dispatch(&RedisCommand::Pfadd, &mut conn, &mut exchange)
+                .await
+                .expect_err("a tombstoned value header must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Value was removed in 0.69"),
+                "error must name the tombstoned header: {msg}"
+            );
+            assert!(
+                msg.contains("put the value in the body"),
+                "error must point at the body contract: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("PFADD tombstoned-header rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a tombstoned value header: {recorded:?}"
+        );
+    }
+
+    /// `PFCOUNT` requires one or more keys: an empty list and a missing header
+    /// must both fail locally with a named error stating the non-empty rule.
+    #[tokio::test]
+    async fn test_pfcount_rejects_empty_keys() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            for keys in [None, Some(serde_json::json!([]))] {
+                let mut msg = Message::default();
+                if let Some(value) = keys {
+                    msg.set_header("CamelRedis.Keys", value);
+                }
+                let mut exchange = Exchange::new(msg);
+
+                let err = hll::dispatch(&RedisCommand::Pfcount, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("PFCOUNT without a source key must be refused locally");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("CamelRedis.Keys"),
+                    "error must name CamelRedis.Keys: {msg}"
+                );
+                assert!(
+                    msg.contains("empty"),
+                    "error must state the non-empty (>= 1 key) rule: {msg}"
+                );
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("PFCOUNT empty-key rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent without a source key: {recorded:?}"
+        );
+    }
+
+    /// `CamelRedis.Keys` is parsed strictly: a non-string entry must fail
+    /// locally instead of being silently dropped from the wire frame.
+    #[tokio::test]
+    async fn test_pfcount_rejects_non_string_key_entries() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Keys", serde_json::json!(["h1", 42]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = hll::dispatch(&RedisCommand::Pfcount, &mut conn, &mut exchange)
+                .await
+                .expect_err("a non-string key entry must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Keys"),
+                "error must name CamelRedis.Keys: {msg}"
+            );
+            assert!(
+                msg.contains("index 1"),
+                "error must name the offending entry: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("PFCOUNT non-string-key rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a non-string key entry: {recorded:?}"
+        );
+    }
+
+    /// `PFMERGE` writes to `CamelRedis.Destination`: a missing destination is
+    /// a named error before send, never a merge into an unintended key.
+    #[tokio::test]
+    async fn test_pfmerge_rejects_missing_destination() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.Keys", serde_json::json!(["h1"]));
+            let mut exchange = Exchange::new(msg);
+
+            let err = hll::dispatch(&RedisCommand::Pfmerge, &mut conn, &mut exchange)
+                .await
+                .expect_err("PFMERGE without a destination must be refused locally");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("CamelRedis.Destination"),
+                "error must name CamelRedis.Destination: {msg}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("PFMERGE missing-destination rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent without a destination: {recorded:?}"
+        );
+    }
+
+    // ── redisbmp task 4.1: WAIT arguments fail closed before send ───────────
+
+    /// `CamelRedis.WaitTimeout=0` makes Redis `WAIT ... 0` block forever, so
+    /// the zero value must be refused locally, naming the header, before the
+    /// driver writes a command byte.
+    #[tokio::test]
+    async fn test_wait_rejects_zero_timeout() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let mut msg = Message::default();
+            msg.set_header("CamelRedis.NumReplicas", serde_json::json!(1u64));
+            msg.set_header("CamelRedis.WaitTimeout", serde_json::json!(0u64));
+            let mut exchange = Exchange::new(msg);
+
+            let err = other::dispatch(&RedisCommand::Wait, &mut conn, &mut exchange)
+                .await
+                .expect_err("a zero WaitTimeout would block forever and must be refused locally");
+            assert!(
+                err.to_string().contains("CamelRedis.WaitTimeout"),
+                "error must name CamelRedis.WaitTimeout: {err}"
+            );
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("WAIT zero-timeout rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for a zero WaitTimeout: {recorded:?}"
+        );
+    }
+
+    /// Both `WAIT` operands are required: a missing `CamelRedis.NumReplicas`
+    /// or `CamelRedis.WaitTimeout` must fail locally with a named error.
+    #[tokio::test]
+    async fn test_wait_rejects_missing_headers() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let cases: [(&str, Vec<(&str, serde_json::Value)>); 2] = [
+                (
+                    "CamelRedis.NumReplicas",
+                    vec![("CamelRedis.WaitTimeout", serde_json::json!(1000u64))],
+                ),
+                (
+                    "CamelRedis.WaitTimeout",
+                    vec![("CamelRedis.NumReplicas", serde_json::json!(1u64))],
+                ),
+            ];
+            for (missing, headers) in cases {
+                let mut msg = Message::default();
+                for (key, value) in headers {
+                    msg.set_header(key, value);
+                }
+                let mut exchange = Exchange::new(msg);
+
+                let err = other::dispatch(&RedisCommand::Wait, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("both WAIT operands are required");
+                assert!(
+                    err.to_string().contains(missing),
+                    "error must name the missing header {missing}: {err}"
+                );
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("WAIT missing-header rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent without both WAIT operands: {recorded:?}"
+        );
+    }
+
+    /// Redis parses `WAIT`'s arguments as signed 64-bit, so a `u64` above
+    /// `i64::MAX` cannot travel on the wire. Both operands must be checked
+    /// before send, naming the header and the signed wire range.
+    #[tokio::test]
+    async fn test_wait_rejects_values_above_wire_range() {
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (addr, recorded_rx) = handshake_then_record_peer().await;
+            let client =
+                redis::Client::open(format!("redis://{addr}/")).expect("loopback URL must parse");
+            let mut conn = client
+                .get_multiplexed_async_connection()
+                .await
+                .expect("stub completes the driver handshake");
+
+            let cases: [(&str, Vec<(&str, serde_json::Value)>); 2] = [
+                (
+                    "CamelRedis.WaitTimeout",
+                    vec![
+                        ("CamelRedis.NumReplicas", serde_json::json!(1u64)),
+                        ("CamelRedis.WaitTimeout", serde_json::json!(u64::MAX)),
+                    ],
+                ),
+                (
+                    "CamelRedis.NumReplicas",
+                    vec![
+                        ("CamelRedis.NumReplicas", serde_json::json!(u64::MAX)),
+                        ("CamelRedis.WaitTimeout", serde_json::json!(1000u64)),
+                    ],
+                ),
+            ];
+            for (header, headers) in cases {
+                let mut msg = Message::default();
+                for (key, value) in headers {
+                    msg.set_header(key, value);
+                }
+                let mut exchange = Exchange::new(msg);
+
+                let err = other::dispatch(&RedisCommand::Wait, &mut conn, &mut exchange)
+                    .await
+                    .expect_err("values above the signed 64-bit wire range must be refused");
+                let msg = err.to_string();
+                assert!(msg.contains(header), "error must name {header}: {msg}");
+                assert!(
+                    msg.contains("signed 64-bit") || msg.contains("i64::MAX"),
+                    "error must name the signed 64-bit wire range: {msg}"
+                );
+            }
+
+            drop(conn);
+            recorded_rx
+                .await
+                .expect("peer must report recorded verbs on EOF")
+        })
+        .await;
+
+        let recorded = outcome.expect("WAIT wire-range rejection test timed out");
+        assert!(
+            recorded.is_empty(),
+            "no Redis command may be sent for an out-of-range WAIT operand: {recorded:?}"
         );
     }
 }

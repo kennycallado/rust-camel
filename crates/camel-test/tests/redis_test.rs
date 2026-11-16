@@ -1623,3 +1623,317 @@ async fn live_multi_partial_entry_error_is_named() {
         "the error must carry the server error text, got: {message}"
     );
 }
+
+// ===========================================================================
+// Live bitmap, HyperLogLog, and WAIT commands (redisbmp)
+// ===========================================================================
+
+/// Harness with one `direct:{id}` → `redis://…?command={command}` route per
+/// entry, so a test addresses each Redis command by endpoint id.
+async fn live_redis_harness(conn_str: &str, routes: &[(&str, &str)]) -> CamelTestContext {
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_component(RedisComponent::new())
+        .build()
+        .await;
+
+    for (id, command) in routes {
+        let route = RouteBuilder::from(&format!("direct:{id}"))
+            .to(format!("redis://{conn_str}?command={command}"))
+            .route_id(format!("redis-live-{id}"))
+            .build()
+            .unwrap();
+        h.add_route(route).await.unwrap();
+    }
+    h.start().await;
+    h
+}
+
+/// Sends one exchange to a `direct:` endpoint and returns its JSON reply body.
+async fn live_redis_reply(
+    h: &CamelTestContext,
+    direct_uri: &str,
+    headers: &[(&str, Value)],
+    body: Body,
+) -> serde_json::Value {
+    let mut ex = Exchange::new(Message::new(body));
+    for (name, value) in headers {
+        ex.input.set_header(*name, value.clone());
+    }
+    let reply = send_to_direct(h, direct_uri, ex)
+        .await
+        .expect("redis command must succeed");
+    match reply.input.body {
+        Body::Json(v) => v,
+        other => panic!("redis reply body must be JSON, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_setbit_getbit_roundtrip() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let h = live_redis_harness(
+        &conn_str,
+        &[("live-setbit", "SETBIT"), ("live-getbit", "GETBIT")],
+    )
+    .await;
+
+    let key = "live:setbit:roundtrip";
+    let previous = live_redis_reply(
+        &h,
+        "direct:live-setbit",
+        &[
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.BitOffset", json!(7u64)),
+            ("CamelRedis.BitValue", json!(1u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(
+        previous,
+        json!(0),
+        "SETBIT of a clear bit reports the previous bit 0"
+    );
+
+    let bit = live_redis_reply(
+        &h,
+        "direct:live-getbit",
+        &[
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.BitOffset", json!(7u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(
+        bit,
+        json!(1),
+        "GETBIT reads back the bit SETBIT wrote to the wire"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_bitcount_bit_range() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let h = live_redis_harness(
+        &conn_str,
+        &[("live-setbit", "SETBIT"), ("live-bitcount", "BITCOUNT")],
+    )
+    .await;
+
+    let key = "live:bitcount:range";
+    live_redis_reply(
+        &h,
+        "direct:live-setbit",
+        &[
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.BitOffset", json!(7u64)),
+            ("CamelRedis.BitValue", json!(1u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+
+    // Only offset 7 is set, and the inclusive BIT range 7..=7 covers exactly
+    // that one bit.
+    let count = live_redis_reply(
+        &h,
+        "direct:live-bitcount",
+        &[
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.Start", json!(7i64)),
+            ("CamelRedis.End", json!(7i64)),
+            ("CamelRedis.BitRangeUnit", json!("BIT")),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(
+        count,
+        json!(1),
+        "BITCOUNT over bit range 7..7 counts the single set bit"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_bitop_not_single_key() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let h = live_redis_harness(
+        &conn_str,
+        &[
+            ("live-setbit", "SETBIT"),
+            ("live-bitop", "BITOP"),
+            ("live-getbit", "GETBIT"),
+        ],
+    )
+    .await;
+
+    let src = "live:bitop:not:src";
+    let dst = "live:bitop:not:dst";
+    live_redis_reply(
+        &h,
+        "direct:live-setbit",
+        &[
+            ("CamelRedis.Key", json!(src)),
+            ("CamelRedis.BitOffset", json!(7u64)),
+            ("CamelRedis.BitValue", json!(1u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+
+    let length = live_redis_reply(
+        &h,
+        "direct:live-bitop",
+        &[
+            ("CamelRedis.Destination", json!(dst)),
+            ("CamelRedis.BitOperation", json!("NOT")),
+            ("CamelRedis.Keys", json!([src])),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(
+        length,
+        json!(1),
+        "BITOP NOT reports the destination length in bytes; the one-byte source negates to one byte"
+    );
+
+    // Redis numbers bits MSB-first, so SETBIT offset 7 sets the least
+    // significant bit: the source byte is 0x01 and NOT 0x01 is 0xfe. Bit 0
+    // is set in the destination, bit 7 is clear.
+    let head = live_redis_reply(
+        &h,
+        "direct:live-getbit",
+        &[
+            ("CamelRedis.Key", json!(dst)),
+            ("CamelRedis.BitOffset", json!(0u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(head, json!(1), "BITOP NOT inverts bit 0 of the source");
+    let tail = live_redis_reply(
+        &h,
+        "direct:live-getbit",
+        &[
+            ("CamelRedis.Key", json!(dst)),
+            ("CamelRedis.BitOffset", json!(7u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(tail, json!(0), "BITOP NOT clears the source's set bit 7");
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_bitfield_overflow_sat_reply_array() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let h = live_redis_harness(&conn_str, &[("live-bitfield", "BITFIELD")]).await;
+
+    let key = "live:bitfield:sat";
+    let reply = live_redis_reply(
+        &h,
+        "direct:live-bitfield",
+        &[
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.BitFieldOverflow", json!("SAT")),
+            (
+                "CamelRedis.BitFieldOps",
+                json!(["SET u8 #0 255", "INCRBY u8 #0 1", "GET u8 #0"]),
+            ),
+        ],
+        Body::Empty,
+    )
+    .await;
+    assert_eq!(
+        reply,
+        json!([0, 255, 255]),
+        "SET reports the old value 0, INCRBY saturates to 255, GET reads back 255"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_pfcount_multi_key() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let h = live_redis_harness(
+        &conn_str,
+        &[("live-pfadd", "PFADD"), ("live-pfcount", "PFCOUNT")],
+    )
+    .await;
+
+    let h1 = "live:pfcount:h1";
+    let h2 = "live:pfcount:h2";
+    for (key, element) in [(h1, "alpha"), (h2, "beta")] {
+        let changed = live_redis_reply(
+            &h,
+            "direct:live-pfadd",
+            &[("CamelRedis.Key", json!(key))],
+            Body::Text(element.into()),
+        )
+        .await;
+        assert_eq!(
+            changed,
+            json!(1),
+            "PFADD of a fresh element changes the structure"
+        );
+    }
+
+    let cardinality = live_redis_reply(
+        &h,
+        "direct:live-pfcount",
+        &[("CamelRedis.Keys", json!([h1, h2]))],
+        Body::Empty,
+    )
+    .await;
+    let cardinality = cardinality
+        .as_u64()
+        .unwrap_or_else(|| panic!("PFCOUNT body must be a JSON number, got {cardinality}"));
+    assert!(
+        cardinality >= 2,
+        "PFCOUNT over two disjoint keys counts at least two members, got {cardinality}"
+    );
+
+    h.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_wait_reply_body() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let h = live_redis_harness(&conn_str, &[("live-wait", "WAIT")]).await;
+
+    let reply = live_redis_reply(
+        &h,
+        "direct:live-wait",
+        &[
+            ("CamelRedis.NumReplicas", json!(1u64)),
+            ("CamelRedis.WaitTimeout", json!(1000u64)),
+        ],
+        Body::Empty,
+    )
+    .await;
+    let acked = reply
+        .as_u64()
+        .unwrap_or_else(|| panic!("WAIT body must be a JSON number, got {reply}"));
+    assert!(
+        acked <= 1,
+        "a single-node container acks for at most one replica, got {acked}"
+    );
+
+    h.stop().await;
+}
