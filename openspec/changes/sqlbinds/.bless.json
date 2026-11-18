@@ -1,0 +1,60 @@
+{
+  "kind": "plan",
+  "change": "sqlbinds",
+  "verdict": "BLESS",
+  "hash": "sha256:de61ab5154296c5cbf05fdc062ede9793e6761173fd5c504d1de43f83240fd92",
+  "expert": "e_glm",
+  "session": "ses_e1090d5fbffeUaAm11OIF0dBle",
+  "owner_override": "2026-11-18 15:30 UTC: e_glm named as the blesser at both blessing sites for mission 596 (gpt window exhausted until 16:14 UTC). Named-expert substitution, not a downgrade.",
+  "history": [
+    {
+      "stage": "spec",
+      "verdict": "BLESS",
+      "expert": "e_gpt",
+      "session": "ses_e120772c1ffeVzk0Zsit8B5CyV",
+      "hash": "sha256:f9a1d7db6737b30765db7ab6996eda4ef5edae55440202dc25dae5d830a74bc9",
+      "applied": "one BLESS-WITH-FIXES round (five findings: IN-expansion metadata, probe/read-back split, bool-under-TEXT + bool-under-BOOL scenarios, whole-batch rollback, checked-conversion wording)"
+    },
+    {
+      "stage": "plan",
+      "verdict": "REJECT",
+      "expert": "e_gpt",
+      "findings": 8,
+      "applied": "all 8"
+    },
+    {
+      "stage": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_gpt",
+      "rounds": "three further rounds (7, 2, 3 findings)",
+      "applied": "all findings",
+      "note": "the fourth dispatch hit provider.quota; mission parked as blocked: budget"
+    },
+    {
+      "stage": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_glm",
+      "session": "ses_e10e5253cffe28nVktmZqaTI4D",
+      "findings": 3,
+      "applied": "BatchItemPlan precomputed alias targets; inline raw-sqlx notes for (b)/(d); line-ref drift + shape-planner routing note"
+    },
+    {
+      "stage": "plan",
+      "verdict": "BLESS-WITH-FIXES",
+      "expert": "e_glm",
+      "session": "ses_e10d3f8d9ffeU254SUeVFRyHc5",
+      "findings": 2,
+      "applied": "by the master in d08263b43: Task 1.2 step 8 clause split (ineligible row keeps hybrid_fallback_targets_rows, mirroring producer.rs:505-514; later-unusable shape keeps message_scan) and BatchItemPlan added to the Task 1.4 step 5 dead-code removal list"
+    },
+    {
+      "stage": "plan",
+      "verdict": "BLESS",
+      "expert": "e_glm",
+      "session": "ses_e1090d5fbffeUaAm11OIF0dBle",
+      "hash": "sha256:de61ab5154296c5cbf05fdc062ede9793e6761173fd5c504d1de43f83240fd92",
+      "verified": "both prior fix clauses on disk; every code citation cross-checked (producer.rs:846-875 probe block, pinned warn/error strings 479/481/879/881/905/935, consumer.rs:112/245/336/340, bind_kinds.rs:18/31/508, release_after_error producer.rs:408); six ruled decision points conformed"
+    }
+  ],
+  "commit": "d08263b43",
+  "date": "2026-11-18"
+}

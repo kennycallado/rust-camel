@@ -9,13 +9,8 @@ use bytes::Bytes;
 use camel_api::datasource::DatasourceCatalog;
 use serde_json::json;
 use sqlx::Any;
-use sqlx::AnyConnection;
 use sqlx::AnyPool;
-use sqlx::Either;
-use sqlx::Executor;
-use sqlx::SqlSafeStr;
 use sqlx::any::AnyRow;
-use sqlx::any::AnyTypeInfoKind;
 use sqlx::pool::PoolConnection;
 use sqlx::pool::PoolOptions;
 use tokio::sync::OnceCell;
@@ -23,8 +18,9 @@ use tower::Service;
 use tracing::{debug, error, info, warn};
 
 use crate::bind_kinds::{
-    BindTarget, bind_batch_item, bind_single_item, bind_target_from_any_kind,
-    described_mode_eligible, hybrid_fallback_targets, scan_bind_targets,
+    BindMode, BindPlan, BindTarget, ItemBindSource, ProbeOutcome, bind_batch_item,
+    bind_single_item, bind_target_from_any_kind, group_rows_by_sql, named_kinds_agree,
+    plan_batch_items, plan_binds, probe_batch_shapes, readback_kinds, scan_bind_targets,
 };
 use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
@@ -327,15 +323,6 @@ impl Service<Exchange> for SqlProducer {
     }
 }
 
-/// The bind plan for one single-mode statement (bd rc-mn139): which SQL
-/// text to execute, the per-position wire targets, and whether the
-/// statement may use the persistent cache.
-struct SingleBindPlan {
-    sql: String,
-    targets: Vec<Option<BindTarget>>,
-    persistent: bool,
-}
-
 /// What to do with a pooled connection after a failed statement.
 enum RollbackDisposition {
     /// Roll back and return the connection to the pool.
@@ -405,7 +392,10 @@ impl Drop for DiscardOnDrop {
 /// Rolls back a failed statement on `conn`, then either returns the
 /// connection to the pool (benign rollback: nothing was open) or closes it
 /// (unknown state). Always returns `original` unchanged.
-async fn release_after_error(conn: PoolConnection<Any>, original: CamelError) -> CamelError {
+pub(crate) async fn release_after_error(
+    conn: PoolConnection<Any>,
+    original: CamelError,
+) -> CamelError {
     let mut guard = DiscardOnDrop(Some(conn));
     let rollback = sqlx::query(sqlx::AssertSqlSafe("ROLLBACK"))
         .execute(&mut **guard.conn_mut())
@@ -429,122 +419,6 @@ async fn release_after_error(conn: PoolConnection<Any>, original: CamelError) ->
     original
 }
 
-/// Plans the binds for one single-mode statement on `conn` (the SAME
-/// pooled connection that will execute it — normalization must target
-/// the OIDs of the statement that actually runs, bd rc-mn139).
-async fn plan_single_binds(
-    conn: &mut AnyConnection,
-    sql: &str,
-    bindings: &[serde_json::Value],
-) -> Result<SingleBindPlan, CamelError> {
-    // Nothing to reinterpret: keep the default persistent path, with no
-    // probe round trip.
-    if bindings.is_empty() {
-        return Ok(SingleBindPlan {
-            sql: sql.to_string(),
-            targets: vec![],
-            persistent: true,
-        });
-    }
-
-    // Probe on a distinct SQL-text namespace: preparing with empty
-    // parameter types seeds a statement cache entry under the probed text,
-    // and for unmapped parameter types that entry is one no payload can
-    // satisfy. Keeping the probe on its own text keeps the user's SQL text
-    // namespace clean (mirrors the batch probe).
-    let probe_sql = format!("{sql} /* single-bind-kinds-probe */");
-    let described_kinds = match Executor::prepare_with(
-        &mut *conn,
-        sqlx::AssertSqlSafe(probe_sql).into_sql_str(),
-        &[],
-    )
-    .await
-    {
-        Ok(statement) => match statement.parameters {
-            // An empty type list cannot drive normalization.
-            Some(Either::Left(types)) if !types.is_empty() => Some(
-                types
-                    .iter()
-                    .map(|type_info| type_info.kind())
-                    .collect::<Vec<AnyTypeInfoKind>>(),
-            ),
-            _ => None,
-        },
-        // Metadata unavailable (e.g. NUMERIC columns have no Any mapping).
-        // Server and connection failures propagate unchanged.
-        Err(sqlx::Error::AnyDriverError(_)) => None,
-        Err(e) => {
-            // log-policy: handler-owned
-            // (category a: single-mode probe failure inside producer pipeline)
-            warn!("Single describe probe failed: {}", e);
-            return Err(CamelError::ProcessorError(format!(
-                "SQL query prepare failed: {e}"
-            )));
-        }
-    };
-
-    // The fallback alias is distinct from the probe alias on purpose: sqlx
-    // consults the SQL-text cache before the persistence flag, so a
-    // probe-seeded entry would otherwise be reused. Nothing is cached
-    // under the fallback text.
-    let fallback_sql = format!("{sql} /* single-bind-kinds-fallback */");
-
-    let Some(kinds) = described_kinds else {
-        return Ok(SingleBindPlan {
-            sql: fallback_sql,
-            targets: scan_bind_targets(&[bindings]),
-            persistent: false,
-        });
-    };
-
-    let described_targets = kinds
-        .iter()
-        .map(|kind| bind_target_from_any_kind(*kind))
-        .collect::<Vec<_>>();
-
-    if !described_mode_eligible(&kinds, bindings) {
-        // Hybrid fallback: keep every described numeric target so the
-        // checked guards still fire where the server described a numeric
-        // position; scan only the unresolved ones.
-        return Ok(SingleBindPlan {
-            sql: fallback_sql,
-            targets: hybrid_fallback_targets(&described_targets, bindings),
-            persistent: false,
-        });
-    }
-
-    // Describe with empty Parse parameter types so the server infers the
-    // parameter OIDs from the SQL text. On a cache hit the read-back
-    // parameters are the cached statement's actual OIDs — normalization
-    // targets those, so payloads always match the executed statement.
-    let statement = Executor::prepare_with(
-        &mut *conn,
-        sqlx::AssertSqlSafe(sql.to_string()).into_sql_str(),
-        &[],
-    )
-    .await
-    .map_err(|e| {
-        // log-policy: handler-owned
-        // (category a: single-mode described prepare failure inside producer pipeline)
-        warn!("Single describe failed: {}", e);
-        CamelError::ProcessorError(format!("SQL query prepare failed: {e}"))
-    })?;
-
-    let targets = match statement.parameters {
-        Some(Either::Left(types)) => types
-            .iter()
-            .map(|type_info| bind_target_from_any_kind(type_info.kind()))
-            .collect::<Vec<_>>(),
-        _ => scan_bind_targets(&[bindings]),
-    };
-
-    Ok(SingleBindPlan {
-        sql: sql.to_string(),
-        targets,
-        persistent: true,
-    })
-}
-
 /// Executes one single-mode SELECT on a pooled connection, planning the
 /// binds first (bd rc-mn139). Statements without bindings plan to the
 /// default persistent path with no probe and no binds.
@@ -558,7 +432,13 @@ async fn fetch_single_rows(
         .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
 
     let fetched = async {
-        let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
+        let plan = plan_binds(
+            &mut conn,
+            &prepared.sql,
+            &[prepared.bindings.as_slice()],
+            BindMode::Single,
+        )
+        .await?;
         let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
         let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
         query
@@ -638,16 +518,21 @@ async fn execute_select(
                 // Plan and execute against the SAME pooled connection so
                 // normalization targets the OIDs of the statement that
                 // actually runs (bd rc-mn139).
-                let plan = match plan_single_binds(&mut conn, &sql_str, &bindings).await {
+                let plan = match plan_binds(
+                    &mut conn,
+                    &sql_str,
+                    &[bindings.as_slice()],
+                    BindMode::Single,
+                )
+                .await
+                {
                     Ok(plan) => plan,
                     Err(original) => {
                         // `try_stream!` turns `?` into "yield the error and
                         // return", but the compiler still sees the `Ok` arm
                         // as reachable; that arm must diverge for the
                         // connection move to be accepted.
-                        Err::<SingleBindPlan, CamelError>(
-                            release_after_error(conn, original).await,
-                        )?;
+                        Err::<BindPlan, CamelError>(release_after_error(conn, original).await)?;
                         unreachable!("`release_after_error` always propagates the error")
                     }
                 };
@@ -728,7 +613,13 @@ async fn execute_modify(
         .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
 
     let executed = async {
-        let plan = plan_single_binds(&mut conn, &prepared.sql, &prepared.bindings).await?;
+        let plan = plan_binds(
+            &mut conn,
+            &prepared.sql,
+            &[prepared.bindings.as_slice()],
+            BindMode::Single,
+        )
+        .await?;
         let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
         let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
         query.execute(&mut *conn).await.map_err(|e| {
@@ -774,12 +665,14 @@ async fn execute_modify(
 
 /// Executes a batch of queries from a JSON array body.
 ///
-/// Bind-kind safety (bd rc-fef4z): sqlx keys its statement cache by SQL text
-/// alone and fixes parameter OIDs at the first `Parse`, so a position that
-/// carries different Rust bind kinds across items silently reinterprets
-/// bits. Every position therefore binds exactly one wire encoding per
-/// statement: the server-described encoding when available, otherwise a
-/// per-batch scan (float wins) executed without statement caching.
+/// Bind-kind safety (bd rc-fef4z, rc-7e681, rc-0eiqm): sqlx keys its
+/// statement cache by SQL text alone and fixes parameter OIDs at the first
+/// `Parse`, so a position that carries different Rust bind kinds across
+/// items silently reinterprets bits. Every distinct resolved SQL shape is
+/// described once, and every position binds exactly one wire encoding per
+/// statement: the read-back encoding on the named path, otherwise the
+/// shape's described targets over the message-wide scan (float wins) on an
+/// unnamed alias. One ineligible item sends the whole batch to the aliases.
 async fn execute_batch(
     pool: &AnyPool,
     config: &SqlEndpointConfig,
@@ -828,12 +721,29 @@ async fn execute_batch(
         )?);
     }
 
-    // Fallback targets: one bind kind per position across the batch, float wins.
+    // Group the resolved SQL texts by shape. IN-clause expansion rewrites
+    // `in (:list)` into one placeholder per element, so items of one batch
+    // can resolve to different texts and every later parameter position
+    // shifts with the list length: metadata is tracked per shape, never per
+    // batch.
+    let sqls: Vec<String> = prepared_items
+        .iter()
+        .map(|prepared| prepared.sql.clone())
+        .collect();
+    let groups = group_rows_by_sql(&sqls);
+    let items: Vec<(String, Vec<serde_json::Value>)> = prepared_items
+        .iter()
+        .map(|prepared| (prepared.sql.clone(), prepared.bindings.clone()))
+        .collect();
     let binding_rows: Vec<&[serde_json::Value]> = prepared_items
         .iter()
         .map(|prepared| prepared.bindings.as_slice())
         .collect();
-    let scanned_targets = scan_bind_targets(&binding_rows);
+    // Scan fallback targets: one bind kind per position across the WHOLE
+    // batch, float wins. The message-wide scan (never a per-shape scan) is
+    // the no-loosening rule: a per-shape scan could turn a typed 2^53
+    // rejection into a silent server-side round.
+    let message_scan = scan_bind_targets(&binding_rows);
 
     // Fix 2: Batch operations must be wrapped in a transaction
     let mut tx = pool.begin().await.map_err(|e| {
@@ -843,87 +753,99 @@ async fn execute_batch(
         CamelError::ProcessorError(format!("Failed to begin transaction: {}", e))
     })?;
 
-    // Probe the described parameter types once with the first item's SQL
-    // text. Described batches keep using the transaction connection (later
-    // items with the same text hit the statement cache for free).
-    let mut described_mode = true;
-    if let Some(first) = prepared_items.first() {
-        // Probe on a distinct SQL-text namespace: preparing with empty
-        // parameter types seeds a statement cache entry under the probed
-        // text, and for unmapped types (e.g. NUMERIC) that entry is one no
-        // payload can satisfy. Keeping the probe on its own text keeps the
-        // user's SQL text namespace clean.
-        let probe_sql = format!("{} /* batch-bind-kinds-probe */", first.sql);
-        described_mode = match Executor::prepare_with(
-            &mut *tx,
-            sqlx::AssertSqlSafe(probe_sql).into_sql_str(),
-            &[],
-        )
-        .await
-        {
-            Ok(statement) => match statement.parameters {
-                // Any-mapped parameter types are described-eligible: numeric
-                // kinds get bind targets, non-numeric kinds (text, bool,
-                // blob) keep the default JSON binding under their described
-                // OIDs. Unmapped kinds (e.g. NUMERIC) fail the probe itself.
-                // An empty type list cannot drive normalization.
-                Some(Either::Left(types)) => !types.is_empty(),
-                _ => false,
-            },
-            // Metadata unavailable (e.g. NUMERIC columns have no Any
-            // mapping). Server and connection failures propagate unchanged.
-            Err(sqlx::Error::AnyDriverError(_)) => false,
-            Err(e) => {
-                // log-policy: handler-owned
-                // (category a: batch probe failure inside producer pipeline)
-                warn!("Batch describe probe failed: {}", e);
-                return Err(CamelError::ProcessorError(format!(
-                    "Batch query prepare failed: {e}"
-                )));
+    // Probe every distinct shape once. The FIRST shape's probe selects the
+    // batch mode (today's semantics: the batch loop probed item 0): an
+    // unusable first probe keeps the legacy message-wide scan for the whole
+    // batch, while a usable first probe enters described mode where later
+    // unusable shapes only make their own items ineligible. Each probe runs
+    // on its own alias text: preparing with empty parameter types seeds a
+    // statement-cache entry under the probed text, and for unmapped types
+    // (e.g. NUMERIC) that entry is one no payload can satisfy.
+    let probes = probe_batch_shapes(&mut tx, &groups).await?;
+    let shape_probes: Vec<(String, ProbeOutcome)> = groups
+        .iter()
+        .map(|group| group.sql.clone())
+        .zip(probes)
+        .collect();
+    let plans = plan_batch_items(&shape_probes, &items, &message_scan);
+
+    // Whole-batch rule: every plan, including the named read-backs, is
+    // decided BEFORE item 0 executes, so a mismatch discovered on a later
+    // shape still sends the whole batch to the aliases. One `AliasPlan` item
+    // collapses the batch to alias execution on the precomputed targets;
+    // otherwise every item is `NamedReadBack` and the read-back decides the
+    // named targets, provided it agrees with the shape's probe kinds (a
+    // disagreement means the cached entry was seeded by bind-derived OIDs,
+    // bd rc-0eiqm).
+    let mut alias_whole_batch = plans
+        .iter()
+        .any(|plan| plan.source == ItemBindSource::AliasPlan);
+    let mut named_targets: Vec<Option<Vec<Option<BindTarget>>>> = vec![None; prepared_items.len()];
+    if !alias_whole_batch {
+        for (batch_idx, prepared) in prepared_items.iter().enumerate() {
+            let kinds = shape_probes.iter().find_map(|(sql, probe)| {
+                if sql != &prepared.sql {
+                    return None;
+                }
+                match probe {
+                    ProbeOutcome::Described(kinds) => Some(kinds),
+                    ProbeOutcome::Unusable => None,
+                }
+            });
+            // Unreachable: a `NamedReadBack` plan implies a described probe.
+            let Some(kinds) = kinds else {
+                alias_whole_batch = true;
+                break;
+            };
+            let readback =
+                readback_kinds(&mut tx, &prepared.sql, BindMode::Batch, Some(batch_idx)).await?;
+            let Some(readback) = readback else {
+                // Unusable read-back cannot agree with the probe: the
+                // whole-batch rule sends every item to its precomputed
+                // alias targets (the safe direction - never probe-derived
+                // bytes on the named statement).
+                alias_whole_batch = true;
+                break;
+            };
+            if !named_kinds_agree(kinds, Some(&readback)) {
+                alias_whole_batch = true;
+                break;
             }
-        };
+            let targets = readback
+                .iter()
+                .map(|kind| bind_target_from_any_kind(*kind))
+                .collect();
+            named_targets[batch_idx] = Some(targets);
+        }
     }
 
     let mut total_rows_affected: u64 = 0;
 
     for (batch_idx, prepared) in prepared_items.iter().enumerate() {
-        let (mut query, targets) = if described_mode {
-            // Describe with empty Parse parameter types so the server infers
-            // the parameter OIDs from the SQL text. On a cache hit the
-            // read-back parameters are the cached statement's actual OIDs —
-            // normalization targets those, so payloads always match the
-            // executed statement.
-            let statement = Executor::prepare_with(
-                &mut *tx,
-                sqlx::AssertSqlSafe(prepared.sql.clone()).into_sql_str(),
-                &[],
-            )
-            .await
-            .map_err(|e| {
-                // log-policy: handler-owned
-                // (category a: batch describe failure inside producer pipeline)
-                warn!("Batch describe failed at index {}: {}", batch_idx, e);
-                CamelError::ProcessorError(format!("Batch query prepare failed: {e}"))
-            })?;
-            let query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str()));
-            let targets = match statement.parameters {
-                Some(Either::Left(types)) => types
-                    .iter()
-                    .map(|type_info| bind_target_from_any_kind(type_info.kind()))
-                    .collect::<Vec<_>>(),
-                _ => scanned_targets.clone(),
-            };
-            (query, targets)
-        } else {
+        let (mut query, targets) = if alias_whole_batch {
             // Uncached fallback: execute a semantically identical alias text
             // in its own cache namespace with persistent(false), so every
             // item prepares an unnamed statement whose parameter types
-            // derive from the scan-normalized binds. Nothing is cached and
+            // derive from the precomputed alias binds. Nothing is cached and
             // nothing else uses this namespace, so no incompatible cached
-            // entry can be reused.
+            // entry can be reused. Every item uses its precomputed targets:
+            // the whole-batch rule already decided them.
             let fallback_sql = format!("{} /* batch-bind-kinds-fallback */", prepared.sql);
-            let query = sqlx::query(sqlx::AssertSqlSafe(fallback_sql.as_str())).persistent(false);
-            (query, scanned_targets.clone())
+            let query = sqlx::query(sqlx::AssertSqlSafe(fallback_sql)).persistent(false);
+            (query, plans[batch_idx].alias_targets.clone())
+        } else {
+            // Named: the read-back agreed with the shape's probe kinds, so
+            // the item binds against the statement that actually executes.
+            let query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.clone()));
+            // Unreachable without `alias_whole_batch`: the decision loop
+            // fills every slot for named items. Fail loudly rather than
+            // degrade to raw JSON binds on the named statement.
+            let Some(targets) = named_targets[batch_idx].clone() else {
+                return Err(CamelError::ProcessorError(
+                    "internal: named batch item without an agreed read-back".to_string(),
+                ));
+            };
+            (query, targets)
         };
 
         query = bind_batch_item(query, &prepared.bindings, &targets, batch_idx)?;

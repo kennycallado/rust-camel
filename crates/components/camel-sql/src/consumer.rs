@@ -18,12 +18,13 @@ use camel_component_api::{
 };
 use camel_component_api::{ConcurrencyModel, Consumer, ConsumerContext};
 
-use crate::bind_kinds::bind_json_values;
+use crate::bind_kinds::{BindMode, BindPlan, bind_single_item, plan_binds};
 use crate::config::{
     PollStrategy, ProcessingStrategy, SqlEndpointConfig, SqlOutputType, TransactionMode,
     enrich_db_url_with_ssl, redact_db_url,
 };
 use crate::headers;
+use crate::producer::release_after_error;
 use crate::query::{QueryTemplate, parse_query_template, resolve_params};
 use crate::utils::{fetch_error, is_retryable_sqlx_error, row_to_json};
 
@@ -109,14 +110,44 @@ impl SqlConsumer {
             return self.poll_database_stream(pool, context, &prepared).await;
         }
 
-        let query = bind_json_values(
-            sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str())),
-            &prepared.bindings,
-        );
-        let rows: Vec<AnyRow> = query
-            .fetch_all(pool)
+        let mut conn = pool
+            .acquire()
             .await
-            .map_err(|e| fetch_error("SQL consumer poll query failed", e))?;
+            .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+
+        let fetched = async {
+            // Plan and execute against the SAME pooled connection so the
+            // normalization targets name the OIDs of the statement that
+            // actually runs (bd rc-7e681).
+            let plan = plan_binds(
+                &mut conn,
+                &prepared.sql,
+                &[prepared.bindings.as_slice()],
+                BindMode::Consumer,
+            )
+            .await?;
+            let query =
+                sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+            let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+            query
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| fetch_error("SQL consumer poll query failed", e))
+        }
+        .await;
+
+        let rows: Vec<AnyRow> = match fetched {
+            Ok(rows) => {
+                // `fetch_all` drained the statement: release the connection
+                // before post-processing, because every onConsume /
+                // onConsumeFailed query acquires its own pooled connection
+                // and a single-connection pool would deadlock on the nested
+                // acquire.
+                drop(conn);
+                rows
+            }
+            Err(original) => return Err(release_after_error(conn, original).await),
+        };
 
         debug!(rows = rows.len(), "SQL consumer poll completed");
 
@@ -241,19 +272,77 @@ impl SqlConsumer {
         let bindings = prepared.bindings.clone();
 
         let byte_stream = async_stream::try_stream! {
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql_str.as_str()));
-            q = bind_json_values(q, &bindings);
-            let mut rows = q.fetch(&pool_clone);
-            while let Some(row) = rows
-                .try_next()
+            let mut conn = pool_clone
+                .acquire()
                 .await
-                .map_err(|e| fetch_error("Query execution failed", e))?
+                .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+
+            // Plan and execute against the SAME pooled connection: the
+            // stream's rows come from the statement that was described
+            // (bd rc-7e681).
+            let plan = match plan_binds(
+                &mut conn,
+                &sql_str,
+                &[bindings.as_slice()],
+                BindMode::Consumer,
+            )
+            .await
             {
-                let json_val = row_to_json(&row)?;
-                let mut bytes = serde_json::to_vec(&json_val)
-                    .map_err(|e| CamelError::ProcessorError(format!("JSON serialization failed: {}", e)))?;
+                Ok(plan) => plan,
+                Err(original) => {
+                    // `try_stream!` turns `?` into "yield the error and
+                    // return", but the compiler still sees the `Ok` arm
+                    // as reachable; that arm must diverge for the
+                    // connection move to be accepted.
+                    Err::<BindPlan, CamelError>(release_after_error(conn, original).await)?;
+                    unreachable!("`release_after_error` always propagates the error")
+                }
+            };
+            let q = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str()))
+                .persistent(plan.persistent);
+            let q = match bind_single_item(q, &bindings, &plan.targets) {
+                Ok(q) => q,
+                Err(original) => {
+                    Err::<_, CamelError>(release_after_error(conn, original).await)?;
+                    unreachable!("`release_after_error` always propagates the error")
+                }
+            };
+            let mut rows = q.fetch(&mut *conn);
+            let mut failure: Option<CamelError> = None;
+            loop {
+                let row = match rows.try_next().await {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(e) => {
+                        failure = Some(fetch_error("Query execution failed", e));
+                        break;
+                    }
+                };
+                let json_val = match row_to_json(&row) {
+                    Ok(json_val) => json_val,
+                    Err(original) => {
+                        failure = Some(original);
+                        break;
+                    }
+                };
+                let mut bytes = match serde_json::to_vec(&json_val) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        failure = Some(CamelError::ProcessorError(format!(
+                            "JSON serialization failed: {}",
+                            e
+                        )));
+                        break;
+                    }
+                };
                 bytes.push(b'\n');
                 yield Bytes::from(bytes);
+            }
+            // `rows` borrows the connection: end the borrow before handing
+            // the connection to the rollback.
+            drop(rows);
+            if let Some(original) = failure {
+                Err::<(), CamelError>(release_after_error(conn, original).await)?;
             }
         };
 
@@ -332,14 +421,34 @@ impl SqlConsumer {
         // Resolve parameters
         let prepared = resolve_params(&template, &temp_exchange, &self.config.in_separator)?;
 
-        // Build and execute the query
-        let query = bind_json_values(
-            sqlx::query(sqlx::AssertSqlSafe(prepared.sql.as_str())),
-            &prepared.bindings,
-        );
-        let result = query.execute(pool).await.map_err(|e| {
-            CamelError::ProcessorError(format!("Post-query execution failed: {}", e))
-        })?;
+        // Plan and execute the post-query on ONE pooled connection so the
+        // binds target the statement that actually runs (bd rc-7e681).
+        let mut conn = pool
+            .acquire()
+            .await
+            .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+
+        let executed = async {
+            let plan = plan_binds(
+                &mut conn,
+                &prepared.sql,
+                &[prepared.bindings.as_slice()],
+                BindMode::Consumer,
+            )
+            .await?;
+            let query =
+                sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+            let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+            query.execute(&mut *conn).await.map_err(|e| {
+                CamelError::ProcessorError(format!("Post-query execution failed: {}", e))
+            })
+        }
+        .await;
+
+        let result = match executed {
+            Ok(result) => result,
+            Err(original) => return Err(release_after_error(conn, original).await),
+        };
 
         // Warn if 0 rows affected (the row may not have been marked correctly)
         if result.rows_affected() == 0 {

@@ -2771,3 +2771,1155 @@ async fn single_select_hybrid_keeps_described_float_guard() {
         "exact-value select must return f=2.5 and n=3544952156018063160, got {text}"
     );
 }
+
+// ── sqlbinds bind-attack tests (bd rc-7e681 + rc-0eiqm) ──────────────
+
+/// Waits for the first terminal outcome of the route under test: `Ok(())`
+/// when `mock:result` received an exchange, `Err(<dead-lettered error text>)`
+/// when `mock:error` did. Panics on timeout so a hung route names itself.
+async fn await_sqlbinds_outcome(h: &CamelTestContext, label: &str) -> Result<(), String> {
+    let result_ep = h
+        .mock()
+        .get_endpoint("result")
+        .expect("mock:result endpoint");
+    let error_ep = h.mock().get_endpoint("error").expect("mock:error endpoint");
+    let wait_result = result_ep.clone();
+    let wait_error = error_ep.clone();
+    wait_until(
+        label,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let result_ep = wait_result.clone();
+            let error_ep = wait_error.clone();
+            async move {
+                Ok(!error_ep.get_received_exchanges().await.is_empty()
+                    || !result_ep.get_received_exchanges().await.is_empty())
+            }
+        },
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let errors = error_ep.get_received_exchanges().await;
+    match errors.first() {
+        Some(exchange) => Err(format!("{:?}", exchange.error)),
+        None => Ok(()),
+    }
+}
+
+/// Reads one TEXT column ordered by id through an inline raw-sqlx SELECT
+/// (`read_text_cols` needs two TEXT columns).
+async fn read_single_text_col(pool: &AnyPool, select_sql: &str) -> Vec<String> {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(select_sql.to_string()))
+        .fetch_all(pool)
+        .await
+        .expect("Failed to read stored rows");
+
+    rows.into_iter()
+        .map(|row| row.try_get(0).expect("column should decode as text"))
+        .collect()
+}
+
+/// Reads one DOUBLE PRECISION column ordered by id.
+async fn read_single_f64_col(pool: &AnyPool, select_sql: &str) -> Vec<f64> {
+    let rows = sqlx::query(sqlx::AssertSqlSafe(select_sql.to_string()))
+        .fetch_all(pool)
+        .await
+        .expect("Failed to read stored rows");
+
+    rows.into_iter()
+        .map(|row| row.try_get(0).expect("column should decode as f64"))
+        .collect()
+}
+
+/// Reads `(k, txt, a)` from the variable-length-IN table ordered by `k`.
+async fn read_in_shape_state(pool: &AnyPool) -> Vec<(i64, String, f64)> {
+    let rows = sqlx::query("SELECT k, txt::text, a FROM sqlbinds_t7 ORDER BY k")
+        .fetch_all(pool)
+        .await
+        .expect("Failed to read sqlbinds_t7");
+
+    rows.into_iter()
+        .map(|row| {
+            (
+                row.try_get(0).expect("k decodes as i64"),
+                row.try_get(1).expect("txt decodes as text"),
+                row.try_get(2).expect("a decodes as f64"),
+            )
+        })
+        .collect()
+}
+
+/// bd rc-7e681 (a): a batch `SELECT #` binds an integer under a bare
+/// placeholder. PG17 describes the bare `$1` as TEXT; own-OID binds keep the
+/// payload intact, so both items must succeed even though the second item's
+/// int8 bytes contain NULs (invalid as TEXT bytes). The batch shape discards
+/// the SELECT rows, so success is the observable here; the value itself is
+/// pinned by `single_select_bare_param_number_stays_numeric`.
+///
+/// BASELINE: FAILING pre-fix (RED; expected — turns green in Task 1.6).
+/// RED (pre-fix: item 0's int8 bytes were bound as the ASCII text
+/// "12345678" under the described-TEXT `$1`, then item 1's int8 bytes for
+/// `123` (seven NULs + 0x7B) died at execution with PG `invalid byte
+/// sequence for encoding "UTF8": 0x00`; the transaction rolled back and
+/// `mock:result` never received an exchange).
+/// Post-fix: own-OID binds keep both int8 payloads intact under the bare
+/// described-TEXT `$1`; the batch commits and emits exactly one
+/// `mock:result` exchange carrying `CamelSql.UpdateCount`.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_bare_select_text_described_own_oid_green() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t1 (id BIGSERIAL PRIMARY KEY, n BIGINT)",
+    )
+    .await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!("sql:SELECT #?db_url={conn_str}&sslMode=disable&batch=true");
+    run_batch_route(
+        &h,
+        "sqlbinds-bare-select",
+        50,
+        serde_json::json!([[3544952156018063160i64], [123]]),
+        &endpoint,
+    )
+    .await;
+    h.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h, "bare-param batch select outcome").await;
+    h.stop().await;
+
+    if let Err(error) = outcome {
+        panic!("batch SELECT # must succeed (bare $1 described TEXT, own-OID binds): {error}");
+    }
+
+    let exchanges = h
+        .mock()
+        .get_endpoint("result")
+        .expect("mock:result endpoint")
+        .get_received_exchanges()
+        .await;
+    assert_eq!(exchanges.len(), 1, "batch SELECT emits one result exchange");
+    assert!(
+        exchanges[0].input.header("CamelSql.UpdateCount").is_some(),
+        "batch must set CamelSql.UpdateCount"
+    );
+}
+
+/// bd rc-7e681 acceptance (b) verbatim: an integer bound into a TEXT column
+/// must store the correctly-cast decimal text, never the int8 wire bytes read
+/// back as ASCII — `3544952156018063160`'s bytes ARE the digits `"12345678"`.
+///
+/// BASELINE: FAILING pre-fix (RED; expected — turns green in Task 1.6).
+/// RED (pre-fix: the described-TEXT named statement bound item 0's int8
+/// bytes as the TEXT value "12345678"; item 1's int8 bytes for `123` were
+/// rejected with PG `invalid byte sequence for encoding "UTF8": 0x00`, so
+/// the batch failed and its transaction rolled back).
+/// Post-fix: the planner moves the ineligible Text×number position to the
+/// alias BIGINT argument, whose server-side assignment cast stores
+/// `"3544952156018063160"` and `"123"` — no wire bytes, no NULs.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_text_column_int_stores_correctly_cast_value() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t2 (id BIGSERIAL PRIMARY KEY, txt TEXT)",
+    )
+    .await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:INSERT INTO sqlbinds_t2 (txt) VALUES (#)?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+    run_batch_route(
+        &h,
+        "sqlbinds-text-int",
+        50,
+        serde_json::json!([[3544952156018063160i64], [123]]),
+        &endpoint,
+    )
+    .await;
+    h.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h, "text-column int batch outcome").await;
+    h.stop().await;
+
+    if let Err(error) = outcome {
+        panic!("integer payload into a TEXT column must succeed via the server cast: {error}");
+    }
+
+    let stored = read_single_text_col(&pool, "SELECT txt::text FROM sqlbinds_t2 ORDER BY id").await;
+    assert_eq!(
+        stored,
+        vec!["3544952156018063160".to_string(), "123".to_string()],
+        "stored text must be the decimal representation of the JSON numbers"
+    );
+    assert!(
+        !stored.iter().any(|s| s == "12345678"),
+        "int8 wire bytes were stored as ASCII text: {stored:?}"
+    );
+    assert!(
+        !stored
+            .iter()
+            .any(|s| s.contains('\u{1}') || s.contains('\u{0}')),
+        "raw wire bytes leaked into the TEXT column: {stored:?}"
+    );
+}
+
+/// A numeric payload under an explicit `::text` cast feeding a BIGINT column:
+/// text→bigint has no assignment cast, so PG 42804 fires at PREPARE. The
+/// batch must fail with the prepare-time wrapper and commit nothing.
+///
+/// defense-in-depth (pre-fix: already loud — the described-TEXT probe of
+/// `VALUES ($1::text)` into BIGINT raises PG 42804
+/// (`column "n" is of type bigint but expression is of type text`) and the
+/// batch fails through `Batch query prepare failed: …` with zero rows;
+/// post-fix the same failure arrives through the planner's batch probe).
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_text_described_number_cast_or_loud_never_silent() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t3 (id BIGSERIAL PRIMARY KEY, n BIGINT)",
+    )
+    .await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:INSERT INTO sqlbinds_t3 (n) VALUES (#::text)?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+    run_batch_route(
+        &h,
+        "sqlbinds-text-cast",
+        50,
+        serde_json::json!([[3544952156018063160i64]]),
+        &endpoint,
+    )
+    .await;
+    h.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h, "text-cast number batch outcome").await;
+    h.stop().await;
+
+    match outcome {
+        Ok(()) => panic!(
+            "a number bound through an explicit ::text cast into BIGINT must fail loudly, batch succeeded"
+        ),
+        Err(error) => {
+            assert!(
+                error.contains("Batch query prepare failed"),
+                "expected the prepare-time wrapper, got {error}"
+            );
+            assert!(
+                error.contains("bigint"),
+                "expected the PG cast error naming the BIGINT target, got {error}"
+            );
+        }
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlbinds_t3")
+        .fetch_one(&pool)
+        .await
+        .expect("count sqlbinds_t3");
+    assert_eq!(count, 0, "failed batch must commit no rows");
+}
+
+/// A bool payload at a described BOOL position binds as a bool (route A),
+/// while a bool under a pinned TEXT position (`#::text`) must store the
+/// server cast `"true"` — never the 0x01 wire byte as TEXT "\u{1}".
+///
+/// BASELINE: FAILING pre-fix (RED; expected — turns green in Task 1.6).
+/// RED (pre-fix: route A stored `true` at the described BOOL position, but
+/// route B bound the raw 0x01 bool byte under the described-TEXT statement
+/// and stored "\u{1}" instead of "true").
+/// Post-fix: the BOOL position binds a real bool (`true`), while the
+/// ineligible Bool×TEXT position executes on the alias with a BOOLEAN
+/// argument and stores the server cast `"true"` — never the 0x01 byte.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_bool_payload_casts_not_reinterprets() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t4 (id BIGSERIAL PRIMARY KEY, txt TEXT)",
+    )
+    .await;
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t5 (id BIGSERIAL PRIMARY KEY, b BOOLEAN)",
+    )
+    .await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    // `execute_batch` parses ONE template for all rows, so the two payload
+    // shapes need two routes on two endpoints.
+    let bool_endpoint = format!(
+        "sql:INSERT INTO sqlbinds_t5 (b) VALUES (#)?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+    let text_endpoint = format!(
+        "sql:INSERT INTO sqlbinds_t4 (txt) VALUES (#::text)?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+    run_batch_route(
+        &h,
+        "sqlbinds-bool-col",
+        50,
+        serde_json::json!([[true]]),
+        &bool_endpoint,
+    )
+    .await;
+    run_batch_route(
+        &h,
+        "sqlbinds-bool-text",
+        300,
+        serde_json::json!([[true]]),
+        &text_endpoint,
+    )
+    .await;
+    h.start().await;
+
+    wait_for_mock_exchanges(h.mock(), "result", 2).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("bool batches must succeed: {:?}", errors[0].error);
+        }
+    }
+
+    let stored_bool: bool = sqlx::query_scalar("SELECT b FROM sqlbinds_t5 ORDER BY id")
+        .fetch_one(&pool)
+        .await
+        .expect("read sqlbinds_t5.b");
+    assert!(stored_bool, "boolean payload at BOOL must store true");
+
+    let stored = read_single_text_col(&pool, "SELECT txt::text FROM sqlbinds_t4 ORDER BY id").await;
+    assert_eq!(
+        stored,
+        vec!["true".to_string()],
+        "bool payload under TEXT must cast to \"true\""
+    );
+    assert!(
+        !stored.iter().any(|s| s.contains('\u{1}')),
+        "the 0x01 bool wire byte surfaced as TEXT: {stored:?}"
+    );
+}
+
+/// A hybrid batch (a number at a pinned TEXT position + 2^53 at the described
+/// DOUBLE position) must keep the described DOUBLE target on the alias and
+/// still trip the typed 2^53 guard at parameter 1, committing nothing.
+///
+/// defense-in-depth (pre-fix: already green — the described-mode batch keeps
+/// the described DOUBLE target and fires `Batch item 0, parameter 1:
+/// integer value 9007199254740993 exceeds 2^53 and would lose precision
+/// bound as f64` with zero rows; post-fix the ineligible Text×number
+/// position moves the item to the alias, whose probe-kept DOUBLE target
+/// fires the same typed error).
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_hybrid_keeps_described_float_guard_on_alias() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t6 (id BIGSERIAL PRIMARY KEY, txt TEXT, a DOUBLE PRECISION, k INTEGER)",
+    )
+    .await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:INSERT INTO sqlbinds_t6 (txt, a, k) VALUES (#::text, #, #)?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+    run_batch_route(
+        &h,
+        "sqlbinds-hybrid-float",
+        50,
+        serde_json::json!([[7, 9007199254740993i64, 1]]),
+        &endpoint,
+    )
+    .await;
+    h.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h, "hybrid 2^53 batch outcome").await;
+    h.stop().await;
+
+    match outcome {
+        Ok(()) => {
+            panic!("2^53 at the described DOUBLE position must be the typed error, batch succeeded")
+        }
+        Err(error) => {
+            assert!(
+                error.contains("Batch item 0, parameter 1"),
+                "expected the typed error at parameter 1, got {error}"
+            );
+            assert!(
+                error.contains(
+                    "integer value 9007199254740993 exceeds 2^53 and would lose precision bound as f64"
+                ),
+                "expected the pinned 2^53 message, got {error}"
+            );
+        }
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlbinds_t6")
+        .fetch_one(&pool)
+        .await
+        .expect("count sqlbinds_t6");
+    assert_eq!(count, 0, "failed batch must commit no rows");
+}
+
+/// bd rc-7e681 defect 1 and the variable-length IN regression: every distinct
+/// resolved SQL shape describes its own positions (the `a` bind shifts from
+/// `$3` to `$4` when the list grows), and per-shape described targets survive
+/// the whole-batch alias fallback. The control batch is a successful hybrid
+/// batch; the failing batch puts 2^53 at item 1's kept DOUBLE position and
+/// must write nothing.
+///
+/// BASELINE: FAILING pre-fix (RED; expected — turns green in Task 1.6).
+/// RED (pre-fix: the per-shape IN resolution works and the failing leg
+/// already errors at `Batch item 1, parameter 3`, but the control leg
+/// corrupts item 2 — the bool at the TEXT shape position stores "\u{1}"
+/// where the alias cast must store "true").
+/// Post-fix: the control batch keeps every described DOUBLE target
+/// (`a = 2.5` on all four rows) and stores `"true"` for item 2's bool at
+/// k=3; the failing leg still fires `Batch item 1, parameter 3: … exceeds
+/// 2^53` and rolls the whole batch back (no `y`/`z`, `a` unchanged).
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_in_shapes_track_per_shape_targets() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t7 (id BIGSERIAL PRIMARY KEY, k INTEGER, txt TEXT, a DOUBLE PRECISION)",
+    )
+    .await;
+    sqlx::query(
+        "INSERT INTO sqlbinds_t7 (k, txt, a) VALUES (1, 'seed', 2.5), (2, 'seed', 2.5), (3, 'seed', 2.5), (4, 'seed', 2.5)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed sqlbinds_t7");
+
+    let endpoint = format!(
+        "sql:UPDATE sqlbinds_t7 SET txt = :#body.0 WHERE k IN (:#in:body.1) AND a = :#body.2?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+
+    // Control: a successful HYBRID batch. Item 2 binds a bool at the TEXT
+    // position (ineligible), so the whole batch executes on the alias while
+    // every described numeric target is kept.
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    run_batch_route(
+        &h,
+        "sqlbinds-in-control",
+        50,
+        serde_json::json!([["x", [1], 2.5], ["x", [2, 4], 2.5], [true, [3], 2.5]]),
+        &endpoint,
+    )
+    .await;
+    h.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h, "variable-length-IN control batch outcome").await;
+    h.stop().await;
+
+    if let Err(error) = outcome {
+        panic!("control hybrid batch must succeed: {error}");
+    }
+
+    let control = read_in_shape_state(&pool).await;
+    assert_eq!(
+        control.len(),
+        4,
+        "control batch must touch all four seed rows"
+    );
+    let txt_of = |state: &[(i64, String, f64)], k: i64| {
+        state
+            .iter()
+            .find(|(row_k, _, _)| *row_k == k)
+            .map(|(_, txt, _)| txt.clone())
+            .unwrap_or_else(|| panic!("missing k={k}"))
+    };
+    for (k, _, a) in &control {
+        assert_eq!(
+            *a, 2.5,
+            "a corrupted at k={k} (per-shape DOUBLE target lost)"
+        );
+    }
+    assert_eq!(txt_of(&control, 1), "x");
+    assert_eq!(txt_of(&control, 2), "x");
+    assert_eq!(txt_of(&control, 4), "x");
+    assert_eq!(
+        txt_of(&control, 3),
+        "true",
+        "bool payload must cast to \"true\", never the 0x01 wire byte"
+    );
+
+    // Failing batch: item 1 puts 2^53 at its shape's described DOUBLE ($4 /
+    // zero-based binder index 3). Item 2's bool at TEXT sends the whole batch
+    // to the alias, whose per-shape targets keep the DOUBLE guard.
+    let h2 = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h2.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    run_batch_route(
+        &h2,
+        "sqlbinds-in-failing",
+        50,
+        serde_json::json!([
+            ["y", [1], 2.5],
+            ["z", [2, 4], 9007199254740993i64],
+            [true, [3], 2.5],
+        ]),
+        &endpoint,
+    )
+    .await;
+    h2.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h2, "variable-length-IN failing batch outcome").await;
+    h2.stop().await;
+
+    match outcome {
+        Ok(()) => {
+            panic!("2^53 at item 1's kept DOUBLE position must be the typed error, batch succeeded")
+        }
+        Err(error) => {
+            assert!(
+                error.contains("Batch item 1, parameter 3"),
+                "expected the typed 2^53 error at item 1's shape position, got {error}"
+            );
+            assert!(
+                error.contains("exceeds 2^53"),
+                "expected the typed 2^53 guard, got {error}"
+            );
+        }
+    }
+
+    let after = read_in_shape_state(&pool).await;
+    for (k, _, a) in &after {
+        assert_eq!(*a, 2.5, "a changed at k={k} after the failed batch");
+    }
+    assert_eq!(
+        txt_of(&after, 1),
+        "x",
+        "item 0's eligible write must roll back with the failed batch"
+    );
+    assert_eq!(txt_of(&after, 3), "true");
+    assert!(
+        !after.iter().any(|(_, txt, _)| txt == "y" || txt == "z"),
+        "failed batch committed a write: {after:?}"
+    );
+}
+
+/// bd rc-0eiqm: a consumer `onConsume` raw persistent bind seeds an int8
+/// statement-cache entry on the shared pool; a batch on the SAME statement
+/// text must not bind through it. Both endpoints use the same named datasource
+/// (one connection), and the batch fires after the post-query row is
+/// confirmed, with no pool recycling.
+///
+/// BASELINE: FAILING pre-fix (RED; expected — turns green in Task 1.6).
+/// RED (pre-fix: the consumer's raw post-query int8 bind seeded the shared
+/// single connection's statement cache under `INSERT INTO sqlbinds_t8 (f)
+/// VALUES ($1)`; the batch's named prepare was a cache hit carrying BIGINT
+/// parameter metadata, so 9007199254740993 bound as int8 and the server's
+/// int8→float8 assignment cast stored it rounded — observed rows
+/// `[20.0, 9007199254740992.0]` and no typed error).
+/// Post-fix: the consumer post-query itself is planner-routed, so it no
+/// longer SEEDS a bind-derived entry — probe and read-back both report
+/// float8 and agree, and the typed `exceeds 2^53` error fires via the kept
+/// described DOUBLE target instead of an int8 bind; only the consumer's
+/// `20.0` rows exist. (A pre-upgrade BIGINT-seeded entry is neutralized by
+/// the probe-agreement rule — mismatch executes on the alias — exercised
+/// at the unit level by `later_unusable_shape_never_erases_described_
+/// guards`/`decide_path_aliases_on_disagreement`; no live integration test
+/// forces a disagreement on PG17, recorded as a residual in park-notes.)
+#[tokio::test(flavor = "multi_thread")]
+async fn consumer_post_query_seeded_entry_batch_2pow53_typed() {
+    use std::sync::Arc;
+
+    use camel_api::DatasourceCatalog;
+    use camel_component_sql::config::SqlGlobalConfig;
+    use camel_component_sql::pool_factory::SqlPoolFactory;
+    use camel_core::datasource::RuntimeDatasourceCatalog;
+
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t8 (id BIGSERIAL PRIMARY KEY, f DOUBLE PRECISION)",
+    )
+    .await;
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t8_src (id BIGSERIAL PRIMARY KEY, v BIGINT)",
+    )
+    .await;
+    sqlx::query("INSERT INTO sqlbinds_t8_src (v) VALUES (20)")
+        .execute(&pool)
+        .await
+        .expect("seed sqlbinds_t8_src");
+
+    // One shared datasource pool with a single connection: the consumer's
+    // post-query bind and the batch bind provably share the connection and its
+    // statement cache.
+    let mut configs = std::collections::HashMap::new();
+    configs.insert(
+        "pgkinds".to_string(),
+        camel_api::datasource::DatasourceConfig {
+            db_url: conn_str.clone(),
+            provider: Some("sqlx".to_string()),
+            max_connections: Some(1),
+            min_connections: Some(1),
+            idle_timeout_secs: None,
+            max_lifetime_secs: None,
+            ssl_mode: Some("disable".to_string()),
+            ssl_root_cert: None,
+            ssl_cert: None,
+            ssl_key: None,
+            extra: std::collections::HashMap::new(),
+        },
+    );
+    let catalog = RuntimeDatasourceCatalog::new(configs);
+    catalog
+        .register_factory("sqlx", Arc::new(SqlPoolFactory))
+        .expect("register sqlx pool factory");
+
+    let h = CamelTestContext::builder()
+        .with_direct()
+        .with_mock()
+        .with_component(SqlComponent::with_config_and_catalog(
+            SqlGlobalConfig::default(),
+            Arc::new(catalog),
+        ))
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    // Step 1: the raw persistent writer (`onConsume`) seeds a bind-derived
+    // int8 entry under `INSERT INTO sqlbinds_t8 (f) VALUES ($1)`.
+    // No `repeatCount`: the consumer's single poll loop keeps the shared pool
+    // open for the batch step. It re-reads the (never deleted) source row, so
+    // every poll writes the same 20.0 — harmless `max_connections=1` traffic.
+    let consumer_uri = "sql:SELECT id, v FROM sqlbinds_t8_src?datasource=pgkinds&delay=1000&initialDelay=50&onConsume=INSERT INTO sqlbinds_t8 (f) VALUES (:#v)";
+    let consumer_route = RouteBuilder::from(consumer_uri)
+        .to("mock:consumed")
+        .route_id("sqlbinds-postquery-seed")
+        .build()
+        .unwrap();
+    h.add_route(consumer_route).await.unwrap();
+
+    // Step 2: a batch on the same statement text, same pool, same connection.
+    let batch_endpoint = "sql:INSERT INTO sqlbinds_t8 (f) VALUES (#)?datasource=pgkinds&batch=true";
+    let batch_route = RouteBuilder::from("direct:sqlbinds-seeded-batch")
+        .to(batch_endpoint.to_string())
+        .to("mock:result")
+        .route_id("sqlbinds-seeded-batch")
+        .build()
+        .unwrap();
+    h.add_route(batch_route).await.unwrap();
+    h.start().await;
+
+    // CONFIRMED post-query completion before the batch fires.
+    let wait_pool = pool.clone();
+    wait_until(
+        "sqlbinds_t8 post-query row",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let pool = wait_pool.clone();
+            async move {
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlbinds_t8")
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(count >= 1)
+            }
+        },
+    )
+    .await
+    .expect("consumer post-query insert must complete");
+
+    let seeded_body = serde_json::json!([[9007199254740993i64]]);
+    send_to_direct_seam(
+        &h,
+        "direct:sqlbinds-seeded-batch",
+        Exchange::new(Message::new(Body::Json(seeded_body))),
+    )
+    .await;
+
+    let outcome = await_sqlbinds_outcome(&h, "seeded-entry batch 2^53 outcome").await;
+    h.stop().await;
+
+    let f_vals = read_single_f64_col(&pool, "SELECT f FROM sqlbinds_t8 ORDER BY id").await;
+    match outcome {
+        Ok(()) => panic!(
+            "expected the typed 2^53 error; the batch bound through the seeded cache entry (silent \
+             rounding). stored f values = {f_vals:?}"
+        ),
+        Err(error) => {
+            assert!(
+                error.contains("exceeds 2^53"),
+                "expected the typed 2^53 error, got {error}"
+            );
+        }
+    }
+    assert!(
+        !f_vals.is_empty(),
+        "the consumer's post-query row must exist before the batch assertion"
+    );
+    assert!(
+        f_vals.iter().all(|f| *f == 20.0),
+        "only the consumer's post-query rows (20.0) may exist; a rounded 2^53 row appeared: {f_vals:?}"
+    );
+    assert!(
+        !f_vals.contains(&9007199254740992.0),
+        "silently rounded 2^53 written: {f_vals:?}"
+    );
+}
+/// bd rc-0eiqm, consumer post-query directly: a JSON number > 2^53 collected
+/// from the polled row and bound by `onConsume` into a DOUBLE column must
+/// surface the typed 2^53 error (bridged to the route) and leave the target
+/// untouched — never an int8→float8 assignment-cast rounding.
+///
+/// BASELINE: FAILING pre-fix (RED; expected — turns green in Task 1.6).
+/// RED (pre-fix: the post-query's raw persistent int8 bind assigned into
+/// `f DOUBLE PRECISION` server-side and silently stored 9007199254740992.0;
+/// no error surfaced on `mock:error` or `mock:consumed` within 5 s —
+/// observed stored f = `[9007199254740992.0]`).
+/// Post-fix: the planner's typed rejection surfaces on the route as a
+/// pre-errored exchange — `parameter 0: integer value 9007199254740993
+/// exceeds 2^53 and would lose precision bound as f64` — and `f` keeps its
+/// seeded `0.0`.
+#[tokio::test(flavor = "multi_thread")]
+async fn consumer_post_query_number_at_float_is_typed() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t9 (id BIGSERIAL PRIMARY KEY, f DOUBLE PRECISION)",
+    )
+    .await;
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t9_src (id BIGSERIAL PRIMARY KEY, v BIGINT)",
+    )
+    .await;
+    sqlx::query("INSERT INTO sqlbinds_t9 (id, f) VALUES (1, 0.0)")
+        .execute(&pool)
+        .await
+        .expect("seed sqlbinds_t9 target");
+    sqlx::query("INSERT INTO sqlbinds_t9_src (v) VALUES (9007199254740993)")
+        .execute(&pool)
+        .await
+        .expect("seed sqlbinds_t9_src");
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let sql_uri = format!(
+        "sql:SELECT id, v FROM sqlbinds_t9_src?db_url={conn_str}&sslMode=disable&delay=100&initialDelay=50&repeatCount=1&breakBatchOnConsumeFail=true&bridgeErrorHandler=true&onConsume=UPDATE sqlbinds_t9 SET f = :#v WHERE id = 1"
+    );
+    let consumer_route = RouteBuilder::from(sql_uri.as_str())
+        .to("mock:consumed")
+        .route_id("sqlbinds-postquery-float")
+        .build()
+        .unwrap();
+    h.add_route(consumer_route).await.unwrap();
+    h.start().await;
+
+    let error_ep = h.mock().get_endpoint("error").expect("mock:error endpoint");
+    let consumed_ep = h
+        .mock()
+        .get_endpoint("consumed")
+        .expect("mock:consumed endpoint");
+    let wait_consumed = consumed_ep.clone();
+    // The bridged post-query failure arrives as a PRE-ERRORED exchange already
+    // inside the route (`bridgeErrorHandler=true`), so `mock:consumed` is its
+    // carrier — the same contract as `consumer_undecodable_column_fails_loudly`.
+    // The route's dead-letter channel only sees errors raised by route
+    // processors, so it cannot carry this one.
+    let witnessed = wait_until(
+        "post-query poisoned exchange",
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(100),
+        || {
+            let consumed_ep = wait_consumed.clone();
+            async move {
+                Ok(consumed_ep
+                    .get_received_exchanges()
+                    .await
+                    .iter()
+                    .any(|exchange| exchange.error.is_some()))
+            }
+        },
+    )
+    .await;
+    h.stop().await;
+
+    let errored: Vec<String> = consumed_ep
+        .get_received_exchanges()
+        .await
+        .iter()
+        .filter_map(|exchange| exchange.error.as_ref().map(ToString::to_string))
+        .collect();
+    // Diagnostic only: a consumer-raised failure delivered as a pre-errored
+    // exchange never reaches the dead-letter channel.
+    let dead_lettered = error_ep.get_received_exchanges().await.len();
+
+    let f_vals = read_single_f64_col(&pool, "SELECT f FROM sqlbinds_t9 ORDER BY id").await;
+    assert!(
+        !errored.is_empty(),
+        "expected the typed 2^53 post-query failure on the routed exchange; none surfaced \
+         (wait = {witnessed:?}, mock:error exchanges = {dead_lettered}). stored f values \
+         = {f_vals:?}"
+    );
+    assert!(
+        errored
+            .iter()
+            .any(|msg| msg.contains("parameter 0: integer value 9007199254740993 exceeds 2^53")),
+        "expected `parameter 0: integer value 9007199254740993 exceeds 2^53`, got {errored:?}"
+    );
+    assert_eq!(
+        f_vals,
+        vec![0.0],
+        "the failed post-query must not write; a rounded 2^53 value was stored"
+    );
+    assert!(
+        !f_vals.contains(&9007199254740992.0),
+        "silently rounded 2^53 written: {f_vals:?}"
+    );
+}
+
+/// A numeric payload at a described BOOL position must fail loudly: the alias
+/// BIGINT argument is rejected for the BOOLEAN column (PG 42804) and no row
+/// commits — it can never surface as a reinterpreted byte.
+///
+/// BASELINE: FAILING pre-fix (RED; expected — the pre-fix path was already
+/// loud but produced a different error text).
+/// RED (pre-fix: the named BOOL-described statement fails at execution with
+/// 22P03 `incorrect binary data format in bind parameter 1` instead of the
+/// pinned 42804; zero rows).
+/// Post-fix: the ineligible BOOL×number item executes on the alias, whose
+/// BIGINT argument is rejected at execution with `column "b" is of type
+/// boolean but expression is of type bigint`; still zero rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn batch_bool_column_int_payload_casts_or_fails_loudly() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_t10 (id BIGSERIAL PRIMARY KEY, b BOOLEAN)",
+    )
+    .await;
+
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let endpoint = format!(
+        "sql:INSERT INTO sqlbinds_t10 (b) VALUES (#)?db_url={conn_str}&sslMode=disable&batch=true"
+    );
+    run_batch_route(
+        &h,
+        "sqlbinds-bool-int",
+        50,
+        serde_json::json!([[7]]),
+        &endpoint,
+    )
+    .await;
+    h.start().await;
+
+    let outcome = await_sqlbinds_outcome(&h, "int-at-BOOL batch outcome").await;
+    h.stop().await;
+
+    match outcome {
+        Ok(()) => {
+            panic!("an integer payload at a BOOLEAN column must be rejected, batch succeeded")
+        }
+        Err(error) => {
+            assert!(
+                error.contains("boolean but expression is of type bigint"),
+                "expected the PG 42804 rejection for the BIGINT argument, got {error}"
+            );
+        }
+    }
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlbinds_t10")
+        .fetch_one(&pool)
+        .await
+        .expect("count sqlbinds_t10");
+    assert_eq!(count, 0, "rejected batch must commit no rows");
+}
+
+/// Passthrough: the polling consumer and the StreamList consumer stay green
+/// through the planner (the empty-bindings fast path), with unchanged bodies.
+///
+/// defense-in-depth (pre-fix: both legs already green — the poll delivers
+/// the row body unchanged and the drained StreamList NDJSON carries both
+/// rows; the planner's empty-bindings fast path must keep this).
+#[tokio::test(flavor = "multi_thread")]
+async fn consumer_poll_and_stream_stay_green_through_planner() {
+    install_crypto_provider();
+    let conn_str = shared_postgres_17().await.to_string();
+    let pool = create_pool(&conn_str).await;
+
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_tj_poll (id SERIAL PRIMARY KEY, name TEXT, value BIGINT)",
+    )
+    .await;
+    setup_table(
+        &pool,
+        "CREATE TABLE sqlbinds_tj_stream (id SERIAL PRIMARY KEY, name TEXT, value BIGINT)",
+    )
+    .await;
+    sqlx::query("INSERT INTO sqlbinds_tj_poll (name, value) VALUES ('PollRow', 900)")
+        .execute(&pool)
+        .await
+        .expect("seed sqlbinds_tj_poll");
+    sqlx::query(
+        "INSERT INTO sqlbinds_tj_stream (name, value) VALUES ('StreamA', 1), ('StreamB', 2)",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed sqlbinds_tj_stream");
+
+    // Leg 1: plain polling consumer (consumer_polling shape).
+    let h = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    let poll_uri = format!(
+        "sql:SELECT * FROM sqlbinds_tj_poll WHERE name = 'PollRow'?db_url={conn_str}&sslMode=disable&delay=100&initialDelay=50&repeatCount=1"
+    );
+    let poll_route = RouteBuilder::from(poll_uri.as_str())
+        .to("mock:consumed")
+        .route_id("sqlbinds-poll-passthrough")
+        .build()
+        .unwrap();
+    h.add_route(poll_route).await.unwrap();
+    h.start().await;
+
+    wait_for_mock_exchanges(h.mock(), "consumed", 1).await;
+    h.stop().await;
+
+    if let Some(error_ep) = h.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("poll consumer had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let polled = h
+        .mock()
+        .get_endpoint("consumed")
+        .expect("mock:consumed endpoint")
+        .get_received_exchanges()
+        .await;
+    assert_eq!(polled.len(), 1, "repeatCount=1 must poll exactly once");
+    let body = match &polled[0].input.body {
+        Body::Json(v) => v,
+        other => panic!("poll body should be JSON, got {other:?}"),
+    };
+    assert_eq!(body.get("name").and_then(|v| v.as_str()), Some("PollRow"));
+    assert_eq!(body.get("value").and_then(|v| v.as_i64()), Some(900));
+
+    // Leg 2: StreamList consumer — one lazy NDJSON stream, drained to
+    // completion (the stream is lazy; mirror
+    // `streamlist_undecodable_column_is_typed`'s drain).
+    let h2 = CamelTestContext::builder()
+        .with_timer()
+        .with_mock()
+        .with_component(SqlComponent::new())
+        .build()
+        .await;
+    h2.ctx()
+        .lock() // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+        .await
+        .set_error_handler(ErrorHandlerConfig::dead_letter_channel("mock:error"))
+        .await;
+
+    // No `repeatCount`: finishing the poll loop stops the consumer and closes
+    // its pool before the lazy stream is drained. The first poll fires after
+    // `delay`, so it stays short; only the first emitted stream is drained.
+    let stream_uri = format!(
+        "sql:SELECT * FROM sqlbinds_tj_stream ORDER BY id?db_url={conn_str}&sslMode=disable&delay=1000&initialDelay=50&outputType=StreamList"
+    );
+    let stream_route = RouteBuilder::from(stream_uri.as_str())
+        .to("mock:consumed")
+        .route_id("sqlbinds-stream-passthrough")
+        .build()
+        .unwrap();
+    h2.add_route(stream_route).await.unwrap();
+    h2.start().await;
+
+    wait_for_mock_exchanges(h2.mock(), "consumed", 1).await;
+
+    let streamed = h2
+        .mock()
+        .get_endpoint("consumed")
+        .expect("mock:consumed endpoint")
+        .get_received_exchanges()
+        .await;
+    assert!(
+        !streamed.is_empty(),
+        "StreamList must emit at least one exchange holding the lazy stream"
+    );
+    let stream_body = match &streamed[0].input.body {
+        Body::Stream(stream_body) => stream_body.clone(),
+        other => panic!("Body should be a stream, got: {other:?}"),
+    };
+
+    use futures::StreamExt;
+    let mut guard = stream_body.stream.lock().await; // allow-test-wait: mock stored the exchange without draining; slot is unconsumed
+    let mut stream = guard.take().expect("stream slot must hold the lazy stream");
+    drop(guard);
+
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        buf.extend_from_slice(chunk.expect("stream chunk").as_ref());
+    }
+    h2.stop().await;
+
+    if let Some(error_ep) = h2.mock().get_endpoint("error") {
+        let errors = error_ep.get_received_exchanges().await;
+        if !errors.is_empty() {
+            panic!("stream consumer had errors: {:?}", errors[0].error);
+        }
+    }
+
+    let text = String::from_utf8(buf).expect("NDJSON stream is UTF-8");
+    let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "both streamed rows must arrive, got {text:?}"
+    );
+    assert!(
+        text.contains("StreamA") && text.contains("StreamB"),
+        "stream bodies changed: {text}"
+    );
+}

@@ -8,13 +8,23 @@
 
 use camel_component_api::CamelError;
 use sqlx::Any;
+use sqlx::AnyConnection;
+use sqlx::Either;
+use sqlx::Executor;
+use sqlx::SqlSafeStr;
 use sqlx::any::AnyArguments;
 use sqlx::any::AnyTypeInfoKind;
 use sqlx::query::Query;
+use tracing::warn;
 
 /// Binds JSON values to a sqlx query.
 ///
 /// Handles: Null, Bool, Number (i64/f64), String, Array/Object (serialized to JSON string).
+///
+/// Test-only: production sites go through the bind planner (`plan_binds` +
+/// `bind_single_item`/`bind_batch_item`), which keeps the raw binder behind
+/// this gate so the compiler rejects any new production caller.
+#[cfg(test)]
 pub(crate) fn bind_json_values<'q>(
     mut query: Query<'q, Any, AnyArguments>,
     values: &'q [serde_json::Value],
@@ -199,23 +209,6 @@ pub(crate) fn described_mode_eligible(
         }
         described_wire_family(*kind) == Some(payload_family)
     })
-}
-
-/// Target assembly for the hybrid fallback (bd rc-mn139).
-///
-/// Every described numeric target is kept, so the checked conversion guards
-/// still fire at positions the server described. Only positions without a
-/// described numeric target resolve from this message's bind scan.
-pub(crate) fn hybrid_fallback_targets(
-    described: &[Option<BindTarget>],
-    bindings: &[serde_json::Value],
-) -> Vec<Option<BindTarget>> {
-    let scanned = scan_bind_targets(&[bindings]);
-    described
-        .iter()
-        .enumerate()
-        .map(|(position, target)| target.or_else(|| scanned.get(position).copied().flatten()))
-        .collect()
 }
 
 /// A JSON value normalized for one parameter position's wire encoding.
@@ -509,6 +502,409 @@ fn bind_values_for_targets<'q>(
         };
     }
     Ok(query)
+}
+
+// ── Bind planner (bd rc-7e681, rc-0eiqm) ───────────────────────────────
+
+/// Which writer owns the statement. The mode selects the probe and fallback
+/// alias namespaces only (`/* {mode}-bind-kinds-probe */`,
+/// `/* {mode}-bind-kinds-fallback */`); it never changes the bind policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindMode {
+    Single,
+    Consumer,
+    Batch,
+}
+
+impl BindMode {
+    /// Suffix shared by this mode's probe and fallback aliases.
+    fn alias_suffix(self) -> &'static str {
+        match self {
+            BindMode::Single => "single",
+            BindMode::Consumer => "consumer",
+            BindMode::Batch => "batch",
+        }
+    }
+
+    /// Log subject for the describe stages. The consumer sites reuse the
+    /// single wording: they bound raw JSON before the planner migration.
+    fn log_subject(self) -> &'static str {
+        match self {
+            BindMode::Single | BindMode::Consumer => "Single",
+            BindMode::Batch => "Batch",
+        }
+    }
+
+    /// Error wrapper prefix for a failed prepare on this mode's text.
+    fn prepare_error_prefix(self) -> &'static str {
+        match self {
+            BindMode::Single | BindMode::Consumer => "SQL query prepare failed",
+            BindMode::Batch => "Batch query prepare failed",
+        }
+    }
+}
+
+/// One statement's planned binds: the SQL text to execute, whether the
+/// statement may stay in the pool's persistent statement cache, and the
+/// per-position wire encodings.
+pub(crate) struct BindPlan {
+    pub sql: String,
+    pub persistent: bool,
+    pub targets: Vec<Option<BindTarget>>,
+}
+
+/// Outcome of a describe probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProbeOutcome {
+    /// The server described the statement with these parameter kinds.
+    Described(Vec<AnyTypeInfoKind>),
+    /// No usable description: driver metadata error (kinds outside the
+    /// closed set, e.g. NUMERIC) or an empty parameter type list.
+    Unusable,
+}
+
+/// Probes a statement's parameter kinds on this mode's probe alias.
+///
+/// Prepares with empty parameter types so the server infers the parameter
+/// OIDs from the SQL text. The probe text is never bound against: when a
+/// type is unmapped the probe seeds a cache entry no payload can satisfy,
+/// and keeping it on its own text leaves the user's SQL namespace clean.
+async fn probe_kinds(
+    conn: &mut AnyConnection,
+    sql: &str,
+    mode: BindMode,
+) -> Result<ProbeOutcome, CamelError> {
+    let probe_sql = format!("{sql} /* {}-bind-kinds-probe */", mode.alias_suffix());
+    match Executor::prepare_with(
+        &mut *conn,
+        sqlx::AssertSqlSafe(probe_sql).into_sql_str(),
+        &[],
+    )
+    .await
+    {
+        Ok(statement) => match statement.parameters {
+            // An empty type list cannot drive normalization.
+            Some(Either::Left(types)) if !types.is_empty() => Ok(ProbeOutcome::Described(
+                types.iter().map(|type_info| type_info.kind()).collect(),
+            )),
+            _ => Ok(ProbeOutcome::Unusable),
+        },
+        // Metadata unavailable (e.g. NUMERIC columns have no Any mapping).
+        // Server and connection failures propagate unchanged.
+        Err(sqlx::Error::AnyDriverError(_)) => Ok(ProbeOutcome::Unusable),
+        Err(e) => {
+            // log-policy: handler-owned
+            // (category a: bind probe failure inside the bind planner)
+            warn!("{} describe probe failed: {}", mode.log_subject(), e);
+            Err(CamelError::ProcessorError(format!(
+                "{}: {e}",
+                mode.prepare_error_prefix()
+            )))
+        }
+    }
+}
+
+/// Prepares the real SQL text with empty parameter types and reads back the
+/// parameter kinds of the statement that actually executes.
+///
+/// On a cache hit the read-back kinds are the cached entry's actual OIDs —
+/// which is why the planner compares them against the probe: a disagreement
+/// means the entry was seeded by bind-derived OIDs (bd rc-0eiqm).
+///
+/// `batch_index` names the offending batch item in the prepare-failure log
+/// (`Batch describe failed at index {index}: {e}`); the single-statement
+/// callers pass `None` and keep `Single describe failed: {e}`.
+pub(crate) async fn readback_kinds(
+    conn: &mut AnyConnection,
+    sql: &str,
+    mode: BindMode,
+    batch_index: Option<usize>,
+) -> Result<Option<Vec<AnyTypeInfoKind>>, CamelError> {
+    let statement = Executor::prepare_with(
+        &mut *conn,
+        sqlx::AssertSqlSafe(sql.to_string()).into_sql_str(),
+        &[],
+    )
+    .await
+    .map_err(|e| {
+        // log-policy: handler-owned
+        // (category a: described prepare failure inside the bind planner)
+        match batch_index {
+            Some(index) => warn!(
+                "{} describe failed at index {}: {}",
+                mode.log_subject(),
+                index,
+                e
+            ),
+            None => warn!("{} describe failed: {}", mode.log_subject(), e),
+        }
+        CamelError::ProcessorError(format!("{}: {e}", mode.prepare_error_prefix()))
+    })?;
+
+    Ok(match statement.parameters {
+        Some(Either::Left(types)) if !types.is_empty() => {
+            Some(types.iter().map(|type_info| type_info.kind()).collect())
+        }
+        _ => None,
+    })
+}
+
+/// Alias targets from a shape's described targets and the message-wide scan.
+///
+/// Every described numeric target is kept, so the checked conversions still
+/// fire at positions the server described. Only positions without one
+/// resolve from `message_scan`, which is always the scan over ALL binding
+/// rows — never a per-shape scan: a per-shape scan would loosen the typed
+/// 2^53 guard into a silent server-side round.
+pub(crate) fn hybrid_fallback_targets_rows(
+    described: &[Option<BindTarget>],
+    message_scan: &[Option<BindTarget>],
+) -> Vec<Option<BindTarget>> {
+    described
+        .iter()
+        .enumerate()
+        .map(|(position, target)| target.or_else(|| message_scan.get(position).copied().flatten()))
+        .collect()
+}
+
+/// Whether the named statement's read-back kinds agree with the probe.
+///
+/// Compared on the RAW parameter kinds, position-wise: comparing mapped
+/// targets would hide a TEXT-versus-BOOL disagreement (both map to no
+/// target), which is exactly the poisoned-entry shape this check exists to
+/// catch. An unusable read-back never agrees.
+pub(crate) fn named_kinds_agree(
+    probe: &[AnyTypeInfoKind],
+    readback: Option<&[AnyTypeInfoKind]>,
+) -> bool {
+    readback.is_some_and(|readback| readback == probe)
+}
+
+/// Which bind path a planned statement takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BindPath {
+    /// The real SQL text stays persistent; the read-back supplies targets.
+    Named,
+    /// The fallback alias text runs unnamed (`persistent(false)`).
+    Alias,
+}
+
+/// Named only when the probe described the statement, every row passes the
+/// eligibility matrix, and the named read-back agrees with the probe.
+///
+/// On `Alias`, targets are the probe-derived hybrid targets when the probe
+/// is `Described`, or the message-wide scan when the probe is `Unusable`.
+pub(crate) fn decide_path(
+    probe: &ProbeOutcome,
+    rows_eligible: bool,
+    readback_agrees: bool,
+) -> BindPath {
+    if matches!(probe, ProbeOutcome::Described(_)) && rows_eligible && readback_agrees {
+        BindPath::Named
+    } else {
+        BindPath::Alias
+    }
+}
+
+/// Plans one statement's binds on the connection that will execute it.
+///
+/// All-empty bindings keep the default persistent path with no probe round
+/// trip. Otherwise the probe decides the mode: the named path is taken only
+/// when every row passes the eligibility matrix and the read-back agrees
+/// with the probe; both alias paths keep the probe's described numeric
+/// targets (hybrid) so the checked conversions still fire, and a statement
+/// with no usable description keeps the legacy message-wide scan.
+pub(crate) async fn plan_binds(
+    conn: &mut AnyConnection,
+    sql: &str,
+    rows: &[&[serde_json::Value]],
+    mode: BindMode,
+) -> Result<BindPlan, CamelError> {
+    // Nothing to reinterpret: keep the default persistent path, with no
+    // probe round trip.
+    if rows.iter().all(|row| row.is_empty()) {
+        return Ok(BindPlan {
+            sql: sql.to_string(),
+            persistent: true,
+            targets: vec![],
+        });
+    }
+
+    let probe = probe_kinds(&mut *conn, sql, mode).await?;
+    let message_scan = scan_bind_targets(rows);
+    let fallback_sql = format!("{sql} /* {}-bind-kinds-fallback */", mode.alias_suffix());
+
+    let ProbeOutcome::Described(kinds) = &probe else {
+        // Metadata unavailable: legacy scan on the alias, no described
+        // targets (an unusable probe never supplies guards).
+        return Ok(BindPlan {
+            sql: fallback_sql,
+            persistent: false,
+            targets: message_scan,
+        });
+    };
+
+    let described_targets = kinds
+        .iter()
+        .map(|kind| bind_target_from_any_kind(*kind))
+        .collect::<Vec<_>>();
+    let rows_eligible = rows.iter().all(|row| described_mode_eligible(kinds, row));
+
+    // An ineligible row goes straight to the alias, like the single path
+    // before the planner: no named prepare is issued for a statement that
+    // will not execute on its named text.
+    let readback = if rows_eligible {
+        readback_kinds(&mut *conn, sql, mode, None).await?
+    } else {
+        None
+    };
+    let readback_agrees = named_kinds_agree(kinds, readback.as_deref());
+
+    match decide_path(&probe, rows_eligible, readback_agrees) {
+        BindPath::Named => {
+            let Some(readback) = readback else {
+                // Unreachable by construction: `decide_path` selects `Named`
+                // only when the read-back agreed with the probe, and an
+                // unusable read-back never agrees. If the invariant ever
+                // breaks, take the safe direction — the alias text with
+                // own-OID binds — never probe targets on the named text.
+                debug_assert!(false, "Named path selected without an agreeing read-back");
+                return Ok(BindPlan {
+                    sql: fallback_sql,
+                    persistent: false,
+                    targets: hybrid_fallback_targets_rows(&described_targets, &message_scan),
+                });
+            };
+            let targets = readback
+                .iter()
+                .map(|kind| bind_target_from_any_kind(*kind))
+                .collect();
+            Ok(BindPlan {
+                sql: sql.to_string(),
+                persistent: true,
+                targets,
+            })
+        }
+        BindPath::Alias => Ok(BindPlan {
+            sql: fallback_sql,
+            persistent: false,
+            targets: hybrid_fallback_targets_rows(&described_targets, &message_scan),
+        }),
+    }
+}
+
+/// One distinct resolved SQL shape and the item indices that use it.
+pub(crate) struct ShapeGroup {
+    pub sql: String,
+    pub rows: Vec<usize>,
+}
+
+/// Groups item SQL texts into shapes, in first-appearance order.
+///
+/// IN-clause expansion rewrites `in (:list)` into one placeholder per
+/// element, so items of one batch can resolve to different SQL texts and
+/// every later parameter position shifts with the list length.
+pub(crate) fn group_rows_by_sql(sqls: &[String]) -> Vec<ShapeGroup> {
+    let mut groups: Vec<ShapeGroup> = Vec::new();
+    for (index, sql) in sqls.iter().enumerate() {
+        match groups.iter_mut().find(|group| &group.sql == sql) {
+            Some(group) => group.rows.push(index),
+            None => groups.push(ShapeGroup {
+                sql: sql.clone(),
+                rows: vec![index],
+            }),
+        }
+    }
+    groups
+}
+
+/// Probes every distinct shape once on its own batch probe alias.
+pub(crate) async fn probe_batch_shapes(
+    conn: &mut AnyConnection,
+    groups: &[ShapeGroup],
+) -> Result<Vec<ProbeOutcome>, CamelError> {
+    let mut probes = Vec::with_capacity(groups.len());
+    for group in groups {
+        probes.push(probe_kinds(&mut *conn, &group.sql, BindMode::Batch).await?);
+    }
+    Ok(probes)
+}
+
+/// How a batch item binds once the whole batch is decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ItemBindSource {
+    /// Named prepare plus read-back: the item's shape probe was described
+    /// and every row of that shape passes the eligibility matrix.
+    NamedReadBack,
+    /// Alias execution on the precomputed `alias_targets`.
+    AliasPlan,
+}
+
+/// One batch item's precomputed plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BatchItemPlan {
+    pub source: ItemBindSource,
+    pub alias_targets: Vec<Option<BindTarget>>,
+}
+
+/// Plans every batch item from its shape's probe and the message-wide scan.
+///
+/// The FIRST probe in `probes` selects the batch mode (today's semantics:
+/// the batch loop probed `prepared_items.first()`). An unusable first probe
+/// keeps the legacy message-wide scan for the whole batch — scan guards, no
+/// described guards. Otherwise each item is matrix-checked against its own
+/// shape's kinds: an eligible item stays `NamedReadBack`, while an
+/// ineligible row or a later unusable shape becomes `AliasPlan`.
+///
+/// `alias_targets` is precomputed for every item so the whole-batch rule
+/// (one `AliasPlan` item moves every item to its precomputed alias targets)
+/// executes exactly what production planned. An ineligible row on a usable
+/// probe keeps its shape's described numeric targets — mirroring the
+/// single-path precedence — while a later unusable shape contributes the
+/// message-wide scan alone, so neither order can erase an earlier shape's
+/// described guard.
+pub(crate) fn plan_batch_items(
+    probes: &[(String, ProbeOutcome)],
+    items: &[(String, Vec<serde_json::Value>)],
+    message_scan: &[Option<BindTarget>],
+) -> Vec<BatchItemPlan> {
+    let scan_only = || BatchItemPlan {
+        source: ItemBindSource::AliasPlan,
+        alias_targets: message_scan.to_vec(),
+    };
+
+    let legacy_scan = probes
+        .first()
+        .is_none_or(|(_, probe)| matches!(probe, ProbeOutcome::Unusable));
+    if legacy_scan {
+        return items.iter().map(|_| scan_only()).collect();
+    }
+
+    items
+        .iter()
+        .map(|(sql, bindings)| {
+            let Some((_, probe)) = probes.iter().find(|(shape, _)| shape == sql) else {
+                return scan_only();
+            };
+            let ProbeOutcome::Described(kinds) = probe else {
+                return scan_only();
+            };
+            let described_targets = kinds
+                .iter()
+                .map(|kind| bind_target_from_any_kind(*kind))
+                .collect::<Vec<_>>();
+            let alias_targets = hybrid_fallback_targets_rows(&described_targets, message_scan);
+            let source = if described_mode_eligible(kinds, bindings) {
+                ItemBindSource::NamedReadBack
+            } else {
+                ItemBindSource::AliasPlan
+            };
+            BatchItemPlan {
+                source,
+                alias_targets,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -866,6 +1262,82 @@ mod tests {
         }
 
         #[test]
+        fn every_matrix_cell_is_decided() {
+            use AnyTypeInfoKind::{
+                BigInt, Blob, Bool, Double, Integer, Null, Real, SmallInt, Text,
+            };
+
+            // spec.md closed matrix: numeric kinds accept every payload
+            // (typed errors fire at bind time, not at eligibility time);
+            // BOOL only Bool and Null; TEXT/BLOB only Text and Null; an
+            // unmapped Null kind only Null. No pair falls through to an
+            // implicit default.
+            let cases: &[(AnyTypeInfoKind, serde_json::Value, bool)] = &[
+                (SmallInt, json!(true), true),
+                (SmallInt, json!(1), true),
+                (SmallInt, json!("x"), true),
+                (SmallInt, json!(null), true),
+                (Integer, json!(true), true),
+                (Integer, json!(1), true),
+                (Integer, json!("x"), true),
+                (Integer, json!(null), true),
+                (BigInt, json!(true), true),
+                (BigInt, json!(1), true),
+                (BigInt, json!("x"), true),
+                (BigInt, json!(null), true),
+                (Real, json!(true), true),
+                (Real, json!(1), true),
+                (Real, json!("x"), true),
+                (Real, json!(null), true),
+                (Double, json!(true), true),
+                (Double, json!(1), true),
+                (Double, json!("x"), true),
+                (Double, json!(null), true),
+                (Bool, json!(true), true),
+                (Bool, json!(1), false),
+                (Bool, json!("x"), false),
+                (Bool, json!(null), true),
+                (Text, json!(true), false),
+                (Text, json!(1), false),
+                (Text, json!("x"), true),
+                (Text, json!(null), true),
+                (Blob, json!(true), false),
+                (Blob, json!(1), false),
+                (Blob, json!("x"), true),
+                (Blob, json!(null), true),
+                (Null, json!(true), false),
+                (Null, json!(1), false),
+                (Null, json!("x"), false),
+                (Null, json!(null), true),
+            ];
+            for (kind, payload, expected) in cases {
+                assert_eq!(
+                    described_mode_eligible(&[*kind], std::slice::from_ref(payload)),
+                    *expected,
+                    "eligibility for {kind:?} with payload {payload}"
+                );
+            }
+
+            // The pinned attack cells: a bool or a number at a described
+            // TEXT/BLOB position takes the hybrid alias, and a number or
+            // text at a described BOOL position does the same.
+            let attacks = [
+                (Text, json!(3544952156018063160i64)),
+                (Text, json!(true)),
+                (Blob, json!(3544952156018063160i64)),
+                (Blob, json!(true)),
+                (Bool, json!(3544952156018063160i64)),
+                (Bool, json!("x")),
+            ];
+            for (kind, payload) in attacks {
+                assert!(
+                    !described_mode_eligible(&[kind], std::slice::from_ref(&payload)),
+                    "attack cell {kind:?} with payload {payload} must be ineligible"
+                );
+            }
+        }
+
+        #[test]
         fn missing_described_kind_is_ineligible() {
             assert!(!described_mode_eligible(
                 &[AnyTypeInfoKind::Text],
@@ -880,13 +1352,20 @@ mod tests {
 
         #[test]
         fn described_numeric_targets_survive_the_fallback() {
+            let scan = |bindings: &[serde_json::Value]| scan_bind_targets(&[bindings]);
             assert_eq!(
-                hybrid_fallback_targets(&[Some(BindTarget::F64), None], &[json!(1), json!(2)]),
+                hybrid_fallback_targets_rows(
+                    &[Some(BindTarget::F64), None],
+                    &scan(&[json!(1), json!(2)]),
+                ),
                 vec![Some(BindTarget::F64), Some(BindTarget::I64)]
             );
-            assert_eq!(hybrid_fallback_targets(&[None], &[json!("x")]), vec![None]);
             assert_eq!(
-                hybrid_fallback_targets(&[None], &[json!(6.5)]),
+                hybrid_fallback_targets_rows(&[None], &scan(&[json!("x")])),
+                vec![None]
+            );
+            assert_eq!(
+                hybrid_fallback_targets_rows(&[None], &scan(&[json!(6.5)])),
                 vec![Some(BindTarget::F64)]
             );
         }
@@ -896,6 +1375,334 @@ mod tests {
             assert_eq!(
                 scan_bind_targets(&[&[json!(6.5)]]),
                 vec![Some(BindTarget::F64)]
+            );
+        }
+
+        #[test]
+        fn hybrid_rows_keep_described_numeric_targets() {
+            assert_eq!(
+                hybrid_fallback_targets_rows(
+                    &[Some(BindTarget::F64), None],
+                    &[None, Some(BindTarget::F64)],
+                ),
+                vec![Some(BindTarget::F64), Some(BindTarget::F64)]
+            );
+        }
+    }
+
+    // ── Bind planner path decision (bd rc-7e681, rc-0eiqm) ───────────
+
+    mod planner_path {
+        use super::*;
+
+        #[test]
+        fn named_kinds_agree_requires_raw_equality() {
+            // Mapped comparison would hide TEXT-versus-BOOL (both map to no
+            // target) — the poisoned-entry shape this check exists to catch.
+            assert!(!named_kinds_agree(
+                &[AnyTypeInfoKind::Double, AnyTypeInfoKind::Text],
+                Some(&[AnyTypeInfoKind::Double, AnyTypeInfoKind::Bool]),
+            ));
+            assert!(!named_kinds_agree(
+                &[AnyTypeInfoKind::Double, AnyTypeInfoKind::Integer],
+                Some(&[AnyTypeInfoKind::BigInt, AnyTypeInfoKind::Integer]),
+            ));
+            assert!(named_kinds_agree(
+                &[AnyTypeInfoKind::Double, AnyTypeInfoKind::Integer],
+                Some(&[AnyTypeInfoKind::Double, AnyTypeInfoKind::Integer]),
+            ));
+            assert!(!named_kinds_agree(&[AnyTypeInfoKind::Double], None));
+        }
+
+        #[test]
+        fn decide_path_aliases_on_disagreement() {
+            let described = ProbeOutcome::Described(vec![AnyTypeInfoKind::Double]);
+            assert_eq!(decide_path(&described, true, false), BindPath::Alias);
+            assert_eq!(decide_path(&described, true, true), BindPath::Named);
+            assert_eq!(decide_path(&described, false, true), BindPath::Alias);
+            assert_eq!(
+                decide_path(&ProbeOutcome::Unusable, true, true),
+                BindPath::Alias
+            );
+        }
+    }
+
+    // ── Batch shape planner (bd rc-7e681, rc-0eiqm) ──────────────────
+
+    mod batch_planner {
+        use super::*;
+        use serde_json::json;
+
+        fn probe_entries(entries: Vec<(&str, ProbeOutcome)>) -> Vec<(String, ProbeOutcome)> {
+            entries
+                .into_iter()
+                .map(|(sql, probe)| (sql.to_string(), probe))
+                .collect()
+        }
+
+        fn item_entries(
+            entries: Vec<(&str, Vec<serde_json::Value>)>,
+        ) -> Vec<(String, Vec<serde_json::Value>)> {
+            entries
+                .into_iter()
+                .map(|(sql, values)| (sql.to_string(), values))
+                .collect()
+        }
+
+        fn scan_only(message_scan: &[Option<BindTarget>]) -> BatchItemPlan {
+            BatchItemPlan {
+                source: ItemBindSource::AliasPlan,
+                alias_targets: message_scan.to_vec(),
+            }
+        }
+
+        #[test]
+        fn group_rows_by_sql_preserves_first_appearance() {
+            let sqls = ["A".to_string(), "B".to_string(), "A".to_string()];
+            let groups = group_rows_by_sql(&sqls);
+            assert_eq!(groups.len(), 2);
+            assert_eq!(groups[0].sql, "A");
+            assert_eq!(groups[0].rows, vec![0, 2]);
+            assert_eq!(groups[1].sql, "B");
+            assert_eq!(groups[1].rows, vec![1]);
+        }
+
+        #[test]
+        fn message_wide_scan_regression_two_shapes_share_float_guard() {
+            // Two shapes with no usable description: one carries a float at
+            // position 0, the other an integer above 2^53 at the same index.
+            let row_a = [json!(1.5)];
+            let row_b = [json!(9007199254740993i64)];
+            let rows: Vec<&[serde_json::Value]> = vec![row_a.as_slice(), row_b.as_slice()];
+            let message_scan = scan_bind_targets(&rows);
+            assert_eq!(message_scan, vec![Some(BindTarget::F64)]);
+
+            let probes = probe_entries(vec![
+                ("A", ProbeOutcome::Unusable),
+                ("B", ProbeOutcome::Unusable),
+            ]);
+            let items = item_entries(vec![
+                ("A", vec![json!(1.5)]),
+                ("B", vec![json!(9007199254740993i64)]),
+            ]);
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(plans.len(), 2);
+            // A per-shape scan would have given shape B `[Some(I64)]` and
+            // rounded silently; the message-wide guard is F64 for both.
+            for plan in &plans {
+                assert_eq!(plan.source, ItemBindSource::AliasPlan);
+                assert_eq!(plan.alias_targets, vec![Some(BindTarget::F64)]);
+            }
+
+            let err = normalize_for_target(
+                &json!(9007199254740993i64),
+                Some(BindTarget::F64),
+                BindCtx::BatchItem(1),
+                0,
+            )
+            .expect_err("the message-wide F64 guard must reject 2^53 + 1");
+            assert!(processor_message(&err).contains("2^53"), "got: {err}");
+        }
+
+        #[test]
+        fn plan_batch_items_mode_only() {
+            let probes = probe_entries(vec![
+                (
+                    "A",
+                    ProbeOutcome::Described(vec![
+                        AnyTypeInfoKind::Double,
+                        AnyTypeInfoKind::Integer,
+                    ]),
+                ),
+                ("B", ProbeOutcome::Described(vec![AnyTypeInfoKind::Text])),
+            ]);
+            let items = item_entries(vec![
+                ("A", vec![json!(2.5), json!(1)]),
+                ("B", vec![json!(123)]),
+            ]);
+            let plans = plan_batch_items(&probes, &items, &[None, None]);
+            assert_eq!(plans.len(), 2);
+            assert_eq!(
+                plans[0].source,
+                ItemBindSource::NamedReadBack,
+                "a described eligible shape stays on the named read-back path"
+            );
+            assert_eq!(
+                plans[1].source,
+                ItemBindSource::AliasPlan,
+                "a number at a described TEXT position is ineligible"
+            );
+        }
+
+        #[test]
+        fn batch_plan_keeps_described_double_on_alias() {
+            // Doubly dangerous: the shape's described DOUBLE position holds
+            // an integer above 2^53, and the shape is ineligible anyway
+            // (a number at its described TEXT position). The fallback to the
+            // alias must keep the described F64 target so the checked
+            // conversion fires; the message-wide scan supplies TEXT's
+            // position only because the probe maps it to no target.
+            let probes = probe_entries(vec![(
+                "S",
+                ProbeOutcome::Described(vec![AnyTypeInfoKind::Double, AnyTypeInfoKind::Text]),
+            )]);
+            let items = item_entries(vec![("S", vec![json!(9007199254740993i64), json!(123)])]);
+            let rows: Vec<&[serde_json::Value]> =
+                items.iter().map(|(_, values)| values.as_slice()).collect();
+            let message_scan = scan_bind_targets(&rows);
+            assert_eq!(
+                message_scan,
+                vec![Some(BindTarget::I64), Some(BindTarget::I64)]
+            );
+
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(
+                plans,
+                vec![BatchItemPlan {
+                    source: ItemBindSource::AliasPlan,
+                    alias_targets: vec![Some(BindTarget::F64), Some(BindTarget::I64)],
+                }],
+                "the described DOUBLE survives the alias fallback"
+            );
+
+            let err = match bind_batch_item(
+                sqlx::query("SELECT ?, ?"),
+                &items[0].1,
+                &plans[0].alias_targets,
+                0,
+            ) {
+                Ok(_) => panic!("the kept DOUBLE target must reject 2^53 + 1 on the alias"),
+                Err(err) => err,
+            };
+            assert_eq!(
+                processor_message(&err),
+                "Batch item 0, parameter 0: integer value 9007199254740993 exceeds 2^53 and would lose precision bound as f64"
+            );
+        }
+
+        #[test]
+        fn plan_batch_items_unusable_probe_is_alias_plan() {
+            let probes = probe_entries(vec![("N", ProbeOutcome::Unusable)]);
+            let items = item_entries(vec![("N", vec![json!(1), json!("x")])]);
+            let plans = plan_batch_items(&probes, &items, &[Some(BindTarget::I64), None]);
+            assert_eq!(
+                plans,
+                vec![BatchItemPlan {
+                    source: ItemBindSource::AliasPlan,
+                    alias_targets: vec![Some(BindTarget::I64), None],
+                }]
+            );
+        }
+
+        #[test]
+        fn first_unusable_probe_scans_whole_batch() {
+            let probes = probe_entries(vec![
+                ("A", ProbeOutcome::Unusable),
+                (
+                    "B",
+                    ProbeOutcome::Described(vec![
+                        AnyTypeInfoKind::Text,
+                        AnyTypeInfoKind::BigInt,
+                        AnyTypeInfoKind::Double,
+                    ]),
+                ),
+            ]);
+            let items = item_entries(vec![
+                ("A", vec![json!("x"), json!(1.5), json!(1)]),
+                (
+                    "B",
+                    vec![json!("y"), json!(9007199254740993i64), json!(2.5)],
+                ),
+            ]);
+            let rows: Vec<&[serde_json::Value]> =
+                items.iter().map(|(_, values)| values.as_slice()).collect();
+            let message_scan = scan_bind_targets(&rows);
+            assert_eq!(
+                message_scan,
+                vec![None, Some(BindTarget::F64), Some(BindTarget::F64)]
+            );
+
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(
+                plans,
+                vec![scan_only(&message_scan), scan_only(&message_scan)],
+                "an unusable FIRST probe keeps the legacy scan for every item"
+            );
+
+            // The legacy rejection survives: a kept BIGINT target would have
+            // silently accepted the integer.
+            let err = normalize_for_target(
+                &json!(9007199254740993i64),
+                Some(BindTarget::F64),
+                BindCtx::BatchItem(1),
+                1,
+            )
+            .expect_err("the scan's F64 guard must reject 2^53 + 1");
+            assert!(processor_message(&err).contains("2^53"), "got: {err}");
+            assert!(
+                normalize_for_target(
+                    &json!(9007199254740993i64),
+                    Some(BindTarget::I64),
+                    BindCtx::BatchItem(1),
+                    1,
+                )
+                .is_ok(),
+                "a kept BIGINT target would mask the 2^53 rejection"
+            );
+        }
+
+        #[test]
+        fn later_unusable_shape_never_erases_described_guards() {
+            // Reverse order: the usable shape is FIRST, the unusable NUMERIC
+            // shape is second. The message-wide scan sees INTEGER-only values
+            // at the guarded index, so scan-only selection would pick I64 and
+            // silently accept the 2^53 integer.
+            let probes = probe_entries(vec![
+                (
+                    "A",
+                    ProbeOutcome::Described(vec![
+                        AnyTypeInfoKind::Text,
+                        AnyTypeInfoKind::Double,
+                        AnyTypeInfoKind::Integer,
+                    ]),
+                ),
+                ("B", ProbeOutcome::Unusable),
+            ]);
+            let items = item_entries(vec![
+                ("A", vec![json!("x"), json!(9007199254740993i64), json!(1)]),
+                ("B", vec![json!(true), json!(9007199254740993i64), json!(1)]),
+            ]);
+            let message_scan = vec![None, Some(BindTarget::I64), Some(BindTarget::I64)];
+
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(plans.len(), 2);
+            // The first shape's described DOUBLE survives in its precomputed
+            // alias targets (the whole-batch rule then executes on them).
+            assert_eq!(plans[0].source, ItemBindSource::NamedReadBack);
+            assert_eq!(
+                plans[0].alias_targets,
+                vec![None, Some(BindTarget::F64), Some(BindTarget::I32)]
+            );
+            // The later unusable shape contributes scan-only alias targets.
+            assert_eq!(plans[1], scan_only(&message_scan));
+
+            let err = normalize_for_target(
+                &json!(9007199254740993i64),
+                Some(BindTarget::F64),
+                BindCtx::BatchItem(0),
+                1,
+            )
+            .expect_err("the kept DOUBLE target must reject 2^53 + 1");
+            assert!(processor_message(&err).contains("2^53"), "got: {err}");
+            assert!(
+                normalize_for_target(
+                    &json!(9007199254740993i64),
+                    Some(BindTarget::I64),
+                    BindCtx::BatchItem(0),
+                    1,
+                )
+                .is_ok(),
+                "scan-only I64 selection would silently accept the value"
             );
         }
     }
