@@ -220,7 +220,7 @@ rumqttc = { version = "0.34", package = "rumqttc-v4-next", default-features = fa
 # camel-component-rabbitmq; pre-existing workspace reachability via
 # camel-component-api/rustls defaults is tracked in bd rc-2bofp (master ruling 1).
 lapin = { version = "4.12", default-features = false, features = ["tokio", "rustls--ring", "rustls-native-certs"] }
-# SMTP client. Feature list verified against lettre 0.11.23's feature table:
+# SMTP client. Feature list verified against lettre 0.11.24's feature table:
 # `smtp-transport` = SMTP, `pool` = connection pool, `builder` = message
 # builder, `hostname` = local HELO name, `tokio1-rustls` = tokio executor +
 # rustls (no provider), `ring` = ring provider, `webpki-roots` = bundled roots.

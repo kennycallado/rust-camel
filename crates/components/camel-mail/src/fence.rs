@@ -246,15 +246,19 @@ mod tests {
 
     #[test]
     fn quoted_local_part_judged_by_real_domain() {
-        // lettre rejects quoted local parts, so the smuggling form never parses.
+        // lettre >= 0.11.24 parses the quoted local part correctly
+        // (RUSTSEC-2026-0563: before the fix the message went to a different
+        // address), so this form now reaches the fence. The probe is that the
+        // fence judges the REAL domain: @corp.test allows it, @evil.test does
+        // not, even though `evil.test` appears inside the quoted local part.
         let raw = "\"a@evil.test\"@corp.test";
-        for allow in ["@corp.test", "@evil.test"] {
-            let c = cfg(&format!(
-                "smtp://h?from=bot@corp.test&allowedRecipients={allow}"
-            ));
-            let e = resolve_recipients(&c, &hdr("CamelMailTo", raw)).unwrap_err();
-            assert!(matches!(e, MailError::RecipientFence(_)));
-        }
+        let c = cfg("smtp://h?from=bot@corp.test&allowedRecipients=@corp.test");
+        let r = resolve_recipients(&c, &hdr("CamelMailTo", raw)).expect("real domain is allowed");
+        assert_eq!(emails(&r.to), [raw]);
+
+        let c = cfg("smtp://h?from=bot@corp.test&allowedRecipients=@evil.test");
+        let e = resolve_recipients(&c, &hdr("CamelMailTo", raw)).unwrap_err();
+        assert!(matches!(e, MailError::RecipientFence(_)));
     }
 
     #[test]
