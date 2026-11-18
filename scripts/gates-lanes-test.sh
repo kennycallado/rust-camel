@@ -436,6 +436,37 @@ assert_out_count() {
     fi
 }
 
+# assert_out_lacks_re <extended-regex> — no stdout line matches it.
+assert_out_lacks_re() {
+    if grep -Eq -- "$1" "$OUT"; then
+        FAIL_DETAIL="stdout unexpectedly matches: $1"
+        return 1
+    fi
+}
+
+# assert_out_line <fixed-string> — an exact stdout LINE equals it.
+assert_out_line() {
+    if grep -Fxq -- "$1" "$OUT"; then
+        return 0
+    fi
+    FAIL_DETAIL="stdout has no exact line [$1]"
+    return 1
+}
+
+# assert_file_bytes <got> <want> — byte-identical files (cmp), for trace proofs.
+assert_file_bytes() {
+    local got="$1" want="$2" delta
+    if [[ ! -f "$got" ]]; then
+        FAIL_DETAIL="missing trace file: $got"
+        return 1
+    fi
+    if delta="$(cmp "$want" "$got" 2>&1)"; then
+        return 0
+    fi
+    FAIL_DETAIL="trace bytes differ: $delta (want $want, got $got)"
+    return 1
+}
+
 # ── cases ───────────────────────────────────────────────────────────────────
 # 1. touched crate with lane + tests/ -> the lane command executes verbatim.
 case_01() {
@@ -1608,6 +1639,450 @@ case_38() {
     assert_out_lacks '!! NO LANE for camel-b'
 }
 
+# ── registry parser (## QUALITY GATES) ──────────────────────────────────────
+# The registry phase extracts the fenced gate block under the first complete-line
+# `## QUALITY GATES` heading found OUTSIDE fences. These cases pin the hardened
+# parser: fence-interior headings never hijack extraction, hostile examples above
+# and below cannot widen or narrow the gate set, every malformed registry is a
+# NAMED exit 2 (file + line) with NO dispatch (validate-then-emit), and command
+# bytes reach `bash -c` verbatim. Byte-exactness is observed through
+# `$BASH_EXECUTION_STRING`, which carries the complete operand; `$BASH_COMMAND`
+# only names the running command and would truncate multi-line operands.
+
+# 39. a four-backtick doc example holding a complete-line `## QUALITY GATES`
+#     heading and a fake gate sits BEFORE the real section. Extraction must take
+#     the real section, so the fake gate never runs.
+case_39() {
+    fixture_new 39-registry-fenced-example-above || return 1
+    fixture_init_repo || return 1
+    cat >"$REPO/AGENTS.md" <<'EOF'
+# gates-lanes-test fixture
+
+## NOTES
+
+The fenced example below shows the registry shape. Its heading is example text:
+the four-backtick fence swallows the inner block.
+
+````
+## QUALITY GATES
+
+```
+- name: fake
+  run: 'true'
+```
+````
+
+## QUALITY GATES
+
+```
+- name: real
+  run: 'true'
+```
+EOF
+    fixture_base_commit || return 1
+    local headings fake_line real_line
+    headings="$(grep -Fxc '## QUALITY GATES' "$REPO/AGENTS.md")"
+    if [[ "$headings" -ne 2 ]]; then
+        FAIL_DETAIL="fixture is wrong: expected 2 complete-line ## QUALITY GATES headings, got $headings"
+        return 1
+    fi
+    if [[ "$(grep -Fxc '````' "$REPO/AGENTS.md")" -ne 2 ]]; then
+        FAIL_DETAIL="fixture is wrong: the four-backtick example does not open and close"
+        return 1
+    fi
+    fake_line="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | head -n1 | cut -d: -f1)"
+    real_line="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | tail -n1 | cut -d: -f1)"
+    if [[ -z "$fake_line" || -z "$real_line" || "$fake_line" -ge "$real_line" ]]; then
+        FAIL_DETAIL="fixture is wrong: fake heading ($fake_line) is not before the real heading ($real_line)"
+        return 1
+    fi
+    run_sweep GATES_LANES=0
+    assert_rc 0 || return 1
+    assert_out_has '=== real' || return 1
+    assert_out_has 'PASS real' || return 1
+    assert_out_lacks '=== fake' || return 1
+    assert_out_count '=== real' 1
+}
+
+# 40. hostile examples above AND below the real section: the gate set stays
+#     exactly the real one, in registry order, and each operand reaches bash
+#     byte-identically (quote/pipe bytes ride in a shell comment; the multi-line
+#     gate carries a literal backslash-n and a TAB inside a quoted argument).
+case_40() {
+    fixture_new 40-registry-hostile-above-and-below || return 1
+    fixture_init_repo || return 1
+    local T="$REPO/traces" tab=$'\t'
+    local g1 g2_l1 g2_l2
+    g1="printf '%s' \"\$BASH_EXECUTION_STRING\" > \"\$T\"/g1 # a|b\"c"
+    g2_l1="printf '%s' \"\$BASH_EXECUTION_STRING\" > \"\$T\"/g2; : 'x\n${tab}y'"
+    g2_l2="printf 'tail' >> \"\$T\"/g2"
+    {
+        printf '%s\n' '# gates-lanes-test fixture' ''
+        printf '%s\n' '## NOTES' ''
+        printf '%s\n' 'A hostile fenced example ABOVE the real section.' ''
+        printf '%s\n' '````' '## QUALITY GATES' '' '```' '- name: fakeabove' "  run: 'true'" '```' '````' ''
+        printf '%s\n' '## QUALITY GATES' '' '```'
+        printf '%s\n' '- name: g1' "  run: $g1"
+        printf '%s\n' '- name: g2' '  run: |'
+        printf '    %s\n' "$g2_l1" "$g2_l2"
+        printf '%s\n' '```' ''
+        printf '%s\n' '## NOTES' ''
+        printf '%s\n' 'A hostile fenced example BELOW the real section.' ''
+        printf '%s\n' '````' '## QUALITY GATES' '' '```' '- name: fakebelow' "  run: 'true'" '```' '````'
+    } >"$REPO/AGENTS.md" || return 1
+    mkdir -p "$T" || return 1
+    fixture_base_commit || return 1
+    # Expected operands: g1 is one line; g2 is L1, newline, L2 then the appended
+    # `tail` (both printfs carry no trailing newline, so the file is L1\nL2tail).
+    local want_g1="$BASE/expected-g1" want_g2="$BASE/expected-g2"
+    printf '%s' "$g1" >"$want_g1" || return 1
+    {
+        printf '%s\n' "$g2_l1"
+        printf '%s' "$g2_l2"
+        printf 'tail'
+    } >"$want_g2" || return 1
+    local headings fake_above real_line fake_below
+    headings="$(grep -Fxc '## QUALITY GATES' "$REPO/AGENTS.md")"
+    if [[ "$headings" -ne 3 ]]; then
+        FAIL_DETAIL="fixture is wrong: expected 3 complete-line ## QUALITY GATES headings, got $headings"
+        return 1
+    fi
+    if [[ "$(grep -Fxc '````' "$REPO/AGENTS.md")" -ne 4 ]]; then
+        FAIL_DETAIL="fixture is wrong: expected two closed four-backtick examples"
+        return 1
+    fi
+    fake_above="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | head -n1 | cut -d: -f1)"
+    real_line="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | sed -n 2p | cut -d: -f1)"
+    fake_below="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | tail -n1 | cut -d: -f1)"
+    if [[ -z "$fake_above" || -z "$real_line" || -z "$fake_below" ]] ||
+        [[ "$fake_above" -ge "$real_line" || "$real_line" -ge "$fake_below" ]]; then
+        FAIL_DETAIL="fixture is wrong: headings are not fakeabove ($fake_above) < real ($real_line) < fakebelow ($fake_below)"
+        return 1
+    fi
+    run_sweep GATES_LANES=0 T="$T"
+    assert_rc 0 || return 1
+    assert_out_has 'PASS g1' || return 1
+    assert_out_has 'PASS g2' || return 1
+    assert_out_order '=== g1' '=== g2' || return 1
+    assert_out_lacks '=== fakeabove' || return 1
+    assert_out_lacks '=== fakebelow' || return 1
+    assert_file_bytes "$T/g1" "$want_g1" || return 1
+    assert_file_bytes "$T/g2" "$want_g2" || return 1
+    assert_out_count '=== g1' 1
+}
+
+# 41. a `~~~` fence opened before the heading and never closed is a NAMED error
+#     (opening line named before the missing-section message) and nothing is
+#     dispatched — a fence swallowed the heading, so it was never a section.
+case_41() {
+    fixture_new 41-registry-unclosed-fence-above || return 1
+    fixture_init_repo || return 1
+    cat >"$REPO/AGENTS.md" <<'EOF'
+~~~
+intro
+
+## QUALITY GATES
+
+```
+- name: real
+  run: 'true'
+```
+EOF
+    fixture_base_commit || return 1
+    local open_line
+    open_line="$(grep -Fnx '~~~' "$REPO/AGENTS.md" | head -n1 | cut -d: -f1)"
+    if [[ -z "$open_line" ]]; then
+        FAIL_DETAIL="fixture is wrong: no ~~~ opener found"
+        return 1
+    fi
+    run_sweep GATES_LANES=0
+    assert_rc 2 || return 1
+    assert_err_has_re "unterminated fence at line +${open_line}([^0-9]|$)" || return 1
+    assert_err_has 'no ## QUALITY GATES section' || return 1
+    assert_out_lacks_re '^=== ' || return 1
+    assert_argv_empty
+}
+
+# 42. a NUL byte inside a `run:` payload is a named exit 2 BEFORE any dispatch:
+#     the valid first gate must not run (validate-then-emit).
+case_42() {
+    fixture_new 42-registry-nul-in-run-payload || return 1
+    fixture_init_repo || return 1
+    {
+        printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+        printf '%s\n' '- name: noop' "  run: 'true'" '- name: bad'
+        printf "  run: 'tr\0ue'\n"
+        printf '%s\n' '```'
+    } >"$REPO/AGENTS.md" || return 1
+    fixture_base_commit || return 1
+    local nul_line
+    nul_line="$(nul_line_of_agents)"
+    if [[ -z "$nul_line" ]]; then
+        FAIL_DETAIL="fixture is wrong: AGENTS.md carries no NUL byte"
+        return 1
+    fi
+    run_sweep GATES_LANES=0
+    assert_rc 2 || return 1
+    assert_err_has_re "NUL byte at line +${nul_line}([^0-9]|$)" || return 1
+    assert_out_lacks_re '^=== ' || return 1
+    assert_argv_empty
+}
+
+# 43. a literal TAB in a gate name is a field-injection vector on the TSV
+#     transport: it is a named exit 2 (file + line, mentions the name) and the
+#     gate never runs.
+case_43() {
+    fixture_new 43-registry-tab-in-name || return 1
+    fixture_init_repo || return 1
+    {
+        printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+        printf -- '- name: gate\tinject\n'
+        printf '%s\n' "  run: 'true'" '```'
+    } >"$REPO/AGENTS.md" || return 1
+    fixture_base_commit || return 1
+    if ! grep -Fq -- '- name: gate'$'\t''inject' "$REPO/AGENTS.md"; then
+        FAIL_DETAIL="fixture is wrong: the tab in the gate name did not survive"
+        return 1
+    fi
+    run_sweep GATES_LANES=0
+    assert_rc 2 || return 1
+    assert_err_has 'AGENTS.md' || return 1
+    assert_err_has_re '(line|row) +[0-9]+' || return 1
+    assert_err_has 'name' || return 1
+    assert_out_lacks_re '^=== ' || return 1
+    assert_argv_empty
+}
+
+# 44. grammar rejections, parameterized: every malformed registry is a named
+#     exit 2 with file + line/row and no dispatch.
+case_44() {
+    local tag
+    for tag in second-run continuation-before-run stray-line empty-name run-before-name no-run empty-run-value; do
+        fixture_new "44-${tag}" || return 1
+        fixture_init_repo || return 1
+        case "$tag" in
+        second-run)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' '- name: g' "  run: 'true'" "  run: 'false'" '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        continuation-before-run)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' '- name: g' '    early continuation' "  run: 'true'" '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        stray-line)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' '- name: g' 'not-a-gate-line' "  run: 'true'" '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        empty-name)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' '- name:' "  run: 'true'" '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        run-before-name)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' "  run: 'true'" '- name: g' '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        no-run)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' '- name: g' '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        empty-run-value)
+            {
+                printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+                printf '%s\n' '- name: g' '  run:' '```'
+            } >"$REPO/AGENTS.md" || return 1
+            ;;
+        esac
+        fixture_base_commit || return 1
+        run_sweep GATES_LANES=0
+        assert_rc 2 || return 1
+        assert_err_names_row 'AGENTS.md' || return 1
+        assert_out_lacks_re '^=== ' || return 1
+        assert_argv_empty || return 1
+        if [[ "$tag" == empty-run-value ]]; then
+            assert_err_has 'empty run' || return 1
+        fi
+    done
+}
+
+# 45. the registry twin of case 21: pipe, quotes, a literal backslash-n, a TAB,
+#     a UTF-8 byte and a shell line continuation all reach `bash -c` byte-exactly.
+case_45() {
+    fixture_new 45-registry-exotic-command || return 1
+    fixture_init_repo || return 1
+    local T="$REPO/traces" tab=$'\t'
+    local x1 x2 x3 x4
+    x1="printf '%s' \"\$BASH_EXECUTION_STRING\" > \"\$T\"/exotic"
+    x2="printf '%s\n' 'a${tab}b' > sed.in && sed 's/a\nb/x/' sed.in | tee 'out 1'.log"
+    x3="printf 'x' --flag=é \\"
+    x4="--more"
+    {
+        printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+        printf '%s\n' '- name: exotic' '  run: |'
+        printf '    %s\n' "$x1" "$x2" "$x3"
+        printf '    %s\n' "$x4"
+        printf '%s\n' '```'
+    } >"$REPO/AGENTS.md" || return 1
+    mkdir -p "$T" || return 1
+    fixture_base_commit || return 1
+    # Expected operand: four continuation lines joined by newlines, with the
+    # last line carrying no terminator (the parser strips its indentation).
+    local want="$BASE/expected-exotic"
+    {
+        printf '%s\n' "$x1"
+        printf '%s\n' "$x2"
+        printf '%s\n' "$x3"
+        printf '%s' "$x4"
+    } >"$want" || return 1
+    run_sweep GATES_LANES=0 T="$T"
+    assert_rc 0 || return 1
+    assert_file_bytes "$T/exotic" "$want" || return 1
+    assert_out_has 'PASS exotic'
+}
+
+# 46. registry scratch allocation failure is a named exit 2, not a silent pass
+#     or a raw mktemp error: a sweep-only mktemp stub fails every rung.
+case_46() {
+    fixture_new 46-registry-scratch-allocation-failure || return 1
+    fixture_init_repo || return 1
+    fixture_agents_preamble || return 1
+    fixture_base_commit || return 1
+    EXTRA_BIN="$BASE/stub-mktemp"
+    mkdir -p "$EXTRA_BIN" || return 1
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf '# Stub mktemp: the registry scratch ladder must fail through this.\n'
+        printf 'set -uo pipefail\n'
+        printf 'echo "stub mktemp: exploded on purpose" >&2\n'
+        printf 'exit 1\n'
+    } >"$EXTRA_BIN/mktemp" || return 1
+    chmod +x "$EXTRA_BIN/mktemp" || return 1
+    # Guard the stub: an mkdtemp that works would make this case meaningless.
+    if "$EXTRA_BIN/mktemp" -d >/dev/null 2>&1; then
+        FAIL_DETAIL="fixture is wrong: the mktemp stub succeeded"
+        return 1
+    fi
+    run_sweep GATES_LANES=0
+    assert_rc 2 || return 1
+    assert_err_has 'cannot create a scratch dir' || return 1
+    assert_err_has 'registry' || return 1
+    assert_out_lacks_re '^=== ' || return 1
+    assert_argv_empty
+}
+
+# 47. the SAME hostile fixture through BOTH parsers: the registry takes only its
+#     real gates block and the lanes phase only its real table, so the fake
+#     headings inside the four-backtick example never widen either surface.
+case_47() {
+    fixture_new 47-registry-and-lanes-same-hostile-input || return 1
+    fixture_init_repo || return 1
+    cat >"$REPO/AGENTS.md" <<'EOF'
+# gates-lanes-test fixture
+
+## NOTES
+
+The four-backtick example holds BOTH fake sections; neither is a section.
+
+````
+## QUALITY GATES
+
+```
+- name: fakereg
+  run: 'true'
+```
+
+## COMPONENT LANES
+
+```
+camel-fake | local | true
+```
+````
+
+## QUALITY GATES
+
+```
+- name: noop
+  run: 'true'
+```
+
+## COMPONENT LANES
+
+```
+camel-real | local | cargo test -p camel-real
+```
+EOF
+    crate_seed crates/real camel-real || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/real/src/lib.rs" || return 1
+    commit_work "touch real" || return 1
+    fixture_meta 'camel-real:crates/real:lib' || return 1
+    local fence_open fence_close fake_reg fake_lanes real_reg real_lanes
+    if [[ "$(grep -Fxc '````' "$REPO/AGENTS.md")" -ne 2 ]] ||
+        [[ "$(grep -Fxc '## QUALITY GATES' "$REPO/AGENTS.md")" -ne 2 ]] ||
+        [[ "$(grep -Fxc '## COMPONENT LANES' "$REPO/AGENTS.md")" -ne 2 ]]; then
+        FAIL_DETAIL="fixture is wrong: expected one closed four-backtick example holding both fake headings"
+        return 1
+    fi
+    fence_open="$(grep -Fnx '````' "$REPO/AGENTS.md" | head -n1 | cut -d: -f1)"
+    fence_close="$(grep -Fnx '````' "$REPO/AGENTS.md" | tail -n1 | cut -d: -f1)"
+    fake_reg="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | head -n1 | cut -d: -f1)"
+    real_reg="$(grep -Fnx '## QUALITY GATES' "$REPO/AGENTS.md" | tail -n1 | cut -d: -f1)"
+    fake_lanes="$(grep -Fnx '## COMPONENT LANES' "$REPO/AGENTS.md" | head -n1 | cut -d: -f1)"
+    real_lanes="$(grep -Fnx '## COMPONENT LANES' "$REPO/AGENTS.md" | tail -n1 | cut -d: -f1)"
+    if [[ -z "$fence_open" || -z "$fence_close" || -z "$fake_reg" || -z "$fake_lanes" ||
+        -z "$real_reg" || -z "$real_lanes" ]] ||
+        [[ "$fence_open" -ge "$fake_reg" || "$fake_reg" -ge "$fake_lanes" ||
+            "$fake_lanes" -ge "$fence_close" || "$fence_close" -ge "$real_reg" ||
+            "$real_reg" -ge "$real_lanes" ]]; then
+        FAIL_DETAIL="fixture is wrong: fake headings are not inside the example before both real headings"
+        return 1
+    fi
+    run_sweep
+    assert_rc 0 || return 1
+    assert_argv_exact 'test -p camel-real' || return 1
+    assert_out_has 'PASS noop' || return 1
+    assert_out_has 'PASS lane camel-real' || return 1
+    assert_out_lacks 'fakereg' || return 1
+    assert_out_lacks 'camel-fake' || return 1
+    assert_out_lacks 'PASS lane camel-fake :: true'
+}
+
+# 48. the registry summary counts pass/fail/skip exactly, and skip labels print
+#     in registry order (the `${skipped[*]}` append order, not GATES_SKIP order).
+case_48() {
+    fixture_new 48-registry-summary-counts || return 1
+    fixture_init_repo || return 1
+    {
+        printf '%s\n' '# gates-lanes-test fixture' '' '## QUALITY GATES' '' '```'
+        printf '%s\n' '- name: ok1' "  run: 'true'"
+        printf '%s\n' '- name: bad' "  run: 'false'"
+        printf '%s\n' '- name: ok2' "  run: 'true'"
+        printf '%s\n' '```'
+    } >"$REPO/AGENTS.md" || return 1
+    fixture_base_commit || return 1
+    run_sweep GATES_LANES=0
+    assert_rc_nonzero || return 1
+    assert_out_line 'passed:  2' || return 1
+    assert_out_line 'failed:  1 — bad' || return 1
+    assert_out_line 'skipped: 0' || return 1
+    assert_out_line 'ran:     3 of 3' || return 1
+    run_sweep GATES_LANES=0 GATES_SKIP="ok1 ok2 bad"
+    assert_rc 0 || return 1
+    assert_out_line 'skipped: 3 — ok1 bad ok2' || return 1
+    assert_out_line 'ran:     0 of 3'
+}
+
 # ── driver ──────────────────────────────────────────────────────────────────
 CASES=(
     "touched crate with lane + tests/ executes the lane"
@@ -1648,6 +2123,16 @@ CASES=(
     "tests/ on disk blocks even without a metadata test target"
     "no tests/ dir and lib-only metadata is not blocking"
     "a nested member's tests/ does not block the enclosing crate"
+    "registry: fenced example does not hijack extraction"
+    "registry: hostile example above AND below, gates exact"
+    "registry: unclosed fence before the heading is a named error"
+    "registry: NUL in a run payload is rejected"
+    "registry: tab in a gate name cannot inject fields"
+    "registry: grammar rejections are named, file+line"
+    "registry: exotic command reaches bash byte-identically"
+    "registry: scratch allocation failure is a named exit 2"
+    "registry and lanes: same hostile input, both parsers win"
+    "registry: summary counts on pass/fail/skip"
 )
 
 main() {

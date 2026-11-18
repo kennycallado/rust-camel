@@ -1,0 +1,34 @@
+fmt check	cargo fmt --check --all
+clippy	cargo clippy --workspace --all-features \\n--exclude camel-cli \\n--exclude camel-component-kafka \\n--exclude security-keycloak \\n--exclude security-wasm-policy \\n--all-targets \\n-- -D warnings\ncargo clippy -p camel-component-kafka --all-targets -- -D warnings\ncargo clippy -p camel-cli -- -D warnings\ncargo clippy -p camel-cli --no-default-features \\n--features flavor-regular,exec --all-targets -- -D warnings
+lint-unwrap	cargo xtask lint-unwrap
+lint-glob-imports	cargo xtask lint-glob-imports
+lint-unsafe-safety	cargo xtask lint-unsafe-safety
+lint-missing-docs-ratchet	cargo xtask lint-missing-docs-ratchet
+lint-secrets	cargo xtask lint-secrets
+lint-single-source	cargo xtask lint-single-source
+lint-non-exhaustive	cargo xtask lint-non-exhaustive
+lint-commits	git fetch origin main --depth=1\ncargo xtask changelog --check --from FETCH_HEAD --to HEAD
+lint-log-levels	cargo xtask lint-log-levels
+lint-log-redaction	cargo xtask lint-log-redaction
+lint-cancel-tokens	cargo xtask lint-cancel-tokens
+lint-test-sleep	cargo xtask lint-test-sleep
+lint-no-free-port	cargo xtask lint-no-free-port
+lint-no-raw-http-test-server	cargo xtask lint-no-raw-http-test-server
+lint-no-env-mutation-unguarded	cargo xtask lint-no-env-mutation-unguarded
+lint-unbounded-wait	cargo xtask lint-unbounded-wait
+lint-ignore	cargo xtask lint-ignore
+lint-publish-cycles	cargo xtask lint-publish-cycles
+lint-publish-registration	cargo xtask lint-publish-registration
+lint-component-deps	cargo xtask lint-component-deps
+lint-bridge-versions	cargo xtask lint-bridge-versions
+lint-bridge-releases	cargo xtask lint-bridge-versions --check-releases
+lint-gate-forwarding	cargo xtask lint-gate-forwarding
+lint-gate-parity	cargo xtask lint-gate-parity
+lint-no-deprecated	cargo xtask lint-no-deprecated
+lint-context-citations	cargo xtask lint-context-citations
+lint-metric-labels	cargo xtask lint-metric-labels
+lint-gates-lanes	bash scripts/gates-lanes-test.sh
+schema-check	cargo xtask schema --check
+doc-build	RUSTDOCFLAGS="-D warnings" cargo doc -p camel-api -p camel-core -p camel-builder -p camel-dsl -p camel-endpoint -p camel-component-api -p camel-component-validator -p camel-xslt --no-deps
+doc-guide-test	cd docs && mdbook test
+cargo-audit	cargo audit

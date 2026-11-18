@@ -55,72 +55,329 @@ PY_BIN="$(command -v python3 || command -v python || true)"
     exit 2
 }
 
-# The lane phase stages NUL-delimited git output in a scratch dir; the trap keeps
-# it from leaking on any exit path (including the fail-closed exit 2s).
+# The Markdown fence scanner shared by every AGENTS.md grammar block below:
+# fence recognition, heading discovery and table extraction live once here, so
+# the registry parser and the lanes parser cannot disagree about what counts as
+# a fence. A quoted heredoc is the only safe way to carry Python source, and it
+# cannot expand another variable, so a grammar that needs this scanner composes
+# `"$PY_COMMON"` + a newline + its own block and pipes the result to python3.
+# The scanner imports only `re` and `sys`; each grammar block defines the global
+# `name` (the file named in every message) before calling `fenced_section`.
+PY_COMMON="$(cat <<'PY'
+import re
+import sys
+
+# One scanner owns fence recognition, heading discovery and table extraction so
+# they cannot disagree: a four-backtick doc example that happens to contain a
+# section marker is example text, never the section.
+OPENER = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
+CLOSER = re.compile(r"^( {0,3})(`{3,}|~{3,})[ \t]*$")
+HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)")
+BAD_FIELD = re.compile(r"[\s\x00-\x1f\x7f]")
+
+
+def physical_lines(path):
+    """Physical Markdown lines only: LF is the sole line separator.
+
+    `str.splitlines()` also breaks on U+2028, U+2029, U+0085, VT and FF, which
+    would turn one table row into two rows and rewrite the command bytes bash
+    executes. `newline=""` disables universal-newline translation for the same
+    reason; stripping a single trailing CR is CRLF tolerance (the CR belongs to
+    the line terminator), and is the only byte after the command that may
+    disappear.
+    """
+    with open(path, encoding="utf-8", newline="") as handle:
+        lines = handle.read().split("\n")
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def opener(line):
+    """Return (fence character, run length) when `line` opens a fence."""
+    match = OPENER.match(line)
+    if not match:
+        return None
+    fence = match.group(2)
+    if fence[0] == "`" and "`" in match.group(3):
+        return None
+    return (fence[0], len(fence))
+
+
+def closes(line, char, length):
+    """Same character, run >= the opener's, and nothing but whitespace after."""
+    match = CLOSER.match(line)
+    if not match:
+        return False
+    fence = match.group(2)
+    return fence[0] == char and len(fence) >= length
+
+
+def fenced_section(lines, marker, label):
+    """Return (content, table_lineno) for the fenced table under `marker`.
+
+    `content` holds (lineno, raw) pairs from the fence body. Every exit 2
+    message names `label` (the caller's grammar) and the global `name` (the
+    file being parsed).
+    """
+    marker_heading = re.compile(re.escape(marker) + r"\s*")
+
+    state = "search"  # search -> heading -> table
+    fence = None
+    fence_lineno = None
+    section_lineno = None
+    table_lineno = None
+    content = []
+    closed = False
+
+    for i, line in enumerate(lines):
+        lineno = i + 1
+        if fence is not None:
+            if closes(line, fence[0], fence[1]):
+                if state == "table":
+                    closed = True
+                    break
+                fence = None
+                fence_lineno = None
+            elif state == "table":
+                content.append((lineno, line))
+            continue
+
+        opening = opener(line)
+        if opening is not None:
+            fence = opening
+            fence_lineno = lineno
+            if state == "heading":
+                state = "table"
+                table_lineno = lineno
+            continue
+
+        if state == "search":
+            # Complete-line heading, and only OUTSIDE a fence.
+            if marker_heading.fullmatch(line):
+                state = "heading"
+                section_lineno = lineno
+            continue
+
+        # state == "heading": an outside-fence heading of level <= 2 ends the
+        # section, so a fence in a LATER section is never the target table.
+        heading = HEADING.match(line)
+        if heading and len(heading.group(1)) <= 2:
+            break
+
+    if state == "search":
+        if fence is not None:
+            # A doc example (typically four backticks) opened before the section
+            # and never closed: name its opening line before the missing-section
+            # message, so the operator can see the real cause of the exit 2.
+            sys.stderr.write(
+                "gates-local: %s: unterminated fence at line %d in %s\n"
+                % (label, fence_lineno, name)
+            )
+        sys.stderr.write(
+            "gates-local: %s: no %s section in %s\n" % (label, marker, name)
+        )
+        sys.exit(2)
+    if state == "heading":
+        sys.stderr.write(
+            "gates-local: %s: no fenced table under %s (section at line %d) in %s\n"
+            % (label, marker, section_lineno, name)
+        )
+        sys.exit(2)
+    if not closed:
+        sys.stderr.write(
+            "gates-local: %s: unterminated fence at line %d under %s in %s\n"
+            % (label, fence_lineno, marker, name)
+        )
+        sys.exit(2)
+
+    return content, table_lineno
+PY
+)"
+
+# The registry phase stages its gate spool, and the lane phase stages
+# NUL-delimited git output, in scratch dirs; the trap keeps them from leaking on
+# any exit path (including the fail-closed exit 2s).
 lane_tmp=""
+registry_tmp=""
 lane_cleanup() {
     if [[ -n "$lane_tmp" && -d "$lane_tmp" ]]; then
         rm -rf "$lane_tmp"
     fi
+    if [[ -n "$registry_tmp" && -d "$registry_tmp" ]]; then
+        rm -rf "$registry_tmp"
+    fi
 }
 trap lane_cleanup EXIT
 
-mapfile -t GATES < <("$PY_BIN" - "$AGENTS" <<'PY'
-import re
-import sys
+# The registry grammar composes onto the shared scanner: the registry and the
+# lane phase cannot disagree about fences or headings. The program validates the
+# ENTIRE registry before emitting anything (validate-then-emit), then writes
+# NUL-delimited `name<TAB>command` records, so commands travel as raw bytes (a
+# literal `\n` sequence and a multi-line `run: |` block survive unchanged).
+registry_grammar="$(cat <<'PY'
+import os
 
-text = open(sys.argv[1], encoding="utf-8").read()
-start = text.index("## QUALITY GATES")
-block = text[start:]
-open_fence = block.index("```") + 3
-close_fence = block.index("```", open_fence)
-body = block[open_fence:close_fence]
+name = os.path.basename(sys.argv[1])
+marker = "## QUALITY GATES"
+
+try:
+    lines = physical_lines(sys.argv[1])
+except (OSError, UnicodeDecodeError, ValueError) as error:
+    # Input read and UTF-8 decode failures are NAMED, never a raw traceback.
+    sys.stderr.write(
+        "gates-local: registry: cannot read %s: %s\n" % (sys.argv[1], error)
+    )
+    sys.exit(2)
+
+content, block_lineno = fenced_section(lines, marker, "registry")
+
+# A NUL byte is a record-boundary split vector (`tr\0ue` becomes `true`): reject
+# it over the whole block BEFORE any grammar work.
+for lineno, raw in content:
+    if "\x00" in raw:
+        sys.stderr.write(
+            "gates-local: registry: NUL byte at line %d in %s %s\n"
+            % (lineno, name, marker)
+        )
+        sys.exit(2)
+
+NAME_ROW = re.compile(r"^- name:[ \t]+(.*)$")
+RUN_ROW = re.compile(r"^[ \t]+run:[ \t]*(.*)$")
+COMMENT_ROW = re.compile(r"^ {0,3}#")
+BAD_NAME = re.compile(r"[\t\x00-\x1f\x7f\x85\u2028\u2029]")
+
+
+def fail(message):
+    sys.stderr.write("gates-local: registry: %s\n" % message)
+    sys.exit(2)
+
+
+def cut_comment(value):
+    """Drop a YAML inline comment: `name: x   # note` -> `x`."""
+    marker_index = value.find("  #")
+    if marker_index != -1:
+        value = value[:marker_index]
+    return value
+
 
 gates = []
-name = None
-run = []
+gate = None
+name_lineno = None
+run_started = False
+run_lines = []
 run_sep = " "
 
 
-def strip_comment(value):
-    """Drop a YAML inline comment: `name: x   # note` -> `x`."""
-    marker = value.find("  #")
-    if marker != -1:
-        value = value[:marker]
-    return value.rstrip()
-
-
 def flush():
-    if name:
-        gates.append((name, run_sep.join(run).strip()))
+    if gate is None:
+        return
+    # Join with the gate's own separator and strip ASCII syntax padding only:
+    # `.strip()` would also erase U+00A0/U+2028 from the command bytes.
+    command = run_sep.join(run_lines).strip(" \t\r\n")
+    if not command:
+        fail(
+            "empty run for gate '%s' at line %d in %s %s"
+            % (gate, name_lineno, name, marker)
+        )
+    gates.append((gate, command))
 
 
-for line in body.splitlines():
-    m = re.match(r"^- name:\s*(.+?)\s*$", line)
-    if m:
+for lineno, raw in content:
+    row = NAME_ROW.match(raw)
+    if row:
         flush()
-        name, run, run_sep = strip_comment(m.group(1)).strip(), [], " "
+        value = cut_comment(row.group(1)).strip(" \t")
+        if not value:
+            fail("bad row at line %d in %s %s: %s" % (lineno, name, marker, raw))
+        if BAD_NAME.search(value):
+            # The name is the transport's first field: a tab or control byte
+            # would shift fields (today it is silently rewritten to a space).
+            fail("bad name at line %d in %s %s: %r" % (lineno, name, marker, value))
+        gate = value
+        name_lineno = lineno
+        run_started = False
+        run_lines = []
+        run_sep = " "
         continue
-    m = re.match(r"^\s+run:\s*(.*)$", line)
-    if m:
-        value = m.group(1)
+
+    row = RUN_ROW.match(raw)
+    if row:
+        if gate is None:
+            fail("run before name at line %d in %s %s" % (lineno, name, marker))
+        if run_started:
+            fail("second run at line %d in %s %s" % (lineno, name, marker))
+        value = row.group(1)
         if value[:1] in ("|", ">"):
-            # Literal/folded block: one shell command per line.
-            run, run_sep = [], "\n"
+            # Literal/folded block: one shell command per continuation line.
+            run_lines = []
+            run_sep = "\n"
         else:
             # Plain scalar wrapped over several lines: YAML folds with spaces.
-            run, run_sep = [strip_comment(value)], " "
+            run_lines = [cut_comment(value).strip(" \t")]
+            run_sep = " "
+        run_started = True
         continue
-    if name and line.startswith("    "):
-        continuation = line.strip()
-        if continuation:
-            run.append(continuation)
+
+    if raw.startswith("    "):
+        if gate is None:
+            fail("continuation before name at line %d in %s %s" % (lineno, name, marker))
+        if not run_started:
+            # A continuation before any `run:` is silently dropped today; name
+            # it through the bad-row catch-all instead.
+            fail("bad row at line %d in %s %s: %s" % (lineno, name, marker, raw))
+        segment = raw.strip(" \t")
+        if segment:
+            run_lines.append(segment)
+        continue
+
+    if not raw.strip(" \t"):
+        continue
+    if COMMENT_ROW.match(raw):
+        continue
+    fail("bad row at line %d in %s %s: %s" % (lineno, name, marker, raw))
+
 flush()
 
+out = sys.stdout.buffer
 for gate_name, command in gates:
-    print(gate_name.replace("\t", " ") + "\t" + command.replace("\n", "\\n"))
+    out.write(gate_name.encode() + b"\t" + command.encode() + b"\x00")
 PY
-)
+)"
+registry_py="$PY_COMMON
+$registry_grammar"
+
+# The gate spool needs a scratch dir before the parse: same $TMPDIR ladder as
+# the lane phase. The spool is removed BEFORE any dispatch (an in-crate scratch
+# dir must never survive into the lane phase's untracked-path scan); the EXIT
+# trap remains the error-path fallback.
+if [[ -n "${TMPDIR:-}" && -d "${TMPDIR}" ]]; then
+    registry_tmp="$(mktemp -d "${TMPDIR%/}/gates-local-registry.XXXXXX" 2>/dev/null)" || registry_tmp=""
+fi
+if [[ -z "$registry_tmp" && -d /home/shared/tmp ]]; then
+    registry_tmp="$(mktemp -d /home/shared/tmp/gates-local-registry.XXXXXX 2>/dev/null)" || registry_tmp=""
+fi
+if [[ -z "$registry_tmp" ]]; then
+    registry_tmp="$(mktemp -d 2>/dev/null)" || registry_tmp=""
+fi
+if [[ -z "$registry_tmp" ]]; then
+    echo "gates-local: registry: cannot create a scratch dir" >&2
+    exit 2
+fi
+
+# Checked handoff: `mapfile < <(…)` would swallow the producer's exit status and
+# let a failed parse yield an empty gate list. The spool is read only after the
+# producer exits 0, and removed before the first gate can run.
+if ! printf '%s' "$registry_py" | "$PY_BIN" - "$AGENTS" > "$registry_tmp/gates.nul"; then
+    echo "gates-local: registry: cannot stage the gate spool" >&2
+    exit 2
+fi
+if ! mapfile -d '' -t GATES < "$registry_tmp/gates.nul"; then
+    echo "gates-local: registry: cannot read the parsed gate spool" >&2
+    exit 2
+fi
+rm -rf "$registry_tmp" || {
+    echo "gates-local: registry: cannot remove the gate spool scratch" >&2
+    exit 2
+}
 
 [[ ${#GATES[@]} -gt 0 ]] || { echo "gates-local: parsed 0 gates from AGENTS.md" >&2; exit 2; }
 
@@ -136,7 +393,6 @@ fi
 for entry in "${GATES[@]}"; do
     name="${entry%%$'\t'*}"
     command="${entry#*$'\t'}"
-    command="${command//\\n/$'\n'}"
 
     if [[ " $SKIP " == *" $name "* ]]; then
         skipped+=("$name")
@@ -213,121 +469,15 @@ no_lane=()
 no_lane_blocking=0
 
 if [[ "$lane_phase" == on ]]; then
-    lane_table="$("$PY_BIN" - "$AGENTS" <<'PY'
+    lanes_grammar="$(cat <<'PY'
 import os
-import re
-import sys
 
 path = sys.argv[1]
 name = os.path.basename(path)
 marker = "## COMPONENT LANES"
 
-# One scanner owns fence recognition, heading discovery and table extraction so
-# they cannot disagree: a four-backtick doc example that happens to contain the
-# marker is example text, never the section.
-OPENER = re.compile(r"^( {0,3})(`{3,}|~{3,})(.*)$")
-CLOSER = re.compile(r"^( {0,3})(`{3,}|~{3,})[ \t]*$")
-HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+|$)")
-LANE_HEADING = re.compile(r"## COMPONENT LANES\s*")
-BAD_FIELD = re.compile(r"[\s\x00-\x1f\x7f]")
-
-# Physical Markdown lines only: LF is the sole line separator. `str.splitlines()`
-# also breaks on U+2028, U+2029, U+0085, VT and FF, which would turn one table
-# row into two rows and rewrite the command bytes bash executes. `newline=""`
-# disables universal-newline translation for the same reason; stripping a single
-# trailing CR is CRLF tolerance (the CR belongs to the line terminator), and is
-# the only byte after the command that may disappear.
-with open(path, encoding="utf-8", newline="") as handle:
-    lines = handle.read().split("\n")
-lines = [line[:-1] if line.endswith("\r") else line for line in lines]
-
-
-def opener(line):
-    """Return (fence character, run length) when `line` opens a fence."""
-    match = OPENER.match(line)
-    if not match:
-        return None
-    fence = match.group(2)
-    if fence[0] == "`" and "`" in match.group(3):
-        return None
-    return (fence[0], len(fence))
-
-
-def closes(line, char, length):
-    """Same character, run >= the opener's, and nothing but whitespace after."""
-    match = CLOSER.match(line)
-    if not match:
-        return False
-    fence = match.group(2)
-    return fence[0] == char and len(fence) >= length
-
-
-state = "search"  # search -> heading -> table
-fence = None
-fence_lineno = None
-section_lineno = None
-table_lineno = None
-content = []
-closed = False
-
-for i, line in enumerate(lines):
-    lineno = i + 1
-    if fence is not None:
-        if closes(line, fence[0], fence[1]):
-            if state == "table":
-                closed = True
-                break
-            fence = None
-            fence_lineno = None
-        elif state == "table":
-            content.append((lineno, line))
-        continue
-
-    opening = opener(line)
-    if opening is not None:
-        fence = opening
-        fence_lineno = lineno
-        if state == "heading":
-            state = "table"
-            table_lineno = lineno
-        continue
-
-    if state == "search":
-        # Complete-line heading, and only OUTSIDE a fence.
-        if LANE_HEADING.fullmatch(line):
-            state = "heading"
-            section_lineno = lineno
-        continue
-
-    # state == "heading": an outside-fence heading of level <= 2 ends the
-    # section, so a fence in a LATER section is never the lane table.
-    heading = HEADING.match(line)
-    if heading and len(heading.group(1)) <= 2:
-        break
-
-if state == "search":
-    if fence is not None:
-        # A doc example (typically four backticks) opened before the section and
-        # never closed: name its opening line before the missing-section
-        # message, so the operator can see the real cause of the exit 2.
-        sys.stderr.write(
-            "gates-local: lanes: unterminated fence at line %d in %s\n"
-            % (fence_lineno, name)
-        )
-    sys.stderr.write("gates-local: lanes: no %s section in %s\n" % (marker, name))
-    sys.exit(2)
-if state == "heading":
-    sys.stderr.write(
-        "gates-local: lanes: no fenced table under %s (section at line %d) in %s\n"
-        % (marker, section_lineno, name)
-    )
-    sys.exit(2)
-if not closed:
-    sys.stderr.write(
-        "gates-local: lanes: unterminated fence at line %d under %s in %s\n"
-        % (fence_lineno, marker, name)
-    )
-    sys.exit(2)
+lines = physical_lines(path)
+content, table_lineno = fenced_section(lines, marker, "lanes")
 
 rows = []
 for lineno, raw in content:
@@ -382,7 +532,10 @@ if not rows:
 for crate, mode, command in rows:
     print("%s\t%s\t%s" % (crate, mode, command))
 PY
-)" || exit 2
+)"
+    lanes_py="$PY_COMMON
+$lanes_grammar"
+    lane_table="$(printf '%s' "$lanes_py" | "$PY_BIN" - "$AGENTS")" || exit 2
 
     # Read each emitted row WHOLE (`IFS=`, no field splitting): `read -r crate
     # mode command` with `IFS=$'\t'` trims IFS whitespace from the line, which

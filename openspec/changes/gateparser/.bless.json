@@ -1,0 +1,11 @@
+{
+  "change": "gateparser",
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:c53b06fd2a7b5ced3a478b8c5a490c78f22c5b87fb48262854bf205cb745f840",
+  "expert": "experts/e_gpt",
+  "session": "ses_e0ffe0591ffe6B9aatRIiEp24t",
+  "date": "2026-11-18",
+  "rounds": 5,
+  "notes": "Supersedes spec bless (5f0f06d7). R1: case fn names must be case_%02d (driver contract), printf format-reuse probes, touch-vs-append fixture bug, argv log cannot observe registry dispatch (^=== oracle instead), spool cleanup before dispatch + mapfile rc named, evidence OUT of change dir (hash drift), REAL_BASH not /bin/bash, blob+count checks, full-sweep env -u x3 + 8-line tuple. R2: g2 printf single-arg fix (': ' carrier), red-run hook in COPIED harness (production trap unchanged), physical_lines named read/decode errors + named staging failure. R3: case/run-keyed evidence dirs (fixture_new resets RUN), rm -rf checked before dispatch. R4: stderr capture may be empty (pinned script writes zero stderr in hostile cases) — exist-yes, stdout non-empty + headers, numeric code. R5: BLESS. Reviewer loop r_glm APPROVE after 3 rounds (differential execution: plan grammar 34/34 byte-identical vs baseline; red predictions confirmed against old parser)."
+}

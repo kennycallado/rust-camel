@@ -1,0 +1,12 @@
+{
+  "change": "gateparser",
+  "kind": "holistic",
+  "verdict": "APPROVE",
+  "findings": [],
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e0fc4fa7affe0ZSf5TjAmTwyLm",
+  "date": "2026-11-18",
+  "impl_hash": "sha256:c53b06fd2a7b5ced3a478b8c5a490c78f22c5b87fb48262854bf205cb745f840",
+  "head_at_review": "bf93d8765",
+  "notes": "No findings. Two non-blocking notes: (1) lanes grammar lacks the named read/decode guard the registry now has — plan-pinned lanes behavior (38 cases byte-pin it), noted for a future lanes-hardening track, NOT this change; (2) reviewer's checkbox-history claim was factually wrong and re-verified clean (plan-bless commit has 0 checked boxes, each checkbox flipped in its own task commit). Independent verification: 48/48 harness, bash -n, AGENTS.md blob pin, step-6 canonical cmp sha 8c543fde reproduced from artifacts, step-7 sweep tuple == baseline (30/0/4, ran 30 of 34, lanes 0/0/0, no-lane 0, exit 0), red evidence audited, zone lease intact, commits conventional + changelog-excluded types."
+}
