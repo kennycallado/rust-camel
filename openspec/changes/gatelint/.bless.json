@@ -1,0 +1,11 @@
+{
+  "change": "gatelint",
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:ebb68869db08c4549ec225012791d36bce56e1a882e1881f4e1e81da63108a23",
+  "expert": "experts/e_gpt",
+  "session": "ses_e105a27aaffeYNZ1Im7kUuCsK5",
+  "date": "2026-11-18",
+  "rounds": 4,
+  "notes": "Supersedes spec bless. R1: checkpoint handoff, guarded restore (trap+cmp+exact exit-1 MISMATCH assertion), committed-content evidence. R2: worker must not commit/check off (reviewer needs real diff). R3: worker must not stage (plain git diff must show patch). R4: BLESS."
+}
