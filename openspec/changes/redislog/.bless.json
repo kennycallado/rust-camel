@@ -1,0 +1,32 @@
+{
+  "kind": "plan",
+  "change": "redislog",
+  "verdict": "BLESS-WITH-FIXES",
+  "blessed": true,
+  "expert": "experts/e_glm",
+  "session": null,
+  "session_note": "session id unavailable in escalation subagent context; evidence in .self-grill-plan.md",
+  "hash_pre_fix": "sha256:dba4a536eddbf914a2bf0ba62846d7049bfb2da91b65ee96fe4e44f0447ecd8a",
+  "hash_scope_note": "hash = canonical bless-hash.sh over the change dir (conductor-recomputed post-fix); expert's per-file tasks.md sha256 preserved below",
+  "hash": "sha256:155149b122298e1237a348256915daf9df611573e1bb832fcf3d16dbcaf9fde7",
+  "hash_tasks_md_expert": "sha256:c0ee3b47cc5a4c27118b692d6528cce6226247976aed1d92a38afe98bf0267d0",
+  "reviewer": "r_glm loop APPROVE-WITH-FINDINGS; both findings (debug import at streams.rs:36, rendered-identical wording + no re-inline) applied to tasks.md before blessing",
+  "fixes_applied": [
+    "tasks.md recovery_pass_with_claims_logs_info Expected line corrected: green before AND after (unconditional info! already satisfies every assertion for pending=0/claimed=1); recharacterized as the regression guard for the claimed>0 -> INFO branch; red-first proof lives in recovery_idle_pass_logs_debug_not_info"
+  ],
+  "verified": [
+    "import fix exact: streams.rs:36 is use tracing::{info, warn}; debug! not imported",
+    "move ordering: let claimed bound before queue.extend(batch.recovered) at streams.rs:1549; pending_count Option<u64> Copy, is_some_and safe pre-move",
+    "condition exact for all five (pending, claimed) classes incl. None -> idle DEBUG with '-' rendering",
+    "harness executable: spawn_core/recv_cmd/finish_ok/helper signatures match; empty recovered batch still yields one BatchDone (existing test proves); DEBUG captured by unfiltered registry layer; params key='stream' group='g'",
+    "acceptance machine-checkable: lint-log-levels only matches error! call sites; lint-log-redaction sensitive names exclude key/group/pending/stream; git-diff criterion reviewer-checked",
+    "mission constraints pinned: 2-file touch zone, step 4 loop-freeze, field names, '-' rendering, no metric/API/config, message text unchanged except idle line"
+  ],
+  "spec_bless_superseded": {
+    "verdict": "BLESS-WITH-FIXES",
+    "hash": "sha256:e936c4fb5babcf5b5eaa12effc9ee1fa7b81b67d8dcf6978f34d74e050eac363",
+    "date": "2026-11-18"
+  },
+  "date": "2026-11-18",
+  "order": "mission 597 owner override: blessings go to e_glm (2026-11-18)"
+}

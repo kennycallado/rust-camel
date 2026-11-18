@@ -33,7 +33,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::GroupStart;
 use crate::retry::transient_retry_step;
@@ -1538,13 +1538,23 @@ async fn recovery_pass(
                 let pending = batch
                     .pending_count
                     .map_or_else(|| "-".to_string(), |count| count.to_string());
-                info!(
-                    stream = %params.key,
-                    group = %params.group,
-                    pending = %pending,
-                    claimed = batch.recovered.len(),
-                    "Stream recovery pass completed"
-                );
+                let claimed = batch.recovered.len();
+                if claimed > 0 || batch.pending_count.is_some_and(|count| count > 0) {
+                    info!(
+                        stream = %params.key,
+                        group = %params.group,
+                        pending = %pending,
+                        claimed = claimed,
+                        "Stream recovery pass completed"
+                    );
+                } else {
+                    debug!(
+                        stream = %params.key,
+                        group = %params.group,
+                        pending = %pending,
+                        "Stream recovery pass idle"
+                    );
+                }
                 *cursor = batch.next_cursor.clone();
                 queue.extend(batch.recovered);
                 // A completed pass is the proven `XAUTOCLAIM` round trip,

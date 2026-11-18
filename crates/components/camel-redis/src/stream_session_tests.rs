@@ -3275,6 +3275,193 @@ async fn recovery_pass_logs_pending_count() {
         Some("0"),
         "the pass summary must carry the claimed count"
     );
+    assert_eq!(
+        summary.level, "INFO",
+        "the backlog diagnostic (pending>0, claimed=0) must stay at INFO"
+    );
+}
+
+#[tokio::test]
+async fn recovery_idle_pass_logs_debug_not_info() {
+    let (capture, _guard) = capture_logs();
+    let fake = FakeRecoveryIo::new().with_recover_batches(vec![recovery_batch(
+        Some(0),
+        Vec::new(),
+        "0-0",
+    )]);
+    let mut run = spawn_core(
+        Box::new(fake),
+        recovery_params(60_000),
+        CancellationToken::new(),
+        None,
+        |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+    );
+
+    run.msg_tx
+        .send(ReadTaskMsg::Connected)
+        .await
+        .expect("the session must accept Connected");
+    assert!(matches!(
+        recv_cmd(&mut run.cmd_rx).await,
+        ReadTaskCmd::BatchDone
+    ));
+    let result = finish_ok(run).await;
+    assert!(result.is_ok(), "session must end Ok: {result:?}");
+
+    let completed: Vec<CapturedEvent> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event.message.contains("recovery pass completed"))
+        .collect();
+    assert!(
+        completed.is_empty(),
+        "a pass with pending=0 and claimed=0 must not log the INFO summary: {completed:?}"
+    );
+
+    let idle: Vec<CapturedEvent> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event.message.contains("recovery pass idle"))
+        .collect();
+    assert_eq!(
+        idle.len(),
+        1,
+        "exactly one idle-pass event must be logged: {idle:?}"
+    );
+    let event = &idle[0];
+    assert_eq!(event.level, "DEBUG", "an idle pass must log at DEBUG");
+    assert_eq!(
+        event.field("stream"),
+        Some("stream"),
+        "the idle event must carry the stream key: {event:?}"
+    );
+    assert_eq!(
+        event.field("group"),
+        Some("g"),
+        "the idle event must carry the group: {event:?}"
+    );
+    assert_eq!(
+        event.field("pending"),
+        Some("0"),
+        "the idle event must carry the rendered pending count: {event:?}"
+    );
+}
+
+#[tokio::test]
+async fn recovery_pass_with_claims_logs_info() {
+    let (capture, _guard) = capture_logs();
+    let fake = FakeRecoveryIo::new().with_recover_batches(vec![recovery_batch(
+        Some(0),
+        vec![recovered("1-1", &[], Some(1))],
+        "1-1",
+    )]);
+    let mut run = spawn_core(
+        Box::new(fake),
+        recovery_params(60_000),
+        CancellationToken::new(),
+        None,
+        |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+    );
+
+    run.msg_tx
+        .send(ReadTaskMsg::Connected)
+        .await
+        .expect("the session must accept Connected");
+    assert!(matches!(
+        recv_cmd(&mut run.cmd_rx).await,
+        ReadTaskCmd::BatchDone
+    ));
+    let result = finish_ok(run).await;
+    assert!(result.is_ok(), "session must end Ok: {result:?}");
+
+    let completed: Vec<CapturedEvent> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event.message.contains("recovery pass completed"))
+        .collect();
+    assert_eq!(
+        completed.len(),
+        1,
+        "a pass with claimed>0 must log the INFO summary: {completed:?}"
+    );
+    let event = &completed[0];
+    assert_eq!(
+        event.level, "INFO",
+        "a pass that claimed entries must log at INFO"
+    );
+    assert_eq!(
+        event.field("stream"),
+        Some("stream"),
+        "the summary must carry the stream key: {event:?}"
+    );
+    assert_eq!(
+        event.field("group"),
+        Some("g"),
+        "the summary must carry the group: {event:?}"
+    );
+    assert_eq!(
+        event.field("pending"),
+        Some("0"),
+        "the summary must carry the rendered pending count: {event:?}"
+    );
+    assert_eq!(
+        event.field("claimed"),
+        Some("1"),
+        "the summary must carry the claimed count: {event:?}"
+    );
+
+    let idle: Vec<CapturedEvent> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event.message.contains("recovery pass idle"))
+        .collect();
+    assert!(
+        idle.is_empty(),
+        "a pass that claimed entries must not log the idle line: {idle:?}"
+    );
+}
+
+#[tokio::test]
+async fn recovery_idle_pass_without_pending_count_renders_dash() {
+    let (capture, _guard) = capture_logs();
+    let fake =
+        FakeRecoveryIo::new().with_recover_batches(vec![recovery_batch(None, Vec::new(), "0-0")]);
+    let mut run = spawn_core(
+        Box::new(fake),
+        recovery_params(60_000),
+        CancellationToken::new(),
+        None,
+        |_entry: StreamEntry| async { DeliveryOutcome::Completed },
+    );
+
+    run.msg_tx
+        .send(ReadTaskMsg::Connected)
+        .await
+        .expect("the session must accept Connected");
+    assert!(matches!(
+        recv_cmd(&mut run.cmd_rx).await,
+        ReadTaskCmd::BatchDone
+    ));
+    let result = finish_ok(run).await;
+    assert!(result.is_ok(), "session must end Ok: {result:?}");
+
+    let idle: Vec<CapturedEvent> = capture
+        .events()
+        .into_iter()
+        .filter(|event| event.message.contains("recovery pass idle"))
+        .collect();
+    assert_eq!(
+        idle.len(),
+        1,
+        "exactly one idle-pass event must be logged: {idle:?}"
+    );
+    let event = &idle[0];
+    assert_eq!(event.level, "DEBUG", "an idle pass must log at DEBUG");
+    assert_eq!(
+        event.field("pending"),
+        Some("-"),
+        "an absent pending count must render as '-': {event:?}"
+    );
 }
 
 #[tokio::test]
