@@ -30,26 +30,57 @@ where each key is used verbatim (no trimming or normalization; query
 parameters are significant and participate in exact matching) and each value
 carries exactly one action: `skipTo` (a `mock:` URI with a non-empty
 endpoint path that replaces the send before component resolution) or
-`divertCopyTo` (a `mock:` URI with a non-empty endpoint path that receives
-a copy while the real send continues). Documents declaring
+`divertCopyTo` (a `mock:` URI with a non-empty endpoint path that
+receives a copy while the real send continues). Documents declaring
 two or three route sources, or none, SHALL be rejected. Unknown fields
 SHALL be rejected, including inside intercept action objects. A scenario
 document MAY contain an optional `env` map and an optional ambient
 passthrough allowlist, per the integration-tier spec.
 
 Matcher grammar. Body matcher keys: `equals`, `regex`, `contains`,
-`startsWith`, `endsWith`, `exists`, `jsonSubset`. Header matcher keys:
+`startsWith`, `endsWith`, `exists`, `jsonSubset`, `jsonSchema`. Header matcher keys:
 `equals`, `regex`, `exists`. `exists` takes no argument (a `null` value).
 `jsonSubset` SHALL be an object mapping and applies to bodies only; it is
-a document error on a header value. An object whose sole key is
+a document error on a header value. `jsonSchema` SHALL be an object with a
+required non-empty string `path` and an optional `type` (`json` or `yaml`)
+and applies to bodies only; it is a document error on a header value; an
+unknown field inside the object, a missing or empty `path`, a null or
+non-string `type`, or an unknown `type` is a document error. Every `jsonSchema`
+rejection SHALL name the document field and the key. The `path` SHALL be a
+document-relative path, resolved against the unit test document's directory;
+an absolute `path` SHALL be rejected at parse, naming the field, the key, and
+the path (the absolute escape hatch of ADR-0100 covers `$ref` targets inside
+the schema, not the matcher root path). Compilation uses the confined compiler
+of the
+`json-schema-validation` specification (ADR-0100) through
+`SchemaSyntax::Auto`'s extension rule (`.yaml`/`.yml` are YAML, every other
+extension is JSON) unless `type` overrides it, and SHALL happen once at
+document load, never per assertion. The document SHALL fail closed at load,
+naming the schema path, when the schema file is missing or unreadable, when a
+`$ref` cannot be resolved, when the schema is invalid, or when `type` names an
+unsupported schema language (`xsd`, `protobuf`) — the rejection SHALL name
+the rejected value and the
+supported set (json, yaml). An object whose sole key is
 `predicate` SHALL be rejected with a message stating predicate matchers
 are not supported, in every grammar position; in dual-grammar positions
 (header values and `expectReply.body`), an object with multiple keys that
 merely contains a `predicate` key is a literal value and parses
 unchanged (in strict `bodies` entries, multi-key maps are rejected as
 usual). Matchers SHALL be validated at
-parse time: `regex` patterns SHALL compile and malformed values SHALL fail
+parse time: `regex` patterns SHALL compile, `jsonSchema` documents SHALL
+compile their schema at load, and malformed values SHALL fail
 parsing with exit code 2 naming the document field and the offending key.
+
+`jsonSchema` matching. A received or replied body that is JSON (or text that
+parses as JSON) and violates the schema SHALL fail the matcher (assertion
+failure, exit 1); the failure
+message SHALL carry the schema path and the first violation in the shape
+`{message} at {instance_path}`. A body that is not JSON SHALL be a non-match,
+not an error: the failure message SHALL carry the schema path and a note that
+the body is not JSON, on the ordered expectation path, on the reply
+assertion path, and — as a deterministic diagnostic candidate rendered with
+the first unmatched body in receive order — on the anyOrder path, without
+changing any matching semantics.
 
 Matcher positions. `expects.bodies` list entries SHALL use strict matcher
 syntax: a bare string is `equals` (exactly as before this change); a map
@@ -64,7 +95,9 @@ or array, or an object that is not a single-recognized-key matcher map,
 is a literal `equals` value compared structurally; a map whose sole key
 is a recognized header matcher key (`equals`, `regex`, `exists`) is that
 matcher. A sole `jsonSubset` key on a header value is a document error
-stating `jsonSubset` applies to bodies only, and a sole `predicate` key
+stating `jsonSubset` applies to bodies only, a sole `jsonSchema` key on a
+header value is a document error stating `jsonSchema` applies to bodies
+only, and a sole `predicate` key
 is rejected with the reserved-key message.
 
 `expectReply.body` accepted strings and JSON structures before this
@@ -243,11 +276,125 @@ rejected (exit 2); any other JSON object is a literal `equals` value
 - **When** `camel test` parses the document
 - **Then** parsing fails with exit code 2 stating `jsonSubset` applies to bodies only
 
+#### Scenario: jsonSchema on a header value rejected at parse
+
+- **Given** a test document with a header expectation `{jsonSchema: {path: "order.schema.json"}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field and stating `jsonSchema` applies to bodies only
+
 #### Scenario: reply body object without matcher keys stays literal JSON
 
 - **Given** an input with `expectReply: {body: {"status": "ok"}}` (single unrecognized key)
 - **When** `camel test` parses and executes the document against the JSON reply body `{"status": "ok"}`
 - **Then** parsing succeeds without matcher interpretation and the reply assertion passes by structural equality
+
+#### Scenario: jsonSchema with valid body matches
+
+- **Given** a schema file `order.schema.json` next to the test document requiring a string `id` property, and an expectation `{jsonSchema: {path: "order.schema.json"}}`
+- **When** `camel test` parses and executes the document against the JSON body `{"id": "order-1"}`
+- **Then** parsing compiles the schema once at load and the expectation passes
+
+#### Scenario: jsonSchema violation fails with the first violation
+
+- **Given** the same schema and expectation, executed against the JSON body `{}`
+- **When** the assertion evaluates and the document exits with code 1
+- **Then** the failure message names the schema path and the first violation in the shape `{message} at {instance_path}`
+
+#### Scenario: yaml schema selected by file extension
+
+- **Given** a schema file `order.schema.yaml` next to the test document and an expectation `{jsonSchema: {path: "order.schema.yaml"}}`
+- **When** `camel test` parses and executes the document against a conforming JSON body
+- **Then** parsing succeeds (extension-based YAML parsing) and the expectation passes
+
+#### Scenario: explicit type overrides the extension rule
+
+- **Given** a file named `order.schema.txt` containing YAML-only schema content (invalid when parsed as JSON) and an expectation `{jsonSchema: {path: "order.schema.txt", type: "yaml"}}`
+- **When** `camel test` parses and executes the document against a conforming JSON body
+- **Then** parsing succeeds (the explicit `type` selects the YAML parser, which the extension rule alone would not) and the expectation passes
+
+#### Scenario: jsonSchema with non-JSON body is a non-match
+
+- **Given** the valid schema and expectation of the matching scenario
+- **When** the document executes against a body of `not json at all` and exits with code 1
+- **Then** the matcher fails as a non-match — the failure message names the schema path and reports the body is not JSON — and no error is raised by the matcher itself
+
+#### Scenario: jsonSchema on expectReply.body asserts the reply
+
+- **Given** the valid schema of the matching scenario referenced from `expectReply: {body: {jsonSchema: {path: "order.schema.json"}}}`
+- **When** `camel test` parses and executes the document and the route replies with a body violating the schema
+- **Then** the reply assertion fails with the schema path and the first violation in the established shape
+
+#### Scenario: jsonSchema failure under anyOrder diagnoses an unconsumed body
+
+- **Given** a document with `bodies` declared with `anyOrder`, two identical `jsonSchema` expectations for the same schema, and received bodies `[valid, invalid]` in that order
+- **When** the assertions evaluate (the first expectation consumes the valid body; the second finds no match)
+- **Then** the failure names the schema path and the violation of the `invalid` body — the first unmatched body in receive order — and matching semantics are unchanged
+
+#### Scenario: jsonSchema missing file rejected at load
+
+- **Given** a test document with an expectation `{jsonSchema: {path: "missing.schema.json"}}` and no such file in the document's directory
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the schema path
+
+#### Scenario: jsonSchema unreadable file rejected at load
+
+- **Given** a schema file in the document's directory that exists but cannot be read by the process (e.g. a directory at the declared path)
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the schema path
+
+#### Scenario: jsonSchema unresolvable ref rejected at load
+
+- **Given** a schema file whose `$ref` points at a file outside the schema's directory
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the schema path and the confinement rejection (per the `json-schema-validation` specification)
+
+#### Scenario: jsonSchema ref to a missing file inside the directory rejected at load
+
+- **Given** a schema file whose `$ref: "defs.json#/$defs/x"` names a file that does not exist inside the schema's directory
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the schema path and the unresolved reference
+
+#### Scenario: jsonSchema invalid schema rejected at load
+
+- **Given** a schema file containing malformed JSON, or a syntactically valid document whose keywords do not compile (e.g. `maximum: "five"`)
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the schema path and the parse or compile error
+
+#### Scenario: jsonSchema unsupported type rejected at load
+
+- **Given** a test document with an expectation `{jsonSchema: {path: "order.xsd", type: "xsd"}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field, the key, the rejected value (`xsd`), the supplied path, and the supported set (json, yaml)
+
+#### Scenario: jsonSchema absolute path rejected at parse
+
+- **Given** a test document with an expectation `{jsonSchema: {path: "/abs/order.schema.json"}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field, the key, and the absolute path, stating the path must be relative to the document's directory
+
+#### Scenario: jsonSchema relative path resolves against the document directory
+
+- **Given** a test document at `docs/case.test.yaml` with an expectation `{jsonSchema: {path: "schemas/order.schema.json"}}`, the schema at `docs/schemas/order.schema.json`, and the process current directory set elsewhere (e.g. the repository root)
+- **When** `camel test` parses the document
+- **Then** parsing succeeds — the schema path resolved against the document's directory, not the process current directory
+
+#### Scenario: jsonSchema unknown field inside the object rejected
+
+- **Given** a test document with an expectation `{jsonSchema: {path: "order.schema.json", format: "draft7"}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field (`bodies` or `expectReply.body`) and the unknown field (`format`)
+
+#### Scenario: jsonSchema without path rejected
+
+- **Given** a test document with an expectation `{jsonSchema: {type: "json"}}` or `{jsonSchema: "order.schema.json"}` (non-object payload)
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field and the key, stating `jsonSchema` requires an object with a `path`
+
+#### Scenario: jsonSchema with non-string type rejected
+
+- **Given** a test document with an expectation `{jsonSchema: {path: "order.schema.json", type: 42}}` or `{jsonSchema: {path: "order.schema.json", type: null}}`
+- **When** `camel test` parses the document
+- **Then** parsing fails with exit code 2 naming the field and the key, stating `type` must be `json` or `yaml`
 
 #### Scenario: mixed vocabulary rejected at load
 
