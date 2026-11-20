@@ -1,0 +1,9 @@
+{
+  "kind": "spec",
+  "verdict": "BLESS",
+  "hash": "sha256:3f75f39829015c76594e927448d655c5be450ffdd0b7c03bf4b9c3acf2746a1c",
+  "expert": "e_gpt",
+  "date": "2026-11-20",
+  "rounds": 14,
+  "notes": "Blessed after 13 fix rounds. Gate ran local DB probes (SQLite journal_mode, PostgreSQL transaction_status, FATAL 57P01 commit semantics) that materially changed the design: PostgreSQL-only joins in v1, fresh-transaction hygiene ROLLBACK before BEGIN, session-owned guarded connection with short borrows (no stored borrowing Transaction), rollback-only admission closure after joined DB/prepare errors, CommitFailed reserved for definitive rejection (PG deferred FK 23503), CommitUncertain for connection-fatal outcomes, observable cancellation cutoff at driver handoff."
+}
