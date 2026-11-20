@@ -7,6 +7,7 @@
 
 use crate::MockEndpointInner;
 use crate::expectations::BodyExpectation;
+use crate::matcher::BodyMatcher;
 use crate::matcher::compact_body;
 use camel_component_api::{Body, Exchange};
 use camel_matchers::CountBound;
@@ -154,6 +155,11 @@ pub enum MockAssertionError {
         expected: String,
         /// Number of received exchanges at evaluation.
         received_count: usize,
+        /// Deterministic candidate for a failing `jsonSchema` matcher under
+        /// `anyOrder`: the first unmatched body in receive order with its
+        /// shape note or first violation. `None` for exact expectations and
+        /// every other matcher.
+        diagnostic: Option<String>,
     },
     /// Ordered body matcher at `index` did not match the received body.
     ///
@@ -302,10 +308,17 @@ impl std::fmt::Display for MockAssertionError {
                 endpoint,
                 expected,
                 received_count,
-            } => write!(
-                f,
-                "MockEndpoint '{endpoint}': expected body {expected} not found in received exchanges (anyOrder mode) (received {received_count} exchanges)"
-            ),
+                diagnostic,
+            } => {
+                write!(
+                    f,
+                    "MockEndpoint '{endpoint}': expected body {expected} not found in received exchanges (anyOrder mode) (received {received_count} exchanges)"
+                )?;
+                if let Some(diagnostic) = diagnostic {
+                    write!(f, " (candidate: {diagnostic})")?;
+                }
+                Ok(())
+            }
             MockAssertionError::BodyMatcherFailed {
                 endpoint,
                 index,
@@ -489,6 +502,7 @@ impl MockEndpointInner {
                                 endpoint: self.name.clone(),
                                 expected: expectation_display(expectation),
                                 received_count: received.len(),
+                                diagnostic: json_schema_diagnostic(expectation, &unmatched),
                             });
                         }
                     }
@@ -508,13 +522,14 @@ impl MockEndpointInner {
                         }
                         BodyExpectation::Matcher(matcher) => {
                             if !matcher.matches(received_bodies[i]) {
+                                let note = matcher.verdict_note(received_bodies[i]);
                                 return self.latch_err(MockAssertionError::BodyMatcherFailed {
                                     endpoint: self.name.clone(),
                                     index: i,
                                     matcher: matcher.to_string(),
                                     received: received_body_with_note(
                                         received_bodies[i],
-                                        matcher.mismatch_note(received_bodies[i]),
+                                        note.as_deref(),
                                     ),
                                 });
                             }
@@ -646,12 +661,28 @@ fn expectation_display(expectation: &BodyExpectation) -> String {
 }
 
 /// Render a received body whole for matcher diagnostics, appending the
-/// matcher's shape-mismatch note when present.
-fn received_body_with_note(body: &Body, note: Option<&'static str>) -> String {
+/// matcher's shape-mismatch note (or first schema violation) when present.
+fn received_body_with_note(body: &Body, note: Option<&str>) -> String {
     match note {
         Some(note) => format!("{} ({note})", compact_body(body)),
         None => compact_body(body),
     }
+}
+
+/// The deterministic candidate body for a failing `jsonSchema` expectation
+/// under `anyOrder` mode.
+///
+/// `unmatched` holds the bodies not consumed by earlier expectations; the
+/// failing scan found no match among them, so the first one is the
+/// candidate. `None` for exact expectations and every other matcher
+/// (matching semantics are unchanged — this is diagnostics only).
+fn json_schema_diagnostic(expectation: &BodyExpectation, unmatched: &[&Body]) -> Option<String> {
+    let BodyExpectation::Matcher(matcher @ BodyMatcher::JsonSchema { .. }) = expectation else {
+        return None;
+    };
+    let body = unmatched.first()?;
+    let note = matcher.verdict_note(body);
+    Some(received_body_with_note(body, note.as_deref()))
 }
 
 /// Render the received-state clause for a header matcher failure (same

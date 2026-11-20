@@ -3,7 +3,7 @@ use std::path::Path;
 use camel_integration_test::ScenarioDocument;
 use noyalib::compat::serde_yaml;
 
-use super::parse_test_document;
+use super::parse_test_document_at;
 use super::{BODY_SCALAR_SENTINEL, MATCHER_SENTINEL, TestDocError, TestDocument};
 
 /// One parsed test document in whichever vocabulary it declares: the
@@ -56,7 +56,11 @@ pub(crate) fn parse_document(path: &Path, text: &str) -> Result<ParsedDocument, 
             .map(|scenario| ParsedDocument::Scenario(Box::new(scenario)))
             .map_err(|e| e.to_string())
     } else {
-        parse_test_document(text)
+        let doc_dir = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        parse_test_document_at(text, doc_dir)
             .map(|doc| ParsedDocument::Unit(Box::new(doc)))
             .map_err(|e| e.to_string())
     }

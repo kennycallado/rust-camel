@@ -322,8 +322,39 @@ where
 fn is_body_matcher_key(key: &str) -> bool {
     matches!(
         key,
-        "equals" | "regex" | "contains" | "startsWith" | "endsWith" | "exists" | "jsonSubset"
+        "equals"
+            | "regex"
+            | "contains"
+            | "startsWith"
+            | "endsWith"
+            | "exists"
+            | "jsonSubset"
+            | "jsonSchema"
     )
+}
+
+// Base directory the in-flight parse resolves `jsonSchema` paths against.
+// Set at the start of [`parse_test_document_at`] and cleared by a Drop guard
+// (panic-safe: a panic inside `from_str` cannot leave a stale base on the
+// thread); serde field deserializers cannot take context parameters.
+thread_local! {
+    static SCHEMA_BASE: std::cell::RefCell<std::path::PathBuf> =
+        const { std::cell::RefCell::new(std::path::PathBuf::new()) };
+}
+
+/// The base directory for `jsonSchema` path resolution of the in-flight parse
+/// (empty → CWD-relative, as `PathBuf::new().join` yields the relative path —
+/// the inline-text-parse semantics).
+fn schema_base() -> std::path::PathBuf {
+    SCHEMA_BASE.with(|base| base.borrow().clone())
+}
+
+/// Clears [`SCHEMA_BASE`] when the parse call ends, by panic or return.
+struct SchemaBaseGuard;
+impl Drop for SchemaBaseGuard {
+    fn drop(&mut self) {
+        SCHEMA_BASE.with(|base| base.borrow_mut().clear());
+    }
 }
 
 /// Reserved key rejected with the same message in every grammar position.
@@ -390,6 +421,60 @@ fn body_matcher_from_map(
                 "{field}: `jsonSubset` must be an object"
             ))),
         },
+        "jsonSchema" => {
+            let Some(map) = payload.as_object() else {
+                return Err(TestDocError::InvalidMatcher(format!(
+                    "{field}: `jsonSchema` must be an object with a `path`"
+                )));
+            };
+            let path_str = match map.get("path") {
+                Some(serde_json::Value::String(path)) if !path.is_empty() => path.as_str(),
+                _ => {
+                    return Err(TestDocError::InvalidMatcher(format!(
+                        "{field}: `jsonSchema` requires a non-empty `path`"
+                    )));
+                }
+            };
+            for member in map.keys() {
+                if member != "path" && member != "type" {
+                    return Err(TestDocError::InvalidMatcher(format!(
+                        "{field}: unknown `jsonSchema` field `{member}`; \
+                         expected `path` and optional `type`"
+                    )));
+                }
+            }
+            let syntax = match map.get("type") {
+                None => camel_json_schema::SchemaSyntax::Auto,
+                Some(serde_json::Value::String(kind)) => match kind.as_str() {
+                    "json" => camel_json_schema::SchemaSyntax::Json,
+                    "yaml" => camel_json_schema::SchemaSyntax::Yaml,
+                    other => {
+                        return Err(TestDocError::InvalidMatcher(format!(
+                            "{field}: `jsonSchema` `type` `{other}` for `{path_str}` is not \
+                             supported; supported types: json, yaml"
+                        )));
+                    }
+                },
+                Some(_) => {
+                    return Err(TestDocError::InvalidMatcher(format!(
+                        "{field}: `jsonSchema` `type` must be `json` or `yaml`"
+                    )));
+                }
+            };
+            if std::path::Path::new(path_str).is_absolute() {
+                return Err(TestDocError::InvalidMatcher(format!(
+                    "{field}: `jsonSchema` path `{path_str}` must be relative to the test \
+                     document's directory"
+                )));
+            }
+            let resolved = schema_base().join(path_str);
+            let display = resolved.display().to_string();
+            BodyMatcher::json_schema_file(resolved, syntax).map_err(|e| {
+                TestDocError::InvalidMatcher(format!(
+                    "{field}: `jsonSchema` failed to load `{display}`: {e}"
+                ))
+            })
+        }
         _ => Err(TestDocError::InvalidMatcher(format!(
             "{field}: unknown matcher key `{key}`"
         ))),
@@ -488,6 +573,9 @@ fn parse_header_value(
             }
             "jsonSubset" => Err(TestDocError::InvalidMatcher(format!(
                 "{field}: `jsonSubset` applies to bodies only"
+            ))),
+            "jsonSchema" => Err(TestDocError::InvalidMatcher(format!(
+                "{field}: `jsonSchema` applies to bodies only"
             ))),
             "predicate" => Err(predicate_error(field)),
             _ => Ok(HeaderMatcher::Equals(value.clone())),
@@ -599,7 +687,26 @@ where
         .map_err(|e| D::Error::custom(format!("{MATCHER_SENTINEL}{e}")))
 }
 
-/// Parses and validates a `*.test.yaml` document. Validation order:
+/// [`parse_test_document`] with an explicit document directory: the base every
+/// relative `jsonSchema` path resolves against. The runner path
+/// (`parse_document`) always passes the document's parent directory; nothing
+/// reads the ambient CWD implicitly.
+///
+/// # Errors
+///
+/// Same as [`parse_test_document`].
+pub fn parse_test_document_at(
+    text: &str,
+    doc_dir: &std::path::Path,
+) -> Result<TestDocument, TestDocError> {
+    SCHEMA_BASE.with(|base| *base.borrow_mut() = doc_dir.to_path_buf());
+    let _guard = SchemaBaseGuard;
+    parse_test_document(text)
+}
+
+/// Parses and validates a `*.test.yaml` document. Relative `jsonSchema` paths
+/// resolve against the document directory set by [`parse_test_document_at`];
+/// inline-text parses use `.` (the process CWD). Validation order:
 /// (a0) identifier fields interpolate `${env:...}` through the document
 /// `env:` fixture closure first, then inline defaults (parity
 /// with route sources; see the mock-testkit spec requirement) — exactly:

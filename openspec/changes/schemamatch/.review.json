@@ -1,0 +1,24 @@
+{
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e052ca416ffegeDFBu7mUU5jDU",
+  "date": "2026-11-20",
+  "impl_hash": "git-commit:0aa9d00b0416cd8bbee6e7bdf58656e392137885",
+  "review_mode": "holistic (complete diff vs blessed spec, fresh eyes, no task_id)",
+  "outcome": "APPROVE-WITH-FINDINGS resolved: one Important (docs/src/components/mock.md BodyMatcher enumeration stale after JsonSchema) fixed in-change and re-approved by the same reviewer; remaining items are minors recorded below.",
+  "for_the_record": [
+    "BodyMatcher::verdict_note is public API consolidating the note chain; the blessed plan prescribed the chain inline at three call sites — behavior identical, deduplication was the task-1.3 reviewer's fix direction.",
+    "Reply-path failure messages for non-jsonSchema matchers can now grow shape notes (body is not text / not an object) — prescribed by plan 1.4 (shared verdict_note), diagnostic-only, no spec text pins those shapes.",
+    "Archive-time reconciliation: delta scenario 'jsonSchema without path rejected' THEN wording is looser than the shipped two distinct messages (object-payload vs missing-path sub-cases); normalize at spec sync. Verified as the ONLY wording gap.",
+    "Delta contains one pure line-reflow hunk in the divertCopyTo paragraph (no word change)."
+  ],
+  "gates_summary": {
+    "gates_local_full_sweep": "exit 0 (30 registry gates + 2 lanes; network skips by design: lint-commits, cargo-audit, lint-bridge-releases, doc-guide-test)",
+    "doc_guide_test_manual": "mdbook test exit 0 (docs/** changed)",
+    "mission_doc_build": "camel-component-mock + camel-json-schema exit 0; camel-cli FAILS pre-existing on main (4 rustdoc private-intra-doc-links in compile/{materialize,policy}.rs; verified at base e7338e9ee; bd rc-d2114)",
+    "cargo_build_workspace": "exit 0",
+    "cargo_test_workspace_lib": "exit 0 (74 targets)",
+    "hexagonal_boundaries": "exit 0 (33 tests)",
+    "openspec_validate": "valid"
+  }
+}

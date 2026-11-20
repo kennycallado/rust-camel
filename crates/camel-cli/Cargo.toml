@@ -58,6 +58,7 @@ camel-bundles.workspace = true
 # so camel-bridge is already in every flavor's closure.
 camel-bridge.workspace = true
 camel-integration-test.workspace = true
+camel-json-schema.workspace = true
 camel-dsl.workspace = true
 camel-core.workspace = true
 camel-matchers.workspace = true

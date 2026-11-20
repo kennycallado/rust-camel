@@ -13,3 +13,4 @@ mod intercepts;
 mod parsing;
 mod reply;
 mod repositories;
+mod schema;

@@ -166,6 +166,11 @@ camel-component-validator | local | cargo test -p camel-component-validator
 camel-component-mcp | local | cargo test -p camel-component-mcp
 camel-processor | local | cargo test -p camel-processor
 camel-json-schema | local | cargo test -p camel-json-schema
+# --- camel-cli: declared deliberately (mission 601) — the lane sweep
+#     fail-safe asked for this declaration; matches ci.yml:288
+camel-cli | local | cargo test -p camel-cli --no-default-features --features flavor-regular,exec --no-fail-fast
+# --- camel-component-mock: own tests/ suite
+camel-component-mock | local | cargo test -p camel-component-mock
 # --- xtask: own tests/ (triggered by trustpub-registrations.toml edits)
 xtask | local | cargo test -p xtask
 camel-language-rhai | local | cargo test -p camel-language-rhai

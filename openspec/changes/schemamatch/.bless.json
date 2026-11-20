@@ -1,0 +1,16 @@
+{
+  "kind": "plan",
+  "verdict": "BLESSED",
+  "hash": "sha256:c51b6bd098bb0511fbbffe80aebb6b8e85abe93b774ce083776cbe38885e2795",
+  "expert": "experts/e_glm",
+  "session": "ses_e05cb4af4ffewkMsW0PpV2VsGd",
+  "rounds": 2,
+  "date": "2026-11-20",
+  "supersedes_spec_bless": {
+    "hash": "sha256:fe1ee26179de18bba83a6dba248ba4a533c27448de3ef282dd7d3fd3b422c578",
+    "expert": "experts/e_gpt",
+    "session": "ses_e0616e676ffepM1NfNBsF7To9D"
+  },
+  "gate_history": "Spec: e_gpt 3 rounds (originally dispatched; gpt window exhausted afterwards). Plan: owner override 2026-11-20 18:30 UTC named experts/e_glm for the plan gate. e_glm round 1 BLESS-WITH-FIXES (F1: unsupported-type message must carry the path; F2: endpoint-field wording), round 2 BLESSED. The earlier e_gpt plan-bless attempt failed on usage limit (ses_e06000becffeswWeIHx9UR6te7), parked blocked:budget, then overridden.",
+  "notes": "Hash normalizes '- [x]' to '- [ ]', so checkbox ticks during implementation do not invalidate the bless hash."
+}

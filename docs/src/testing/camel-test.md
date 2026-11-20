@@ -58,7 +58,7 @@ The stub beans mirror the `bean:` step. The step looks up a bean by name and cal
 
 `bodies` uses strict grammar. Each entry is a bare string or a single-key matcher map. A bare string is exact equality (`equals`). A map with one recognized body-matcher key selects that matcher. Any other form is a document error. `camel test` exits with code 2 and names the field and the key.
 
-Body matchers in v1: `equals`, `regex`, `contains`, `startsWith`, `endsWith`, `exists`, `jsonSubset`. `exists` takes `null` and takes no argument. `jsonSubset` takes a JSON object. A `regex` value must be a valid pattern. The runner rejects an invalid pattern at parse time and exits with code 2.
+Body matchers in v1: `equals`, `regex`, `contains`, `startsWith`, `endsWith`, `exists`, `jsonSubset`, `jsonSchema`. `exists` takes `null` and takes no argument. `jsonSubset` takes a JSON object. A `regex` value must be a valid pattern. The runner rejects an invalid pattern at parse time and exits with code 2.
 
 `headers` values use dual grammar. Any literal JSON value stays exact structural equality (`equals`). A map whose sole key is `equals`, `regex`, or `exists` selects that matcher. Any other value stays a literal. `jsonSubset` on a header is a document error. `camel test` exits with code 2.
 
@@ -85,6 +85,43 @@ Migration note: only literals whose single key is a matcher key change meaning i
 `sequence` asserts cross-endpoint arrival order. It is a top-level list of `mock:` endpoint refs in the order the arrivals must have happened. The list needs at least two entries; fewer is a document error and `camel test` exits with code 2. Duplicates are allowed: the same endpoint may appear for consecutive arrivals. Each entry must carry the `mock:` scheme; the prefix is stripped to the bare endpoint name exactly as for an `expects` key, so `mock:probe-a` addresses the endpoint `probe-a`.
 
 The assertion projects the arrivals at the listed endpoints in global arrival order and requires the projection to equal the declared list exactly. Arrivals at unlisted endpoints are ignored, so the assertion narrows to the probes that matter while `expects` handles the rest. A mismatch is an assertion failure: `camel test` prints a `FAIL` line naming the first divergence — the position, the expected endpoint, and the actual endpoint — and exits with code 1. Parse errors (fewer than two entries, an entry that is not a `mock:` URI or names an empty endpoint path) exit with code 2.
+
+## JSON Schema assertions
+`jsonSchema` asserts a body against a JSON Schema file:
+
+```yaml
+bodies: [{jsonSchema: {path: "order.schema.json"}}]
+```
+
+The grammar is `jsonSchema: {path: <file>, type: <json|yaml>}`. The document entry takes `path` and an optional `type`. `type` accepts `json` or `yaml`. Without `type`, the file extension selects the parser: `.yaml` and `.yml` are YAML, every other extension is JSON. For example `{path: "order.schema.yaml", type: "yaml"}` forces the YAML parser. `path` is relative to the test document's directory. An absolute path is a document error: `camel test` exits with code 2 and names the path. Valid positions are `bodies` entries and `expectReply.body`. A header value is a document error.
+
+A schema file `order.schema.json` next to the document requires a string `id`:
+
+```json
+{
+  "type": "object",
+  "required": ["id"],
+  "properties": {"id": {"type": "string"}}
+}
+```
+
+The document `order.test.yaml` uses it:
+
+```yaml
+routeFiles: [order.routes.yaml]
+expects:
+  mock:result:
+    count: 1
+    bodies: [{jsonSchema: {path: "order.schema.json"}}]
+```
+
+The schema compiles once when the document loads. Assertions reuse the compiled schema. Load fails with exit 2, naming the schema path, for a missing or unreadable file, an unresolvable `$ref`, an invalid schema, or an unsupported `type`.
+
+Only `json` and `yaml` have an engine. `xsd` and `protobuf` schemas do not. Declaring either fails at load and names the supported set (json, yaml).
+
+A received body that violates the schema is an assertion failure: exit 1. The `FAIL` line names the schema path as `jsonSchema {path}` and the first violation as `{message} at {instance_path}`. A body that is not JSON is a non-match. Its failure carries the schema path and a note that the body is not JSON.
+
+References resolve only inside the schema's directory. See [ADR-0100](../adr/0100-confined-json-schema-reference-resolution.md) and the `json-schema-validation` spec (`openspec/specs/json-schema-validation/spec.md` in the repository, outside the rendered book).
 
 ## Probe pattern
 Observe an intermediate route send by diverting a copy to a probe endpoint, then assert the order of those observations with `sequence:`. `divertCopyTo` copies the exchange to the probe before the real send continues, so the route is unchanged.

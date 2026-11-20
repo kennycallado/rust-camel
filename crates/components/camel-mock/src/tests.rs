@@ -3074,6 +3074,227 @@ async fn json_subset_array_failure_names_matcher_and_array() {
     );
 }
 
+// -----------------------------------------------------------------------
+// schemamatch 1.3: schema path + violation in assertion failures
+// -----------------------------------------------------------------------
+
+/// The shared inline schema: an object requiring a string `id`, compiled
+/// through the same entry the matcher constructor uses.
+fn json_schema_matcher(path: &str) -> BodyMatcher {
+    let schema = std::sync::Arc::new(
+        camel_json_schema::compile(
+            &camel_json_schema::SchemaSource::Inline(serde_json::json!({
+                "type": "object",
+                "required": ["id"],
+                "properties": {"id": {"type": "string"}}
+            })),
+            camel_json_schema::SchemaSyntax::Json,
+            camel_json_schema::FormatMode::DraftDefault,
+        )
+        .expect("the inline test schema compiles"),
+    );
+    BodyMatcher::JsonSchema {
+        schema,
+        path: path.to_string(),
+    }
+}
+
+/// Push one received exchange through the mock producer path.
+async fn receive_body(
+    endpoint: &dyn camel_component_api::Endpoint,
+    body: camel_component_api::Body,
+) {
+    let ctx = test_producer_ctx();
+    let mut producer = endpoint.create_producer(rt(), &ctx).unwrap();
+    let mut msg = Message::new("");
+    msg.body = body;
+    producer.call(Exchange::new(msg)).await.unwrap();
+}
+
+#[tokio::test]
+async fn body_matcher_failed_renders_schema_path_and_violation() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-schema", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-schema").unwrap();
+    inner.expect_body_matcher(json_schema_matcher("schema/order.json"));
+
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Json(serde_json::json!({})),
+    )
+    .await;
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("a violating JSON body must Err");
+    assert!(
+        matches!(err, MockAssertionError::BodyMatcherFailed { .. }),
+        "expected BodyMatcherFailed, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("jsonSchema") && msg.contains("schema/order.json"),
+        "message should name the matcher and its schema path, got: {msg}"
+    );
+    assert!(
+        msg.contains("id") && msg.contains(" at "),
+        "message should append the first violation in '{{message}} at {{instance_path}}' shape, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn body_matcher_failed_non_json_renders_shape_note() {
+    let component = MockComponent::new();
+    let endpoint = component
+        .create_endpoint("mock:m-diag-schema-text", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-diag-schema-text").unwrap();
+    inner.expect_body_matcher(json_schema_matcher("schema/order.json"));
+
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Text("not json".into()),
+    )
+    .await;
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("a non-JSON body cannot satisfy a jsonSchema matcher");
+    assert!(
+        matches!(err, MockAssertionError::BodyMatcherFailed { .. }),
+        "expected BodyMatcherFailed, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("body is not JSON") && msg.contains("schema/order.json"),
+        "message should state the body shape and name the schema path, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn any_order_json_schema_diagnoses_unconsumed_body() {
+    let config = MockConfig {
+        any_order: true,
+        ..Default::default()
+    };
+    let component = MockComponent::with_config(config);
+    let endpoint = component
+        .create_endpoint("mock:m-any-schema", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-any-schema").unwrap();
+    inner.expect_body_matcher(json_schema_matcher("schema/order.json"));
+    inner.expect_body_matcher(json_schema_matcher("schema/order.json"));
+
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Json(serde_json::json!({"id": "ok"})),
+    )
+    .await;
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Json(serde_json::json!({})),
+    )
+    .await;
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("one valid and one violating body cannot satisfy two schema matchers");
+    assert!(
+        matches!(err, MockAssertionError::BodyNotFound { .. }),
+        "expected BodyNotFound, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("candidate: {}") && msg.contains("schema/order.json"),
+        "candidate should render the unconsumed body whole and name the schema path, got: {msg}"
+    );
+    assert!(
+        msg.contains("id") && msg.contains(" at "),
+        "candidate should carry the first violation of the unconsumed body, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn any_order_json_schema_non_json_diagnoses_shape_note() {
+    let config = MockConfig {
+        any_order: true,
+        ..Default::default()
+    };
+    let component = MockComponent::with_config(config);
+    let endpoint = component
+        .create_endpoint("mock:m-any-schema-text", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-any-schema-text").unwrap();
+    inner.expect_body_matcher(json_schema_matcher("schema/order.json"));
+
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Text("not json".into()),
+    )
+    .await;
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("a non-JSON body cannot satisfy a jsonSchema matcher");
+    assert!(
+        matches!(err, MockAssertionError::BodyNotFound { .. }),
+        "expected BodyNotFound, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("candidate:")
+            && msg.contains("schema/order.json")
+            && msg.contains("body is not JSON"),
+        "candidate should carry the shape note and the schema path, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn any_order_exact_expectations_have_no_candidate() {
+    let config = MockConfig {
+        any_order: true,
+        ..Default::default()
+    };
+    let component = MockComponent::with_config(config);
+    let endpoint = component
+        .create_endpoint("mock:m-any-exact", &NoOpComponentContext)
+        .unwrap();
+    let inner = component.get_endpoint("m-any-exact").unwrap();
+    inner.expect_body(camel_component_api::Body::Text("a".into()));
+    inner.expect_body(camel_component_api::Body::Text("a".into()));
+
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Text("x".into()),
+    )
+    .await;
+    receive_body(
+        endpoint.as_ref(),
+        camel_component_api::Body::Text("y".into()),
+    )
+    .await;
+
+    let err = inner
+        .try_assert_satisfied()
+        .await
+        .expect_err("no received body equals the expected exact body");
+    assert!(
+        matches!(err, MockAssertionError::BodyNotFound { .. }),
+        "expected BodyNotFound, got: {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("candidate:"),
+        "exact expectations must not gain a candidate clause, got: {msg}"
+    );
+}
+
 #[tokio::test]
 async fn exists_body_failure_names_matcher() {
     let component = MockComponent::new();

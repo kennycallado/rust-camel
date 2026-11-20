@@ -594,12 +594,20 @@ fn evaluate_reply_expectation(
     if let Some(matcher) = &expect.body
         && !matcher.matches(&message.body)
     {
+        let rendered = format!(
+            "reply body mismatch: expected {matcher}, actual {}",
+            render_body(&message.body)
+        );
+        // The note chain (shape note, else first schema violation) is the
+        // same one the mock assertion path renders. Matchers without a
+        // note keep the message byte-identical to before.
+        let detail = match matcher.verdict_note(&message.body) {
+            Some(note) => format!("{rendered} ({note})"),
+            None => rendered,
+        };
         return EndpointResult {
             endpoint: label.to_string(),
-            outcome: Err(format!(
-                "reply body mismatch: expected {matcher}, actual {}",
-                render_body(&message.body)
-            )),
+            outcome: Err(detail),
         };
     }
     if let Some(expected_headers) = &expect.headers {

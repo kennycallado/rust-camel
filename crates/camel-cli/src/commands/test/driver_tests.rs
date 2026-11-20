@@ -2096,9 +2096,12 @@ expects:
 }
 
 /// Parse a `.test.yaml` document from disk for runner-level assertions.
+/// Relative `jsonSchema` paths resolve against the document's directory
+/// (every call site passes a tempdir-joined path, so `parent()` is `Some`).
 fn parse_doc_at(path: &Path) -> document::TestDocument {
     let text = fs::read_to_string(path).expect("read test document"); // allow-unwrap
-    document::parse_test_document(&text).expect("parse test document") // allow-unwrap
+    let doc_dir = path.parent().unwrap_or(std::path::Path::new("."));
+    document::parse_test_document_at(&text, doc_dir).expect("parse test document") // allow-unwrap
 }
 
 /// File routes under the LEAN runner load through the same tree-walk-first
@@ -3085,4 +3088,164 @@ fn mint_visible_to_env_layer() {
         Some(mint),
         "harness precedence must win over the colliding doc-env probe"
     );
+}
+
+/// Write a reply-assertion document plus the `reply.schema.json` fixture
+/// (an object requiring a string `id`) in `dir`. The route replaces the
+/// input body with `reply_body` before the reply is captured, so the
+/// `expectReply.body` assertion evaluates the value the route produced.
+fn write_reply_schema_doc(dir: &Path, name: &str, reply_body: &str, expectation: &str) -> PathBuf {
+    fs::write(
+        dir.join("reply.schema.json"),
+        r#"{"type":"object","required":["id"],"properties":{"id":{"type":"string"}}}"#,
+    )
+    .expect("write reply schema fixture"); // allow-unwrap
+    let body = serde_json::to_string(reply_body).expect("render reply body as YAML string"); // allow-unwrap
+    let path = dir.join(name);
+    fs::write(
+        &path,
+        format!(
+            r#"
+routes:
+  - id: r1
+    from: "direct:in"
+    steps:
+      - set_body:
+          value: {body}
+      - to: "mock:out"
+inputs:
+  - to: "direct:in"
+    body: "x"
+    expectReply:
+      body:
+        {expectation}
+expects:
+  mock:out:
+    count: 1
+"#
+        ),
+    )
+    .expect("write reply document"); // allow-unwrap
+    path
+}
+
+/// Run a reply document through the public runner and return the
+/// `reply[0] direct:` row's outcome — the row the driver prints.
+async fn reply_outcome(dir: &Path, doc_path: &Path) -> Result<(), String> {
+    let doc = parse_doc_at(doc_path);
+    let (result, _mock) = runner::run_test_doc(&doc, dir).await;
+    assert!(
+        result.doc_error.is_none(),
+        "document must run without a doc error: {:?}",
+        result.doc_error
+    );
+    result
+        .endpoint_results
+        .iter()
+        .find(|row| row.endpoint.starts_with("reply[0] direct:"))
+        .map(|row| row.outcome.clone())
+        .expect("a reply[0] direct: row must be present") // allow-unwrap
+}
+
+/// A reply conforming to `expectReply.body.jsonSchema` passes; the fixture
+/// schema resolves relative to the document's directory.
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_json_schema_conforming_reply_passes() {
+    let dir = temp_dir("reply-schema-pass");
+    let doc_path = write_reply_schema_doc(
+        &dir,
+        "a.test.yaml",
+        r#"{"id":"r-1"}"#,
+        "jsonSchema: {path: reply.schema.json}",
+    );
+    let _guard = CleanupPaths(vec![dir.clone()]);
+    let outcome = reply_outcome(&dir, &doc_path).await;
+    assert!(outcome.is_ok(), "conforming reply must pass: {outcome:?}");
+}
+
+/// A schema-violating reply fails with the first violation appended to the
+/// reply-body mismatch message (`{message} at {instance_path}`).
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_json_schema_violating_reply_fails_with_violation() {
+    let dir = temp_dir("reply-schema-violation");
+    let doc_path = write_reply_schema_doc(
+        &dir,
+        "a.test.yaml",
+        "{}",
+        "jsonSchema: {path: reply.schema.json}",
+    );
+    let _guard = CleanupPaths(vec![dir.clone()]);
+    let outcome = reply_outcome(&dir, &doc_path).await;
+    let msg = outcome.expect_err("a schema-violating reply must fail"); // allow-unwrap
+    assert!(
+        msg.contains("reply body mismatch"),
+        "failure must keep the mismatch prefix: {msg}"
+    );
+    assert!(
+        msg.contains("jsonSchema"),
+        "failure must name the matcher: {msg}"
+    );
+    assert!(
+        msg.contains("reply.schema.json"),
+        "failure must name the schema path: {msg}"
+    );
+    assert!(
+        msg.contains(" at "),
+        "failure must carry `{{message}} at {{instance_path}}`: {msg}"
+    );
+}
+
+/// A non-JSON reply fails with the shape note (no schema evaluation).
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_json_schema_non_json_reply_fails_with_shape_note() {
+    let dir = temp_dir("reply-schema-shape");
+    let doc_path = write_reply_schema_doc(
+        &dir,
+        "a.test.yaml",
+        "not json",
+        "jsonSchema: {path: reply.schema.json}",
+    );
+    let _guard = CleanupPaths(vec![dir.clone()]);
+    let outcome = reply_outcome(&dir, &doc_path).await;
+    let msg = outcome.expect_err("a non-JSON reply must fail"); // allow-unwrap
+    assert!(
+        msg.contains("reply body mismatch"),
+        "failure must keep the mismatch prefix: {msg}"
+    );
+    assert!(
+        msg.contains("reply.schema.json"),
+        "failure must name the schema path: {msg}"
+    );
+    assert!(
+        msg.contains("body is not JSON"),
+        "failure must carry the shape note: {msg}"
+    );
+}
+
+/// `jsonSubset` reply assertions are untouched by the schema note: a
+/// matching subset passes and a non-matching reply fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn reply_json_subset_unchanged() {
+    let pass_dir = temp_dir("reply-subset-pass");
+    let pass_doc = write_reply_schema_doc(
+        &pass_dir,
+        "a.test.yaml",
+        r#"{"id":"r-1"}"#,
+        r#"jsonSubset: {id: "r-1"}"#,
+    );
+    let fail_dir = temp_dir("reply-subset-fail");
+    let fail_doc = write_reply_schema_doc(
+        &fail_dir,
+        "a.test.yaml",
+        r#"{"id":"other"}"#,
+        r#"jsonSubset: {id: "r-1"}"#,
+    );
+    let _guard = CleanupPaths(vec![pass_dir.clone(), fail_dir.clone()]);
+    let pass = reply_outcome(&pass_dir, &pass_doc).await;
+    assert!(
+        pass.is_ok(),
+        "matching jsonSubset reply must pass: {pass:?}"
+    );
+    let fail = reply_outcome(&fail_dir, &fail_doc).await;
+    assert!(fail.is_err(), "non-matching jsonSubset reply must fail");
 }

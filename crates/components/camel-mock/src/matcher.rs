@@ -6,6 +6,8 @@
 //! ruling).
 
 use std::fmt;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use camel_component_api::Body;
 use camel_matchers::{Expectation, expectation_matches};
@@ -32,6 +34,16 @@ pub enum BodyMatcher {
     Exists,
     /// The body is a JSON object that is a superset of the given object.
     JsonSubset(Value),
+    /// The body validates against a compiled JSON Schema (the confined
+    /// compiler of ADR-0100; see `camel-json-schema`). Compiled once at
+    /// load — never per assertion.
+    JsonSchema {
+        /// Compiled schema, shared because `CompiledSchema` is not `Clone`.
+        schema: Arc<camel_json_schema::CompiledSchema>,
+        /// Schema path as passed at load (document directory joined when
+        /// the declared path was relative), rendered in failure messages.
+        path: String,
+    },
 }
 
 impl BodyMatcher {
@@ -58,6 +70,68 @@ impl BodyMatcher {
                         expectation_matches(&Expectation::JsonSubset(pattern.clone()), &received)
                     })
             }
+            BodyMatcher::JsonSchema { schema, .. } => {
+                json_value(actual).is_some_and(|value| schema.violations(&value).is_empty())
+            }
+        }
+    }
+
+    /// Compile a JSON Schema file into a [`BodyMatcher::JsonSchema`].
+    ///
+    /// The single compile entry for the testkit: `syntax` maps the
+    /// document's declared `type` (`json`/`yaml`, omitted = extension rule)
+    /// onto [`camel_json_schema::SchemaSyntax`]. Format handling is
+    /// [`camel_json_schema::FormatMode::DraftDefault`] — this matcher's
+    /// explicit policy (the root document's `$schema` selects the draft),
+    /// distinct from the validator component's configured `Enforce`/
+    /// `Annotate`.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed at load, naming `path`: missing or unreadable file,
+    /// invalid schema, unresolvable `$ref` (per the ADR-0100 confinement
+    /// rules of the `json-schema-validation` spec).
+    pub fn json_schema_file(
+        path: impl Into<PathBuf>,
+        syntax: camel_json_schema::SchemaSyntax,
+    ) -> Result<Self, camel_json_schema::SchemaError> {
+        let path = path.into();
+        let schema = Arc::new(camel_json_schema::compile(
+            &camel_json_schema::SchemaSource::File(path.clone()),
+            syntax,
+            camel_json_schema::FormatMode::DraftDefault,
+        )?);
+        Ok(Self::JsonSchema {
+            path: path.display().to_string(),
+            schema,
+        })
+    }
+
+    /// The first schema violation when a JSON body fails a
+    /// [`BodyMatcher::JsonSchema`], formatted `"{message} at
+    /// {instance_path}"` (the shape `camel-processor` established).
+    /// `None` for every other matcher and for non-JSON bodies (the
+    /// mismatch note covers those).
+    #[must_use]
+    pub fn violation_note(&self, actual: &Body) -> Option<String> {
+        match self {
+            BodyMatcher::JsonSchema { schema, .. } => schema
+                .violations(&json_value(actual)?)
+                .first()
+                .map(|violation| format!("{} at {}", violation.message, violation.instance_path)),
+            _ => None,
+        }
+    }
+
+    /// The full failure note for a non-matching body: the shape note when
+    /// the body has the wrong shape (e.g. not JSON), else the first schema
+    /// violation for a [`BodyMatcher::JsonSchema`]. `None` when the matcher
+    /// reports no note (value-class mismatches render through `Display`).
+    #[must_use]
+    pub fn verdict_note(&self, actual: &Body) -> Option<String> {
+        match self.mismatch_note(actual) {
+            Some(shape) => Some(shape.to_string()),
+            None => self.violation_note(actual),
         }
     }
 
@@ -96,6 +170,10 @@ impl BodyMatcher {
                 }
             }
             BodyMatcher::Equals(_) | BodyMatcher::Exists => None,
+            BodyMatcher::JsonSchema { .. } => match json_value(actual) {
+                None => Some("body is not JSON"),
+                Some(_) => None,
+            },
         }
     }
 }
@@ -110,6 +188,7 @@ impl fmt::Display for BodyMatcher {
             BodyMatcher::EndsWith(s) => write!(f, "endsWith {s}"),
             BodyMatcher::Exists => write!(f, "exists"),
             BodyMatcher::JsonSubset(v) => write!(f, "jsonSubset {}", compact(v)),
+            BodyMatcher::JsonSchema { path, .. } => write!(f, "jsonSchema {path}"),
         }
     }
 }
@@ -214,7 +293,31 @@ fn json_value(body: &Body) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camel_json_schema::FormatMode;
+    use camel_json_schema::SchemaSource;
+    use camel_json_schema::SchemaSyntax;
     use serde_json::json;
+
+    /// The shared inline schema: an object requiring a string `id`,
+    /// compiled through the single testkit compile entry.
+    fn json_schema_matcher(path: &str) -> BodyMatcher {
+        let schema = Arc::new(
+            camel_json_schema::compile(
+                &SchemaSource::Inline(json!({
+                    "type": "object",
+                    "required": ["id"],
+                    "properties": {"id": {"type": "string"}}
+                })),
+                SchemaSyntax::Json,
+                FormatMode::DraftDefault,
+            )
+            .expect("the inline test schema compiles"),
+        );
+        BodyMatcher::JsonSchema {
+            schema,
+            path: path.to_string(),
+        }
+    }
 
     #[test]
     fn regex_body_pass_and_fail() {
@@ -354,6 +457,64 @@ mod tests {
         let matcher = BodyMatcher::JsonSubset(json!({"err": null}));
         assert!(matcher.matches(&Body::Json(json!({"err": null}))));
         assert!(!matcher.matches(&Body::Json(json!({"err": 0}))));
+    }
+
+    #[test]
+    fn json_schema_valid_body_matches() {
+        let matcher = json_schema_matcher("inline.json");
+        assert!(matcher.matches(&Body::Json(json!({"id": "order-1"}))));
+    }
+
+    #[test]
+    fn json_schema_violation_is_non_match() {
+        let matcher = json_schema_matcher("inline.json");
+        assert!(!matcher.matches(&Body::Json(json!({}))));
+        let note = matcher
+            .violation_note(&Body::Json(json!({})))
+            .expect("a violating body has a violation note");
+        assert!(note.contains(" at "), "note was {note:?}");
+        assert!(format!("{matcher}").contains("inline.json"));
+    }
+
+    #[test]
+    fn json_schema_text_body_parses_as_json() {
+        let matcher = json_schema_matcher("inline.json");
+        assert!(matcher.matches(&Body::Text(r#"{"id":"order-1"}"#.into())));
+    }
+
+    #[test]
+    fn json_schema_non_json_body_is_non_match() {
+        let matcher = json_schema_matcher("inline.json");
+        let non_json = Body::Text("not json".into());
+        assert!(!matcher.matches(&non_json));
+        assert_eq!(matcher.mismatch_note(&non_json), Some("body is not JSON"));
+        assert_eq!(matcher.violation_note(&non_json), None);
+        assert!(!matcher.matches(&Body::Empty));
+    }
+
+    #[test]
+    fn json_schema_other_matchers_have_no_violation_note() {
+        assert_eq!(
+            BodyMatcher::Regex("^a".into()).violation_note(&Body::Text("b".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn json_schema_clone_and_debug_derive() {
+        let matcher = json_schema_matcher("inline.json");
+        let m = matcher.clone();
+        assert!(format!("{m:?}").contains("JsonSchema"));
+    }
+
+    #[test]
+    fn json_schema_file_constructor_fails_closed() {
+        let error = BodyMatcher::json_schema_file("/nonexistent/dir/nope.json", SchemaSyntax::Auto)
+            .expect_err("a missing schema file must fail closed");
+        assert!(
+            error.to_string().contains("nope.json"),
+            "error was {error:?}"
+        );
     }
 
     #[test]
