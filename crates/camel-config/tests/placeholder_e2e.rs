@@ -45,6 +45,13 @@ fn load_with_env(dir: &tempfile::TempDir) -> Result<CamelConfig, config::ConfigE
     CamelConfig::from_file_with_env(&path)
 }
 
+/// Test-local component block: proves the PUBLIC probe surface coerces a
+/// block leaf from the `raw` map through the block's provenance.
+#[derive(serde::Deserialize)]
+struct TestPortConfig {
+    port: u16,
+}
+
 /// An unknown top-level section must resolve through the walk and land in the
 /// `_extra` capture with ZERO resolver code changes (anti-regression for the
 /// retired hand-enumerated allowlist class).
@@ -615,4 +622,160 @@ fn probe_cap_eight_bools_one_int_nine_candidates_fails() {
     let cfg = load(&dir).expect("eight mixed candidates must load through the probe");
     assert!(cfg.watch);
     assert_eq!(cfg.timeout_ms, 5000);
+}
+
+// --- Per-block component provenance (envtyped-components Task 1.2) ---
+
+/// A component block's placeholder leaf keeps its resolved STRING in `raw`
+/// and lands in the block's provenance, reachable through the public
+/// surface: the bundle-side probe coerces it.
+#[test]
+fn component_block_provenance_recorded_and_raw_keeps_strings() {
+    let _guard = EnvGuard::remove("CFG_REDIS_PORT");
+    let dir = write_main(
+        r#"[components.redis]
+port = "${env:CFG_REDIS_PORT:-6379}"
+"#,
+        &[],
+    );
+
+    let cfg = load(&dir).expect("component placeholder must load");
+    let raw_redis = cfg
+        .components
+        .raw
+        .get("redis")
+        .expect("redis block must stay in raw");
+    assert_eq!(
+        raw_redis.get("port").and_then(|value| value.as_str()),
+        Some("6379"),
+        "raw keeps the resolved string"
+    );
+    let parsed: TestPortConfig = camel_config::deserialize_block_with_probe(
+        raw_redis,
+        cfg.components.provenance_for("redis"),
+        |value| value.try_into::<TestPortConfig>(),
+    )
+    .expect("the block provenance must let the probe coerce the leaf");
+    assert_eq!(parsed.port, 6379);
+}
+
+/// A token-free `CAMEL_*` override feeds root fields only: it never enters a
+/// component block's provenance (the block's own token leaf still does).
+#[test]
+fn override_values_never_enter_component_provenance() {
+    let mut _env = EnvGuard::set("CAMEL_LOG_LEVEL", "warn");
+    _env.and_remove("CFG_REDIS_PORT3");
+    let dir = write_main(
+        r#"[components.redis]
+port = "${env:CFG_REDIS_PORT3:-6379}"
+"#,
+        &[],
+    );
+
+    let cfg = load_with_env(&dir).expect("override-merged load must succeed");
+    assert_eq!(
+        cfg.log_level, "warn",
+        "the token-free override landed on the root field"
+    );
+    let raw_redis = cfg
+        .components
+        .raw
+        .get("redis")
+        .expect("redis block must stay in raw");
+    assert_eq!(
+        raw_redis.get("port").and_then(|value| value.as_str()),
+        Some("6379"),
+        "the block leaf keeps the resolved string"
+    );
+    let parsed: TestPortConfig = camel_config::deserialize_block_with_probe(
+        raw_redis,
+        cfg.components.provenance_for("redis"),
+        |value| value.try_into::<TestPortConfig>(),
+    )
+    .expect("the block leaf remains a probe candidate");
+    assert_eq!(parsed.port, 6379);
+}
+
+/// The root arm's whole-tree candidate cap counts component leaves too:
+/// one root candidate plus eight component candidates exceed it, so the
+/// bundle side is never reached and the first-pass root error stands.
+#[test]
+fn root_probe_still_counts_component_candidates() {
+    let mut _guard = EnvGuard::acquire();
+    for name in [
+        "EP_RP_1",
+        "EP_RP_2",
+        "EP_RP_3",
+        "EP_RP_4",
+        "EP_RP_5",
+        "EP_RP_6",
+        "EP_RP_7",
+        "EP_RP_8",
+        "CFG_ROOT_T",
+    ] {
+        _guard.and_remove(name);
+    }
+    let dir = write_main(
+        r#"timeout_ms = "${env:CFG_ROOT_T:-1500}"
+
+[components.http]
+connect_timeout_ms = "${env:EP_RP_1:-5000}"
+pool_idle_timeout_ms = "${env:EP_RP_2:-9000}"
+response_timeout_ms = "${env:EP_RP_3:-30000}"
+read_timeout_ms = "${env:EP_RP_4:-30000}"
+max_body_size = "${env:EP_RP_5:-10485760}"
+max_response_bytes = "${env:EP_RP_6:-10485760}"
+max_request_body = "${env:EP_RP_7:-10485760}"
+follow_redirects = "${env:EP_RP_8:-true}"
+"#,
+        &[],
+    );
+
+    let err = load(&dir).expect_err("nine whole-tree candidates must exceed the cap");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Failed to deserialize merged config"),
+        "cap decline must surface the FIRST-PASS deserialize error: {msg}"
+    );
+    assert!(
+        msg.contains("timeout_ms"),
+        "the first-pass error must name the root field: {msg}"
+    );
+}
+
+/// Control for the cap test: one root candidate plus seven component
+/// candidates stay under the cap, so the root probe still coerces the root
+/// field (component leaves are never type-checked by the root arm).
+#[test]
+fn root_probe_under_cap_still_coerces() {
+    let mut _guard = EnvGuard::acquire();
+    for name in [
+        "EP_RP_1",
+        "EP_RP_2",
+        "EP_RP_3",
+        "EP_RP_4",
+        "EP_RP_5",
+        "EP_RP_6",
+        "EP_RP_7",
+        "CFG_ROOT_T",
+    ] {
+        _guard.and_remove(name);
+    }
+    let dir = write_main(
+        r#"timeout_ms = "${env:CFG_ROOT_T:-1500}"
+
+[components.http]
+connect_timeout_ms = "${env:EP_RP_1:-5000}"
+pool_idle_timeout_ms = "${env:EP_RP_2:-9000}"
+response_timeout_ms = "${env:EP_RP_3:-30000}"
+read_timeout_ms = "${env:EP_RP_4:-30000}"
+max_body_size = "${env:EP_RP_5:-10485760}"
+max_response_bytes = "${env:EP_RP_6:-10485760}"
+max_request_body = "${env:EP_RP_7:-10485760}"
+"#,
+        &[],
+    );
+
+    let cfg = load(&dir).expect("eight whole-tree candidates must load through the probe");
+    assert_eq!(cfg.timeout_ms, 1500);
 }

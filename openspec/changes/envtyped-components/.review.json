@@ -1,0 +1,12 @@
+{
+  "kind": "holistic-review",
+  "change": "envtyped-components",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "rounds": 2,
+  "round_1": "APPROVE-WITH-FINDINGS (1 important: camel-config/CONTEXT.md provenance section stale — docs-authority obligation; 1 legitimate-minor: redundant ProvenanceSet clone at the seam)",
+  "round_2": "APPROVE (both findings fixed and verified against code)",
+  "bless_hash": "sha256:c81a94d9d0e6e03b7825b211e1a313486d51d4dd9923490698075070ded15d25",
+  "impl_head": "4a4614adf",
+  "date": "2026-11-21"
+}

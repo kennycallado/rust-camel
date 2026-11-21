@@ -179,6 +179,8 @@ xtask | local | cargo test -p xtask
 camel-language-rhai | local | cargo test -p camel-language-rhai
 camel-auth | local | cargo test -p camel-auth
 camel-bundles | local | cargo test -p camel-bundles
+# --- camel-config: own tests/ + integration surface (mission 603)
+camel-config | local | cargo test -p camel-config
 # own tests/ (#[ignore] targets excluded by default)
 camel-component-wasm | local | cargo test -p camel-component-wasm
 # --- sqltrans-portmodel: crates with integration surfaces touched by the change

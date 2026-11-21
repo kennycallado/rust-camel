@@ -105,28 +105,49 @@ component grows a genuine credential leaf, the principle says extend
 retained for compatibility; it is OFF the load path.
 
 PROVENANCE + TYPED PROBE (env-int-placeholder-typing): the walk also returns a
-`struct ProvenanceSet` (`env_int_probe.rs:34`) of STRUCTURAL
+`struct ProvenanceSet` (`env_int_probe.rs:44`) of STRUCTURAL
 `enum ConfigSeg` (`env_int_probe.rs:25`) paths for token-bearing string leaves
 only — recorded before resolution, in document order. Resolution behavior
-is unchanged; `fn resolve_tree_with` delegates to
-`fn resolve_tree_with_provenance` (`config.rs:3180`) and discards the set.
+is unchanged. Both load seams attach the set rather than discard it: the walk
+runs through `fn resolve_tree_with_provenance` (`config.rs:3373`), so
+`fn from_toml_value_with_env` and `fn build_from_toml_value_inner` split the
+whole-tree set by `components.<block>` (`ProvenanceSet::split_by_component`)
+and store it on `ComponentsConfig` (`serde(skip)`, ignored by the hand-written
+`PartialEq`; only `raw` counts). The plain `fn resolve_tree_with` wrapper keeps
+its discard-the-set signature for callers that only need resolution.
 At the strict `try_into` boundary, the probe
-(`fn deserialize_with_probe`, `env_int_probe.rs:142`) first runs today's strict
+(`fn deserialize_with_probe`, `env_int_probe.rs:252`) first runs today's strict
 deserialization; on failure it tries candidate subsets ascending-size (cap
 8), coercing leaves whose post-resolution text passes
-`fn clean_i64` (`env_int_probe.rs:98`; i64-only, a SYNC mirror of camel-dsl's
-u64-inclusive `clean_integer`) to `toml::Value::Integer` in cloned trees.
+`fn clean_i64` (`env_int_probe.rs:131`; i64-only, a SYNC mirror of camel-dsl's
+u64-inclusive `clean_integer`) or `fn clean_bool` (`env_int_probe.rs:155`) to
+`toml::Value::Integer` / `toml::Value::Boolean` in cloned trees.
 First success wins; otherwise the original first-pass error stands. Because
 `CAMEL_*` overrides merge into the raw tree BEFORE the walk, a token-bearing
 override is recorded and probes too. Literal quoted numerics carry no token,
 never enter the set, and stay rejected.
 
+**Per-block provenance reaches bundles.**
+`ComponentsConfig::provenance_for(key)` hands one block's set (empty for an
+unknown key) across the crate boundary to
+`camel_bundles::bundle_from_config`, which passes it to the public
+`fn deserialize_block_with_probe` helper (`env_int_probe.rs:197`). The bundle's
+own `from_toml` runs first on the table as written; only when it fails are
+this block's provenance-backed clean integer and boolean leaves coerced and
+retried, at most 8 candidates per block, and if no coerced subset parses the
+first-pass error is returned verbatim. The raw table in
+`ComponentsConfig.raw` is never rewritten.
+Stale-provenance rule: a set describes values the loader resolved. A caller
+that edits `ComponentsConfig.raw` after load must rebuild the block —
+default-construct `ComponentsConfig`, then assign the edited map — so no
+stale path coerces a token-free value.
+
 **Env-override allowlist (L-C2).**
 `CAMEL_*` overrides merge through a fixed allowlist (`ALLOWED_ENV_OVERRIDES`). Any other `CAMEL_*` variable is ignored with a warning. The merge dispatches on value kind. `LEGACY_STRING_ENV_OVERRIDES` (`CAMEL_CACHE_REPO_BACKEND`, `CAMEL_CACHE_REPO_PATH`, `CAMEL_CACHE_REPO_STALE_RETENTION`) passes the raw value through verbatim as a string, with no numeric or boolean coercion. It is deliberately NOT empty-skippable: an empty value overrides the file value and fails validation loudly. `STRING_ENV_OVERRIDES` (the six newer string-typed cache_repo scalars) and `EMPTY_SCALAR_ENV_OVERRIDES` (those six plus `CAMEL_CACHE_REPO_DB`) keep their scopes unchanged. The string set is a subset of the empty-skip set, so an empty value never reaches typed deserialization. `CAMEL_CACHE_REPO_SENTINEL_NODES` is the only CSV-list override. An empty value replaces the file list and normalizes to absent on redis. Duration fields (`stale_retention`, `sweep_interval`) require humantime units. A unitless numeric value fails validation with `cache_repo.stale_retention: invalid duration '604800' — use a unit-bearing form such as '7d' or '24h'` (same shape for `cache_repo.sweep_interval`). Contract: [cache-repo-configuration spec](../../openspec/specs/cache-repo-configuration/spec.md).
 
 **Include entries are never interpolated.**
-The loader strips all `include` keys from the raw tree pre-placeholder and resolves those entries as plain filesystem paths before any merge or interpolation: stripping sits in `fn extract_includes` (`config.rs:2242`), loading in `fn load_includes`, path resolution in `fn resolve_include_path` (`include.rs:12`).
-`${env:}` expansion runs only post-merge and only on leaf VALUES (`fn resolve_tree_placeholders`, invoked post-merge at `config.rs:2585`).
+The loader strips all `include` keys from the raw tree pre-placeholder and resolves those entries as plain filesystem paths before any merge or interpolation: stripping sits in `fn extract_includes` (`config.rs:2790`), loading in `fn load_includes`, path resolution in `fn resolve_include_path` (`include.rs:12`).
+`${env:}` expansion runs only post-merge and only on leaf VALUES (`fn resolve_tree_with_provenance`, invoked post-merge at `config.rs:3277`; `fn resolve_tree_placeholders` is its no-provenance public wrapper).
 An entry like `include = ["${env:CAMEL_INCLUDE_CONF}"]` therefore fails with "included file not found": the raw marker is treated as the filename.
 Recursive includes are unsupported in V1: `fn load_includes` drops a nested `include` key with a warning (`include.rs:91`).
 

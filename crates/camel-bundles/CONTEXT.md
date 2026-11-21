@@ -31,7 +31,11 @@ the omission is asserted by both polarity tests. Each bundle goes through the
 from the config, keyed by `config_key()`. A missing key falls back to an
 empty table. The bundle then registers with its serde defaults. Conditional
 gates (the CLI exec gate, the integration harness) call the same seam for
-one bundle outside the always-on set.
+one bundle outside the always-on set. The seam is provenance-aware: when a
+bundle's `from_toml` fails on the block as written, it retries with that
+block's provenance-backed clean integer and boolean leaves coerced (at most
+8 candidates per block), and returns the first-pass error verbatim when no
+coerced subset parses.
 _Avoid_: component setup, registration list
 
 **BootHandle**:

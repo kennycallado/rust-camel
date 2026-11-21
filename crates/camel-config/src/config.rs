@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::env_int_probe::{ConfigSeg, ProvenanceSet, deserialize_with_probe};
@@ -381,12 +382,46 @@ fn default_kubernetes_jitter_factor() -> f64 {
     0.2
 }
 
-#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct ComponentsConfig {
     /// Raw per-component config blocks, keyed by component name.
     /// Each bundle is responsible for deserializing its own block.
     #[serde(flatten)]
     pub raw: HashMap<String, toml::Value>,
+
+    /// Per-block structural paths of the token-carrying leaves resolved by
+    /// the loader. Metadata about how values arrived, never a value; see
+    /// [`Self::provenance_for`] and the stale-provenance rule on
+    /// [`ProvenanceSet`].
+    #[serde(skip)]
+    pub(crate) provenance: HashMap<String, ProvenanceSet>,
+}
+
+impl PartialEq for ComponentsConfig {
+    /// Provenance is metadata about how values arrived, not a value; derived
+    /// equality would break default-vs-loaded comparisons. Only `raw` counts.
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
+}
+
+impl ComponentsConfig {
+    /// Provenance of the resolved leaves inside one component block.
+    ///
+    /// The config owns resolution and provenance recording; the bundle owns
+    /// its key and its parsing; this accessor only hands the block's metadata
+    /// across that boundary. Unknown keys yield an empty set.
+    ///
+    /// Stale-provenance rule (carried from [`ProvenanceSet`]): a caller that
+    /// edits [`Self::raw`] after load must rebuild the block —
+    /// default-construct `ComponentsConfig`, then assign the edited map — so
+    /// no stale path coerces a token-free value.
+    pub fn provenance_for(&self, key: &str) -> &ProvenanceSet {
+        static EMPTY: OnceLock<ProvenanceSet> = OnceLock::new();
+        self.provenance
+            .get(key)
+            .unwrap_or_else(|| EMPTY.get_or_init(ProvenanceSet::default))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -1325,6 +1360,12 @@ mod camel_config_defaults_tests;
 #[cfg(test)]
 #[path = "config_tests/components_config_tests.rs"]
 mod components_config_tests;
+
+/// Per-block provenance on `ComponentsConfig` (envtyped-components Task
+/// 1.2): the load-time attachment and the public block accessor.
+#[cfg(test)]
+#[path = "config_tests/components_provenance_tests.rs"]
+mod components_provenance_tests;
 
 #[cfg(test)]
 #[path = "config_tests/prometheus_config_tests.rs"]
@@ -2690,6 +2731,10 @@ impl CamelConfig {
         }
         let provenance = resolve_tree_with_provenance(&mut value, lookup)?;
         let mut config: CamelConfig = deserialize_with_probe(&value, &provenance)?;
+        // Per-block provenance for the bundle-side typed probe
+        // (envtyped-components): each block's token leaves, relative to the
+        // block, handed to bundles through `ComponentsConfig::provenance_for`.
+        config.components.provenance = provenance.split_by_component();
         // FR1 (deployment-resolvable-cache-repo-topology), mirroring the
         // filesystem loader: topology values that expanded empty become
         // absent before validation selects the topology.
@@ -3240,6 +3285,10 @@ fn build_from_toml_value_inner(
     // numerics carry no token, never enter the provenance set, and stay
     // rejected.
     let mut config: CamelConfig = deserialize_with_probe(&merged_tree, &provenance)?;
+    // Per-block provenance for the bundle-side typed probe
+    // (envtyped-components): each block's token leaves, relative to the
+    // block, handed to bundles through `ComponentsConfig::provenance_for`.
+    config.components.provenance = provenance.split_by_component();
     // FR1 (deployment-resolvable-cache-repo-topology): topology values that
     // expanded empty (e.g. `url = "${env:REDIS_URL:-}"` with the var unset,
     // or a literal `""`) become absent before validation selects the

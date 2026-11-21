@@ -21,6 +21,9 @@ use camel_config::{LanguagesConfig, RhaiEngineConfig, RhaiLimitsConfig};
 /// vacuously. The projected fields (`runtime_journal`, `observability`)
 /// stay at their defaults.
 fn sample_job_config() -> CamelConfig {
+    let mut components = ComponentsConfig::default();
+    components.raw =
+        HashMap::from([("timer".to_string(), toml::Value::String("keep".to_string()))]);
     CamelConfig {
         routes: vec!["direct:job-probe".to_string()],
         watch: true,
@@ -48,9 +51,7 @@ fn sample_job_config() -> CamelConfig {
         timeout_ms: 4321,
         drain_timeout_ms: 8765,
         watch_debounce_ms: 321,
-        components: ComponentsConfig {
-            raw: HashMap::from([("timer".to_string(), toml::Value::String("keep".to_string()))]),
-        },
+        components,
         supervision: Some(SupervisionCamelConfig {
             max_attempts: Some(7),
             ..Default::default()

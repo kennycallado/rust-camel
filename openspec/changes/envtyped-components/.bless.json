@@ -1,0 +1,19 @@
+{
+  "kind": "plan",
+  "change": "envtyped-components",
+  "verdict": "BLESSED",
+  "hash": "sha256:c81a94d9d0e6e03b7825b211e1a313486d51d4dd9923490698075070ded15d25",
+  "expert": "experts/e_gpt",
+  "rounds": 3,
+  "reviewer_loop": "r_glm x2 (round1: 2 critical/1 important/3 minor fixed; round2: 1 important/3 minor fixed)",
+  "spec_bless": {
+    "verdict": "BLESSED",
+    "hash": "sha256:233e2bc041e1fc535f60a21cdf1c525408695556fc26502fef155f3d9aabdaf0"
+  },
+  "history": [
+    { "round": 1, "verdict": "BLESS-WITH-FIXES", "hash": "sha256:ebca98c2790c7379d5b0ae69f9e3efcf1d682e59f3b093eddcf94929fa2c6ee9", "findings": 5 },
+    { "round": 2, "verdict": "BLESS-WITH-FIXES", "hash": "sha256:03569c9a35614bb54a21a4483e5aaae49d821d88b5af50a3daf21b63c8d68fed", "findings": 2 },
+    { "round": 3, "verdict": "BLESSED", "hash": "sha256:c81a94d9d0e6e03b7825b211e1a313486d51d4dd9923490698075070ded15d25", "findings": 0 }
+  ],
+  "date": "2026-11-21"
+}

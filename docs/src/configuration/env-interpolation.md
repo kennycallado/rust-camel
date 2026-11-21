@@ -57,6 +57,38 @@ names the field. In route files, the load fails with the original parse
 error. A literal quoted `"true"` with no placeholder never coerces, because
 it carries no token.
 
+## Component configuration
+
+A `[components.*]` block holds untyped TOML that each bundle parses itself.
+Environment tokens resolve in those leaves like any other `Camel.toml`
+string:
+
+```toml
+[components.redis]
+port = "${env:REDIS_PORT:-6379}"
+```
+
+String leaves keep the resolved text. Integer and boolean leaves follow the
+rule in [Typed values](#typed-values) — the same clean-value gates — applied
+at the bundle seam. The bundle parses its block first. Only when that parse
+fails does `camel-config` coerce provenance-backed clean integer and boolean
+leaves of that block and retry, with at most eight candidates per component
+block. The root-field probe still counts the whole tree, so a `[components.*]`
+block never changes root-field behavior. A block with more than eight
+candidate leaves keeps the bundle's first-pass error, verbatim.
+
+`ComponentsConfig.raw` keeps the resolved strings. Resolution runs at config
+load, and coercion works on cloned trees, so `raw` never holds a coerced
+type or a rewritten value.
+
+**Stale provenance:** a caller that edits `ComponentsConfig.raw` after load
+must rebuild the config — default-construct `ComponentsConfig`, then assign
+the edited map. Rebuilding drops the metadata that records which leaves
+carried a token, so no stale path coerces a token-free value. That metadata
+is never a value and never affects config equality.
+
+Route-document and DSL seams are covered separately (rc-3c67o.2).
+
 ## Escapes
 
 | Input | Output |

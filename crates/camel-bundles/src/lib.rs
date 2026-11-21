@@ -208,6 +208,14 @@ impl BootHandle {
 /// with its serde defaults. Returns the bundle's own `from_toml` error
 /// verbatim.
 ///
+/// Env-typed behavior: `from_toml` runs first on the table as written. Only
+/// when it fails are provenance-backed clean integer and boolean leaves of
+/// this block coerced to their typed values and retried, at most 8
+/// candidates per block. When no coerced subset parses, the first-pass
+/// error is returned verbatim, so a genuinely invalid table reads exactly
+/// as it did before. The raw table in `config` is never rewritten; coercion
+/// happens on cloned trees.
+///
 /// The parse half of the [`register_bundle`] seam: conditional registration
 /// sites (the CLI exec gate, the integration harness) and the
 /// catalog-threaded Sql/SurrealDb blocks need the parsed bundle before
@@ -221,7 +229,13 @@ pub fn bundle_from_config<B: camel_component_api::ComponentBundle>(
         .get(<B as camel_component_api::ComponentBundle>::config_key())
         .cloned()
         .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
-    <B as camel_component_api::ComponentBundle>::from_toml(raw)
+    camel_config::deserialize_block_with_probe(
+        &raw,
+        config
+            .components
+            .provenance_for(<B as camel_component_api::ComponentBundle>::config_key()),
+        |tree| <B as camel_component_api::ComponentBundle>::from_toml(tree),
+    )
 }
 
 /// Register one bundle on `ctx` from its `[components.<config_key()>]`

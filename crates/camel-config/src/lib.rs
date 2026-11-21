@@ -31,6 +31,7 @@ pub use discovery::{
     DiscoveryError, discover_routes, discover_routes_with_threshold,
     discover_routes_with_threshold_and_security,
 };
+pub use env_int_probe::{ProvenanceSet, deserialize_block_with_probe};
 pub use json::{
     load_json_from_file, parse_json, parse_json_to_canonical, parse_json_to_declarative,
     parse_json_with_threshold,
