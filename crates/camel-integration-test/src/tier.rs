@@ -155,6 +155,11 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
             | BuilderStep::DeclarativeDynamicRouter { .. } => *dynamic_dispatch = true,
 
             // Single nested `steps` child list.
+            //
+            // `Transacted` joins this group because it is pure composition: its
+            // `datasource` is a registry name, NOT an endpoint URI (so it never
+            // joins `uris`), it dispatches nothing dynamically, and its tier is
+            // the union of its children's tiers.
             BuilderStep::DeclarativeFilter { steps, .. }
             | BuilderStep::DeclarativeSplit { steps, .. }
             | BuilderStep::DeclarativeStreamSplit { steps, .. }
@@ -167,7 +172,8 @@ fn walk_steps<'a>(steps: &'a [BuilderStep], uris: &mut Vec<&'a str>, dynamic_dis
             | BuilderStep::LoadBalance { steps, .. }
             | BuilderStep::Loop { steps, .. }
             | BuilderStep::DeclarativeLoop { steps, .. }
-            | BuilderStep::IdempotentConsumer { steps, .. } => {
+            | BuilderStep::IdempotentConsumer { steps, .. }
+            | BuilderStep::Transacted { steps, .. } => {
                 walk_steps(steps, uris, dynamic_dispatch);
             }
 
@@ -430,6 +436,37 @@ mod tests {
             let input = inputs(false, &intercepts, &schemes);
             assert_eq!(derive_tier(&routes, &input), Tier::Full, "case {name}");
         }
+    }
+
+    #[test]
+    fn tier_transacted_block_recurses_into_body() {
+        let schemes = unit_schemes();
+        let intercepts = Vec::new();
+        let input = inputs(false, &intercepts, &schemes);
+        // A transacted block is pure composition: its `datasource` is a
+        // registry name, NOT an endpoint URI, so only the body's schemes
+        // reach the closure.
+        let lean = [route(
+            "direct:start",
+            vec![BuilderStep::Transacted {
+                datasource: "pg".into(),
+                steps: vec![BuilderStep::To("seda:inner".into())],
+            }],
+        )];
+        assert_eq!(derive_tier(&lean, &input), Tier::Lean);
+
+        let full = [route(
+            "direct:start",
+            vec![BuilderStep::Transacted {
+                datasource: "pg".into(),
+                steps: vec![BuilderStep::To("kafka:orders".into())],
+            }],
+        )];
+        assert_eq!(
+            derive_tier(&full, &input),
+            Tier::Full,
+            "a non-lean URI nested in the block body joins the closure"
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ use camel_api::{
     runtime::{
         CanonicalAggregateSpec, CanonicalAggregateStrategySpec, CanonicalCircuitBreakerSpec,
         CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
-        CanonicalWhenSpec,
+        CanonicalTransactedSpec, CanonicalWhenSpec,
     },
 };
 use camel_component_api::ConcurrencyModel;
@@ -846,6 +846,41 @@ impl RouteBuilder {
         }
     }
 
+    /// Add a transacted database block.
+    ///
+    /// Every step in `steps` runs inside one database transaction bound to
+    /// `datasource`. Unlike [`split`](Self::split) and
+    /// [`multicast`](Self::multicast) there is no sub-builder: a block exposes
+    /// no configuration beyond its datasource and body, so the steps are
+    /// passed inline.
+    ///
+    /// Dark in slice 1: nothing registers a transaction manager, so a route
+    /// carrying this block fails closed at start with
+    /// `TransactionError::ManagerMissing`; camel-sql registers managers in
+    /// slice 2 (`rc-qv2iz.6`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// RouteBuilder::from("direct:orders")
+    ///     .route_id("orders")
+    ///     .transacted("pg", [
+    ///         BuilderStep::To("sql:insert into orders values (1)?datasource=pg".into()),
+    ///         BuilderStep::To("sql:insert into audit values (1)?datasource=pg".into()),
+    ///     ])
+    ///     .build()
+    /// ```
+    pub fn transacted(
+        mut self,
+        datasource: impl Into<String>,
+        steps: impl IntoIterator<Item = impl Into<BuilderStep>>,
+    ) -> Self {
+        self.steps.push(BuilderStep::Transacted {
+            datasource: datasource.into(),
+            steps: steps.into_iter().map(Into::into).collect(),
+        });
+        self
+    }
+
     /// Begin a Throttle sub-pipeline. Rate limits message processing to at most
     /// `max_requests` per `period`. Steps inside the throttle scope are only
     /// executed when the rate limit allows.
@@ -1360,6 +1395,12 @@ fn canonicalize_step(step: BuilderStep) -> Result<CanonicalStepSpec, CamelError>
         BuilderStep::Aggregate { config } => Ok(CanonicalStepSpec::Aggregate(
             canonicalize_aggregate(config)?,
         )),
+        BuilderStep::Transacted { datasource, steps } => {
+            Ok(CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+                datasource,
+                steps: canonicalize_steps(steps)?,
+            }))
+        }
         other => {
             let step_name = canonical_step_name(&other);
             let detail = camel_api::canonical_contract_rejection_reason(step_name)
@@ -1581,6 +1622,7 @@ fn canonical_step_name(step: &BuilderStep) -> &'static str {
         BuilderStep::Resequence { .. } => "resequence",
         BuilderStep::LayeredTo { .. } => "to_layered",
         BuilderStep::Layered { .. } => "layered",
+        BuilderStep::Transacted { .. } => "transacted",
     }
 }
 

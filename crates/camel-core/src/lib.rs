@@ -72,6 +72,10 @@ pub(crate) use registry::{
     CacheRegistry, ClaimCheckRegistry, IdempotentRegistry, SharedCacheRegistry,
     SharedClaimCheckRegistry, SharedIdempotentRegistry,
 };
+// Public transaction-manager registry surface. Dark in slice 1 — nothing
+// registers a manager; camel-sql registers per datasource in slice 2
+// (rc-qv2iz.6).
+pub use registry::{TransactionManagerRegistry, resolve_transaction_manager};
 pub mod intercept;
 pub(crate) mod shared;
 pub mod startup_validation;

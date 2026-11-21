@@ -738,6 +738,44 @@ routes:
         );
     }
 
+    /// A route carrying a `transacted:` block must fail at bundle boot load,
+    /// not at pipeline build: boot funnels route YAML through
+    /// `parse_yaml_with_threshold_and_security`, which validates every block
+    /// before lowering and fails closed with the typed, named rejection.
+    #[test]
+    fn bundle_boot_rejects_block() {
+        use camel_api::CamelError;
+        use camel_api::transaction::TransactionError;
+
+        let yaml = r#"
+routes:
+  - id: route-transacted
+    from: direct:start
+    steps:
+      - transacted:
+          datasource: pg
+          steps:
+            - to: "sql:select 1?datasource=pg"
+"#;
+        let error = match camel_dsl::parse_yaml_with_threshold_and_security(
+            yaml,
+            1024,
+            camel_dsl::SecurityCompileContext::default(),
+        ) {
+            Ok(_) => panic!("boot must reject a block with no registered manager"),
+            Err(error) => error,
+        };
+
+        assert!(
+            matches!(
+                &error,
+                CamelError::Transaction(TransactionError::ManagerMissing { datasource })
+                    if datasource == "pg"
+            ),
+            "expected ManagerMissing {{ datasource: \"pg\" }} at boot load, got {error:?}"
+        );
+    }
+
     /// Wasm-backed `[security.policies]` must be rejected with a Config
     /// error naming camel-bundles' own wasm feature when that feature is
     /// off (runs under `--no-default-features --features security`).

@@ -613,6 +613,7 @@ pub enum RouteDslStep {
     Aggregate(AggregateStep),
     WireTap(WireTapStep),
     Multicast(MulticastStep),
+    Transacted(TransactedStep),
     RoutingSlip(RoutingSlipStep),
     RecipientList(RecipientListStep),
     ScatterGather(ScatterGatherStep),
@@ -1185,6 +1186,97 @@ pub struct MulticastData {
 
 fn default_multicast_aggregation() -> String {
     "last_wins".to_string()
+}
+
+/// Authored `transacted:` block (sqltrans, slice 1).
+///
+/// Mirrors the sibling composite steps ([`MulticastStep`]): the enum payload
+/// wraps the authored key, and [`TransactedData`] carries the block body.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TransactedStep {
+    /// The authored `transacted:` block body.
+    pub transacted: TransactedData,
+}
+
+/// Body of an authored `transacted:` block.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TransactedData {
+    /// Datasource whose transaction manager scopes the block.
+    pub datasource: String,
+    /// Block body, compiled as one transacted section.
+    #[serde(default)]
+    pub steps: Vec<RouteDslStep>,
+}
+
+/// Keys a `transacted:` block accepts; everything else is an authoring error.
+const TRANSACTED_KEYS: [&str; 2] = ["datasource", "steps"];
+
+/// Reject unknown keys inside every `transacted:` block, naming each one.
+///
+/// [`RouteDslStep`] is `#[serde(untagged)]`, which swallows the per-variant
+/// `unknown_field` message (the same limitation pinned by
+/// `yaml_rejects_authored_request_borne_marker` in `yaml.rs`): a typo inside a
+/// block would surface only as "did not match any variant". The raw document
+/// is therefore inspected before typed conversion — map keys are collected,
+/// the known set is subtracted, and the unknown keys are named. Requires no
+/// schema knowledge: any mapping whose `transacted` value is a mapping is
+/// checked, wherever it appears in the document.
+///
+/// Malformed YAML returns `Ok(())` on purpose: the typed parse owns that error
+/// (and its logging policy), so this pre-scan never masks or reclassifies it.
+/// The JSON loader calls this on its own document text — JSON is a YAML 1.2
+/// subset, and a malformed document fails the same way.
+pub(crate) fn reject_unknown_transacted_keys(yaml: &str) -> Result<(), String> {
+    // Cheap guard: the typed parse is the hot path and most documents have no
+    // block at all. A bean/header/etc. literally named `transacted` elsewhere
+    // also trips it: a harmless extra re-parse, the typed parse owns the
+    // verdict — accepted coupling.
+    if !yaml.contains("transacted") {
+        return Ok(());
+    }
+    let Ok(doc) = serde_yml::from_str::<serde_yml::Value>(yaml) else {
+        return Ok(());
+    };
+    let mut unknown = std::collections::BTreeSet::new();
+    collect_unknown_transacted_keys(&doc, &mut unknown);
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "transacted: unknown key(s) inside the block: {} (expected: datasource, steps)",
+        unknown.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+fn collect_unknown_transacted_keys(
+    value: &serde_yml::Value,
+    unknown: &mut std::collections::BTreeSet<String>,
+) {
+    match value {
+        serde_yml::Value::Mapping(map) => {
+            if let Some(serde_yml::Value::Mapping(block)) = map.get("transacted") {
+                for key in block.keys() {
+                    if TRANSACTED_KEYS.contains(&key.as_str()) {
+                        continue;
+                    }
+                    unknown.insert(key.to_string());
+                }
+            }
+            for nested in map.values() {
+                collect_unknown_transacted_keys(nested, unknown);
+            }
+        }
+        serde_yml::Value::Sequence(items) => {
+            for item in items {
+                collect_unknown_transacted_keys(item, unknown);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema, ts_rs::TS))]

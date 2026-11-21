@@ -126,7 +126,8 @@ pub fn scan_route_definitions_for_sql_checks(
 /// plus all structural sub-pipelines whose `steps` are known at parse time
 /// (`Filter` / `DeclarativeFilter`, `Split` / `DeclarativeSplit` /
 /// `DeclarativeStreamSplit`, `Multicast`, `Throttle`, `LoadBalance`,
-/// `Loop` / `DeclarativeLoop`, `IdempotentConsumer`, `Layered`), the `Choice` and
+/// `Loop` / `DeclarativeLoop`, `IdempotentConsumer`, `Transacted`, `Layered`),
+/// the `Choice` and
 /// `DeclarativeChoice` `whens` (and `otherwise`), and the
 /// `DeclarativeDoTry` `try_steps` / `catch` / `finally` blocks.
 ///
@@ -154,6 +155,7 @@ fn for_each_step_uri<F: FnMut(&str)>(step: &BuilderStep, f: &mut F) {
         | BuilderStep::Loop { steps, .. }
         | BuilderStep::DeclarativeLoop { steps, .. }
         | BuilderStep::IdempotentConsumer { steps, .. }
+        | BuilderStep::Transacted { steps, .. }
         | BuilderStep::Layered { steps, .. } => {
             for s in steps {
                 for_each_step_uri(s, f);

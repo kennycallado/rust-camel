@@ -16,6 +16,10 @@ pub enum DeclarativeStepKind {
     Aggregate,
     WireTap,
     Multicast,
+    /// A `transacted:` database block (sqltrans, slice 1). Not in the
+    /// mandatory list: the block is authorable but not part of the baseline
+    /// step contract every front-end must implement.
+    Transacted,
     Stop,
     Script,
     ConvertBodyTo,

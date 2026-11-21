@@ -437,6 +437,19 @@ pub enum BuilderStep {
         /// with `factory`.
         steps: Vec<BuilderStep>,
     },
+    /// A transacted route block: the nested steps run inside one
+    /// block-owned transaction on `datasource`.
+    ///
+    /// Dark in slice 1 — the DSL load path does not build this variant yet and
+    /// lowering fails closed, so no route can execute it (camel-sql wires the
+    /// block in slice 2, rc-qv2iz.6).
+    Transacted {
+        /// Datasource name, resolved against the
+        /// [`crate::TransactionManagerRegistry`] at load time.
+        datasource: String,
+        /// Block body, compiled as one transacted section.
+        steps: Vec<BuilderStep>,
+    },
 }
 
 impl BuilderStep {
@@ -522,6 +535,7 @@ impl BuilderStep {
             Self::DeclarativeDoTry { .. } | Self::DoTry { .. } => Some("do-try".into()),
             Self::Resequence { .. } => Some("resequence".into()),
             Self::Layered { .. } => Some("layered".into()),
+            Self::Transacted { .. } => Some("transacted".into()),
         }
     }
 
@@ -595,7 +609,8 @@ impl BuilderStep {
             | Self::DeclarativeDoTry { .. }
             | Self::DoTry { .. }
             | Self::Layered { .. }
-            | Self::Resequence { .. } => None,
+            | Self::Resequence { .. }
+            | Self::Transacted { .. } => None,
         }
     }
 
@@ -675,10 +690,18 @@ impl BuilderStep {
             | Self::DeclarativeDoTry { .. }
             | Self::DoTry { .. }
             | Self::Layered { .. }
-            | Self::Resequence { .. } => SpanKindHint::Internal,
+            | Self::Resequence { .. }
+            | Self::Transacted { .. } => SpanKindHint::Internal,
         }
     }
 }
+
+/// Broker-style destinations: an async, fire-and-forget send.
+///
+/// Shared by [`uri_span_kind`] and [`is_async_producer_scheme`]. `seda` is
+/// deliberately absent: an in-process queue handoff is checked by its own
+/// dedicated rule (it is not an external broker send).
+const PRODUCER_SCHEMES: [&str; 5] = ["kafka", "jms", "activemq", "artemis", "mqtt"];
 
 /// Classify an AUTHORED endpoint URI by its scheme — the text before the
 /// first `:`, compared with `eq_ignore_ascii_case`, no endpoint resolution.
@@ -687,8 +710,6 @@ impl BuilderStep {
 /// synchronous outbound protocols to `Client`; every other scheme and
 /// scheme-less URIs stay `Internal` — the kind is never guessed.
 fn uri_span_kind(uri: &str) -> SpanKindHint {
-    /// Broker-style destinations: an async, one-way send.
-    const PRODUCER_SCHEMES: [&str; 5] = ["kafka", "jms", "activemq", "artemis", "mqtt"];
     /// Synchronous outbound request/response protocols.
     const CLIENT_SCHEMES: [&str; 12] = [
         "http",
@@ -706,10 +727,7 @@ fn uri_span_kind(uri: &str) -> SpanKindHint {
     ];
 
     let scheme = uri.split(':').next().unwrap_or_default();
-    if PRODUCER_SCHEMES
-        .iter()
-        .any(|s| s.eq_ignore_ascii_case(scheme))
-    {
+    if is_async_producer_scheme(scheme) {
         SpanKindHint::Producer
     } else if CLIENT_SCHEMES
         .iter()
@@ -719,6 +737,21 @@ fn uri_span_kind(uri: &str) -> SpanKindHint {
     } else {
         SpanKindHint::Internal
     }
+}
+
+/// Whether `scheme` is an async (fire-and-forget) producer scheme.
+///
+/// Wraps the span-kind producer table so `camel-dsl` can ask the same question
+/// camel-core asks when it classifies an authored send URI. The comparison is
+/// case-insensitive, mirroring `uri_span_kind`.
+///
+/// `seda` is deliberately NOT in the table — in-process queue handoffs get
+/// their own dedicated check in transacted-block validation (Task 4.1). Do not
+/// route `seda` through this function.
+pub fn is_async_producer_scheme(scheme: &str) -> bool {
+    PRODUCER_SCHEMES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(scheme))
 }
 
 /// An unresolved route definition. "to" URIs have not been resolved to producers yet.
@@ -1036,6 +1069,36 @@ impl RouteDefinitionInfo {
 mod tests {
     use super::*;
     use camel_api::{RecipientSource, TargetSource};
+
+    /// The `Transacted` block variant carries its datasource and body for the
+    /// lowering layer to reject; `Debug` must name both so fail-closed errors
+    /// and test diffs stay diagnosable.
+    #[test]
+    fn builder_step_transacted_constructs() {
+        let step = BuilderStep::Transacted {
+            datasource: "pg".into(),
+            steps: vec![BuilderStep::To("sql:select 1?datasource=pg".into())],
+        };
+        let rendered = format!("{step:?}");
+        assert!(
+            rendered.contains("Transacted"),
+            "debug must name the Transacted variant: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#"datasource: "pg""#),
+            "derived Debug must render the block datasource field: {rendered}"
+        );
+    }
+
+    /// The async-producer table is shared with `camel-dsl`: brokers are
+    /// async, `seda` is deliberately excluded (own dedicated check), and
+    /// synchronous components such as `sql` are not async producers.
+    #[test]
+    fn is_async_producer_scheme_table() {
+        assert!(is_async_producer_scheme("kafka"));
+        assert!(!is_async_producer_scheme("seda"));
+        assert!(!is_async_producer_scheme("sql"));
+    }
 
     /// Task 1.2 (span-name-enrichment): `BuilderStep::span_label` mapping.
     ///

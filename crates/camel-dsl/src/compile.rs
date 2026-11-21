@@ -1,4 +1,5 @@
 use camel_api::SpanKindHint;
+use std::sync::Arc;
 use std::time::Duration;
 
 const DEFAULT_FUNCTION_TIMEOUT_MS: u64 = 5000;
@@ -243,7 +244,65 @@ pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinit
     )
 }
 
+/// Compile a declarative route after validating its `transacted:` blocks.
+///
+/// Task 3.1 seam (sqltrans, slice 1): [`validate_transacted_blocks`] runs
+/// FIRST, against the declarative model and the caller-supplied manager
+/// resolver; a clean route then takes the plain compile path. This entry is
+/// the resolver-parameterized test seam — production loads go through
+/// [`compile_declarative_route_with_stream_cache_threshold`], which supplies
+/// the always-absent resolver.
+///
+/// [`validate_transacted_blocks`]: crate::transacted_validation::validate_transacted_blocks
+pub fn compile_declarative_route_with(
+    route: DeclarativeRoute,
+    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn camel_api::TransactionManager>>,
+) -> Result<RouteDefinition, CamelError> {
+    compile_declarative_route_with_resolver(
+        route,
+        resolve_manager,
+        camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD,
+        SecurityCompileContext::default(),
+    )
+}
+
+/// Shared lowering path: validate the `transacted:` blocks against
+/// `resolve_manager` strictly before any step is lowered, then compile.
+///
+/// The threshold/security knobs exist only because the production YAML/JSON/
+/// template choke point carries them; the resolver seam above uses their
+/// defaults.
+fn compile_declarative_route_with_resolver(
+    route: DeclarativeRoute,
+    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn camel_api::TransactionManager>>,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<RouteDefinition, CamelError> {
+    crate::transacted_validation::validate_transacted_blocks(&route, resolve_manager)?;
+    compile_declarative_route_body(route, stream_cache_threshold, security_ctx)
+}
+
+/// Compile a declarative route with a custom stream-cache threshold.
+///
+/// This is the production YAML/JSON/template load choke point (`yaml.rs`,
+/// `json.rs`, `template/materializer.rs`, and bundle boot through
+/// `camel_dsl::parse_yaml_with_threshold_and_security`). It delegates through
+/// the resolver seam with an always-absent resolver.
+///
+/// Dark contract (sqltrans, slice 1): no transaction manager is registered in
+/// production, so every `transacted:` block fails here with the typed
+/// [`camel_api::TransactionError::ManagerMissing`] after the structural checks
+/// pass, before any lowering runs. Slice 2 registers managers; this entry then
+/// starts accepting blocks without changing the load graph.
 pub fn compile_declarative_route_with_stream_cache_threshold(
+    route: DeclarativeRoute,
+    stream_cache_threshold: usize,
+    security_ctx: SecurityCompileContext,
+) -> Result<RouteDefinition, CamelError> {
+    compile_declarative_route_with_resolver(route, &|_| None, stream_cache_threshold, security_ctx)
+}
+
+fn compile_declarative_route_body(
     route: DeclarativeRoute,
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
@@ -551,6 +610,10 @@ pub fn compile_canonical_step(
             stream_cache_threshold,
         ),
         CanonicalStepSpec::Aggregate(config) => compile_canonical_aggregate(config),
+        CanonicalStepSpec::Transacted(block) => Ok(BuilderStep::Transacted {
+            datasource: block.datasource,
+            steps: compile_canonical_steps(block.steps, stream_cache_threshold)?,
+        }),
         CanonicalStepSpec::Cache {
             repository,
             key,
@@ -1249,6 +1312,10 @@ fn compile_declarative_step_with_threshold(
             })
         }
         DeclarativeStep::Multicast(def) => compile_multicast_step(def, stream_cache_threshold),
+        DeclarativeStep::Transacted(def) => Ok(BuilderStep::Transacted {
+            datasource: def.datasource,
+            steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+        }),
         DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
             expression,
             uri_delimiter,
@@ -1749,6 +1816,12 @@ fn compile_declarative_step_to_canonical(
             })
         }
         DeclarativeStep::Split(def) => compile_split_step_to_canonical(def),
+        DeclarativeStep::Transacted(def) => Ok(CanonicalStepSpec::Transacted(
+            camel_api::runtime::CanonicalTransactedSpec {
+                datasource: def.datasource,
+                steps: compile_declarative_steps_to_canonical(def.steps)?,
+            },
+        )),
         DeclarativeStep::Aggregate(def) => compile_aggregate_step_to_canonical(def),
         DeclarativeStep::Delay(DelayStepDef {
             delay_ms,
@@ -1910,6 +1983,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
         DeclarativeStep::DynamicRouter(_) => "dynamic_router",
         DeclarativeStep::LoadBalance(_) => "load_balance",
         DeclarativeStep::Multicast(_) => "multicast",
+        DeclarativeStep::Transacted(_) => "transacted",
         DeclarativeStep::RoutingSlip(_) => "routing_slip",
         DeclarativeStep::RecipientList(_) => "recipient_list",
         DeclarativeStep::Stop => "stop",
@@ -2286,6 +2360,16 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), CamelError> {
             if def.timeout_ms.is_some_and(|t| t == 0) {
                 return Err(CamelError::Config(
                     "multicast timeout_ms must be > 0".to_string(),
+                ));
+            }
+            for s in &def.steps {
+                validate_step(s)?;
+            }
+        }
+        DeclarativeStep::Transacted(def) => {
+            if def.datasource.trim().is_empty() {
+                return Err(CamelError::Config(
+                    "transacted datasource must not be empty".to_string(),
                 ));
             }
             for s in &def.steps {
@@ -2810,6 +2894,7 @@ mod tests {
         "UnsupportedMediaType",
         "ValidationError",
         "Business",
+        "Transaction",
     ];
 
     /// Variants raised only at startup fail-fast: they abort route
@@ -2819,8 +2904,10 @@ mod tests {
 
     /// Variants deferred pending a bd decision (rc-5u8co): raised outside the
     /// data-plane pipeline, so rejected as unknown kinds until an in-pipeline
-    /// raise path is decided on.
-    const DEFERRED_VARIANTS: &[&str] = &["TemplateReload"];
+    /// raise path is decided on. `Transaction` is load-time only in slice 1
+    /// (`sqltrans-portmodel`, dark); the runtime raise path lands in slice 2
+    /// (`sqltrans-runtime`), which owns the kind decision.
+    const DEFERRED_VARIANTS: &[&str] = &["TemplateReload", "Transaction"];
 
     /// Variants grouped under an existing kind value (sedamatch dsl delta):
     /// the kind value matches the whole failure family via
@@ -2833,7 +2920,7 @@ mod tests {
     fn test_exception_kind_vocabulary_classification_guard() {
         assert_eq!(
             ALL_CAMEL_ERROR_VARIANTS.len(),
-            28,
+            29,
             "ALL_CAMEL_ERROR_VARIANTS must enumerate every CamelError variant"
         );
         assert_eq!(
@@ -2841,8 +2928,8 @@ mod tests {
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            28
-        ); // dupe+omission swap would keep len==28
+            29
+        ); // dupe+omission swap would keep len==29
 
         let vocab = supported_exception_kinds();
 

@@ -290,6 +290,18 @@ impl StepCompilerRegistry {
         step_index: usize,
         ctx: &CompilationContext,
     ) -> Result<Option<CompiledStep>, CamelError> {
+        // Dark slice: a `transacted` block never reaches lowering through the
+        // DSL load path — validation rejects it first. A programmatic caller
+        // can still construct `BuilderStep::Transacted` directly, and that
+        // must fail closed with a typed error naming the block datasource:
+        // never silently skip the block, never panic.
+        if let BuilderStep::Transacted { datasource, .. } = &step {
+            return Err(CamelError::Transaction(
+                camel_api::TransactionError::ManagerMissing {
+                    datasource: datasource.clone(),
+                },
+            ));
+        }
         // Capture the span label, kind hint, and declared To URI BEFORE the
         // dispatch loop moves the step. The URI is the authored text, so a
         // `SkipTo`/`DivertCopyTo` interception inside a compiler never
@@ -1578,5 +1590,87 @@ mod dispatch_tests {
             0,
             "finally must not run when try stops"
         );
+    }
+}
+
+#[cfg(test)]
+mod transacted_lowering_tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use camel_bean::BeanRegistry;
+    use camel_component_api::NoOpComponentContext;
+    use camel_component_api::test_support::NoopRuntimeObservability;
+
+    use super::*;
+    use crate::lifecycle::adapters::route_controller::SharedLanguageRegistry;
+    use crate::lifecycle::adapters::step_resolution::FunctionStagingMode;
+
+    fn dummy_context<'a>(
+        producer_ctx: &'a ProducerContext,
+        languages: &'a SharedLanguageRegistry,
+        beans: &'a Arc<std::sync::Mutex<BeanRegistry>>,
+        staging: &'a FunctionStagingMode,
+        idempotent: &'a crate::IdempotentRegistry,
+        claim_check: &'a crate::ClaimCheckRegistry,
+        cache: &'a crate::CacheRegistry,
+    ) -> CompilationContext<'a> {
+        CompilationContext {
+            producer_ctx,
+            rt: Arc::new(NoopRuntimeObservability),
+            languages,
+            beans,
+            function_invoker: None,
+            component_ctx: Arc::new(NoOpComponentContext),
+            route_id: None,
+            staging_mode: staging,
+            idempotent_repositories: idempotent,
+            claim_check_repositories: claim_check,
+            cache_repositories: cache,
+            intercept: crate::intercept::InterceptRules::default(),
+        }
+    }
+
+    /// Dark slice: the DSL load path is validated before lowering, so a
+    /// `Transacted` block can only arrive here when a programmatic caller
+    /// builds the variant directly. That path must fail closed with the typed
+    /// `ManagerMissing` error naming the block datasource — never skip the
+    /// block and never panic.
+    #[test]
+    fn programmatic_transacted_fails_closed() {
+        let producer_ctx = ProducerContext::default();
+        let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
+        let beans = Arc::new(Mutex::new(BeanRegistry::new()));
+        let staging = FunctionStagingMode::DirectAdd;
+        let idempotent = crate::IdempotentRegistry::new();
+        let claim_check = crate::ClaimCheckRegistry::new();
+        let cache = crate::CacheRegistry::new();
+        let ctx = dummy_context(
+            &producer_ctx,
+            &languages,
+            &beans,
+            &staging,
+            &idempotent,
+            &claim_check,
+            &cache,
+        );
+
+        let err = build_registry()
+            .compile_step(
+                BuilderStep::Transacted {
+                    datasource: "pg".into(),
+                    steps: vec![BuilderStep::To("sql:select 1?datasource=pg".into())],
+                },
+                0,
+                &ctx,
+            )
+            .expect_err("a transacted block must not lower in slice 1");
+
+        match err {
+            CamelError::Transaction(camel_api::TransactionError::ManagerMissing { datasource }) => {
+                assert_eq!(datasource, "pg");
+            }
+            other => panic!("expected Transaction::ManagerMissing, got {other:?}"),
+        }
     }
 }

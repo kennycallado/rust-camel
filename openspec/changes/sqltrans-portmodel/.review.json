@@ -1,0 +1,42 @@
+{
+  "kind": "holistic-review",
+  "change": "sqltrans-portmodel",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_e02d726c9ffepKlkBLOSU1GR2E",
+  "reviewed_head": "24c17b1e4",
+  "impl_hash": "sha256:148a912e1d57670ebebd2ea0602cc1dd2187e66db53ad59aa3866e26e7d50935",
+  "diff_scope": "git diff 448e91421...24c17b1e4 (55 files)",
+  "rounds": [
+    {
+      "round": 1,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "important": [
+        "on_exceptions[].steps transacted block silently dropped at load (walk covered route.steps only) — fixed: validate_transacted_blocks takes &DeclarativeRoute, walks steps + on-exception clauses + circuit_breaker.fallback; fixtures on_exception_clause_transacted_rejected / circuit_breaker_fallback_transacted_rejected",
+        "sql_step_facts first-? split hid datasources on parameterized SQL; ADR/docs example used invalid (?, ?) grammar — fixed: None-datasource → UnnamedDatasource unconditionally (fail-closed), examples corrected to values (#, #)"
+      ],
+      "minors": [
+        "CONTEXT-MAP Key Terms + ADR index (fixed, rides merge)",
+        "JSON loader unknown-key naming (fixed: pre-scan wired into json.rs)",
+        "AGENTS lane rows beyond the plan's five (accepted: camel-cli mission-601 debt, camel-component-mock, camel-integration-test for the tier.rs touch)"
+      ]
+    },
+    {
+      "round": 2,
+      "verdict": "APPROVE",
+      "note": "minimal fixes verified; no new issues (no double-validation, no signature ripple)"
+    }
+  ],
+  "gate_evidence": {
+    "gates_local_full_sweep": "exit 0 at 1038319b2 and re-run exit 0 at 24c17b1e4 (10 lanes passed, no-lane 0)",
+    "cargo_build_workspace": 0,
+    "cargo_test_workspace_lib": "0 (74 ok suites)",
+    "cargo_clippy_workspace_all_targets": 0,
+    "hexagonal_boundary_test": "PASS (gates-local lane)",
+    "cargo_audit": "exit 0, 10 allowed warnings",
+    "openspec_validate": 0,
+    "mdbook_test": 0,
+    "txnreject": "camel-component-sql --lib green, zero-diff vs 448e91421"
+  },
+  "spec_coverage": "reqs 1/6/13/15 (S1 slice) fully covered incl. production-entry rejections (YAML/JSON/template/bundle boot/canonical runtime + journal replay), dark contract verified, dynamic-URI steps + canonical structural pass deferred under bd rc-c3mjp (S2-blocking)"
+}

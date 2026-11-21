@@ -438,7 +438,24 @@ fn build_test_deps_no_execution() -> CommandDeps {
         uow: None,
         execution: None,
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     }
+}
+
+/// Empty transaction-manager registry: production is dark in slice 1, so every
+/// canonical `transacted` block must fail closed. Slice 2 supplies a populated
+/// registry through the same `CommandDeps` field.
+fn empty_transaction_registry() -> Arc<crate::TransactionManagerRegistry> {
+    Arc::new(crate::TransactionManagerRegistry::new())
+}
+
+/// Direct step-conversion helper for the variant coverage tests.
+///
+/// The step fixtures never contain a `transacted` block; the dark registry
+/// path for blocks is exercised end to end through `handle_register` by
+/// `canonical_runtime_registration_rejects_block`.
+fn convert_step(step: camel_api::runtime::CanonicalStepSpec) -> Result<BuilderStep, CamelError> {
+    canonical_step_to_builder_step(step, &crate::TransactionManagerRegistry::new())
 }
 
 fn build_test_deps_with_execution(execution: Arc<dyn RuntimeExecutionPort>) -> CommandDeps {
@@ -449,6 +466,7 @@ fn build_test_deps_with_execution(execution: Arc<dyn RuntimeExecutionPort>) -> C
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     }
 }
 
@@ -465,6 +483,7 @@ fn build_test_deps_with_failing_repo(execution: Arc<TrackingExecutionPort>) -> C
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     }
 }
 
@@ -560,6 +579,7 @@ async fn recovered_route_is_adopted_on_declarative_reregister() {
         uow: None,
         execution: None,
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     // Declarative boot re-registers the same route_id from the same config.
@@ -592,19 +612,19 @@ fn canonical_step_conversion_covers_common_variants() {
         CanonicalWhenSpec,
     };
 
-    let to = canonical_step_to_builder_step(CanonicalStepSpec::To {
+    let to = convert_step(CanonicalStepSpec::To {
         uri: "log:out".into(),
     })
     .unwrap();
     assert!(matches!(to, BuilderStep::To(_)));
 
-    let log = canonical_step_to_builder_step(CanonicalStepSpec::Log {
+    let log = convert_step(CanonicalStepSpec::Log {
         message: "hello".into(),
     })
     .unwrap();
     assert!(matches!(log, BuilderStep::Log { .. }));
 
-    let filter = canonical_step_to_builder_step(CanonicalStepSpec::Filter {
+    let filter = convert_step(CanonicalStepSpec::Filter {
         predicate: LanguageExpressionDef {
             language: "simple".into(),
             source: "${body} != null".into(),
@@ -614,7 +634,7 @@ fn canonical_step_conversion_covers_common_variants() {
     .unwrap();
     assert!(matches!(filter, BuilderStep::DeclarativeFilter { .. }));
 
-    let choice = canonical_step_to_builder_step(CanonicalStepSpec::Choice {
+    let choice = convert_step(CanonicalStepSpec::Choice {
         whens: vec![CanonicalWhenSpec {
             predicate: LanguageExpressionDef {
                 language: "simple".into(),
@@ -631,7 +651,7 @@ fn canonical_step_conversion_covers_common_variants() {
     .unwrap();
     assert!(matches!(choice, BuilderStep::DeclarativeChoice { .. }));
 
-    let split_lines = canonical_step_to_builder_step(CanonicalStepSpec::Split {
+    let split_lines = convert_step(CanonicalStepSpec::Split {
         expression: CanonicalSplitExpressionSpec::BodyLines,
         aggregation: CanonicalSplitAggregationSpec::CollectAll,
         parallel: true,
@@ -643,7 +663,7 @@ fn canonical_step_conversion_covers_common_variants() {
     .unwrap();
     assert!(matches!(split_lines, BuilderStep::Split { .. }));
 
-    let split_language = canonical_step_to_builder_step(CanonicalStepSpec::Split {
+    let split_language = convert_step(CanonicalStepSpec::Split {
         expression: CanonicalSplitExpressionSpec::Language(LanguageExpressionDef {
             language: "simple".into(),
             source: "${body.items}".into(),
@@ -661,13 +681,13 @@ fn canonical_step_conversion_covers_common_variants() {
         BuilderStep::DeclarativeSplit { .. }
     ));
 
-    let wire_tap = canonical_step_to_builder_step(CanonicalStepSpec::WireTap {
+    let wire_tap = convert_step(CanonicalStepSpec::WireTap {
         uri: "direct:audit".into(),
     })
     .unwrap();
     assert!(matches!(wire_tap, BuilderStep::WireTap { .. }));
 
-    let script = canonical_step_to_builder_step(CanonicalStepSpec::Script {
+    let script = convert_step(CanonicalStepSpec::Script {
         expression: LanguageExpressionDef {
             language: "simple".into(),
             source: "${body}".into(),
@@ -676,14 +696,14 @@ fn canonical_step_conversion_covers_common_variants() {
     .unwrap();
     assert!(matches!(script, BuilderStep::DeclarativeScript { .. }));
 
-    let delay = canonical_step_to_builder_step(CanonicalStepSpec::Delay {
+    let delay = convert_step(CanonicalStepSpec::Delay {
         delay_ms: 500,
         dynamic_header: None,
     })
     .unwrap();
     assert!(matches!(delay, BuilderStep::Delay { .. }));
 
-    let aggregate = canonical_step_to_builder_step(CanonicalStepSpec::Aggregate(
+    let aggregate = convert_step(CanonicalStepSpec::Aggregate(
         camel_api::runtime::CanonicalAggregateSpec {
             header: "corr-id".into(),
             completion_size: Some(5),
@@ -706,7 +726,7 @@ fn canonical_step_conversion_covers_common_variants() {
 fn canonical_step_to_builder_step_maps_cache_with_nested_on_miss() {
     use camel_api::runtime::CanonicalStepSpec;
 
-    let cache = canonical_step_to_builder_step(CanonicalStepSpec::Cache {
+    let cache = convert_step(CanonicalStepSpec::Cache {
         repository: Some("default".into()),
         key: "${body.id}".into(),
         ttl: Some("60s".into()),
@@ -743,7 +763,7 @@ fn canonical_step_to_builder_step_maps_cache_with_nested_on_miss() {
 fn canonical_step_to_builder_step_maps_cache_invalidate() {
     use camel_api::runtime::CanonicalStepSpec;
 
-    let invalidate = canonical_step_to_builder_step(CanonicalStepSpec::CacheInvalidate {
+    let invalidate = convert_step(CanonicalStepSpec::CacheInvalidate {
         repository: None,
         key: Some("${body.id}".into()),
         key_prefix: None,
@@ -769,7 +789,7 @@ fn canonical_step_to_builder_step_maps_cache_invalidate() {
 fn canonical_cache_clear_and_stats_convert() {
     use camel_api::runtime::CanonicalStepSpec;
 
-    let clear = canonical_step_to_builder_step(CanonicalStepSpec::CacheClear {
+    let clear = convert_step(CanonicalStepSpec::CacheClear {
         repository: Some("memory".into()),
     })
     .unwrap();
@@ -778,8 +798,7 @@ fn canonical_cache_clear_and_stats_convert() {
     };
     assert_eq!(repository.as_deref(), Some("memory"));
 
-    let stats =
-        canonical_step_to_builder_step(CanonicalStepSpec::CacheStats { repository: None }).unwrap();
+    let stats = convert_step(CanonicalStepSpec::CacheStats { repository: None }).unwrap();
     let BuilderStep::CacheStats { repository } = stats else {
         panic!("expected BuilderStep::CacheStats");
     };
@@ -790,7 +809,7 @@ fn canonical_cache_clear_and_stats_convert() {
 fn canonical_step_to_builder_step_maps_cache_peek_stale_policies() {
     use camel_api::runtime::CanonicalStepSpec;
 
-    let peek_default = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+    let peek_default = convert_step(CanonicalStepSpec::CachePeekStale {
         repository: Some("persistent".into()),
         key: "last-good".into(),
         on_miss: None,
@@ -801,7 +820,7 @@ fn canonical_step_to_builder_step_maps_cache_peek_stale_policies() {
     };
     assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Stop);
 
-    let peek_continue = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+    let peek_continue = convert_step(CanonicalStepSpec::CachePeekStale {
         repository: None,
         key: "last-good".into(),
         on_miss: Some("continue".into()),
@@ -812,7 +831,7 @@ fn canonical_step_to_builder_step_maps_cache_peek_stale_policies() {
     };
     assert_eq!(on_miss, camel_processor::PeekStaleMissPolicy::Continue);
 
-    let peek_stop = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+    let peek_stop = convert_step(CanonicalStepSpec::CachePeekStale {
         repository: None,
         key: "last-good".into(),
         on_miss: Some("stop".into()),
@@ -828,7 +847,7 @@ fn canonical_step_to_builder_step_maps_cache_peek_stale_policies() {
 fn canonical_step_to_builder_step_rejects_invalid_peek_stale_on_miss() {
     use camel_api::runtime::CanonicalStepSpec;
 
-    let err = canonical_step_to_builder_step(CanonicalStepSpec::CachePeekStale {
+    let err = convert_step(CanonicalStepSpec::CachePeekStale {
         repository: None,
         key: "last-good".into(),
         on_miss: Some("explode".into()),
@@ -960,7 +979,8 @@ fn canonical_route_conversion_with_circuit_breaker() {
         version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
     };
 
-    let route = canonical_to_route_definition(spec).unwrap();
+    let route =
+        canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new()).unwrap();
     assert_eq!(route.route_id(), "route-x");
     assert_eq!(route.from_uri(), "timer:tick");
 }
@@ -986,7 +1006,8 @@ fn canonical_route_conversion_threads_circuit_breaker_fallback() {
         version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
     };
 
-    let route = canonical_to_route_definition(spec).unwrap();
+    let route =
+        canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new()).unwrap();
     assert!(route.circuit_breaker_config().is_some());
     assert_eq!(route.circuit_breaker_fallback.len(), 1);
     assert!(matches!(
@@ -1021,13 +1042,72 @@ fn canonical_route_conversion_rejects_invalid_fallback_step_config() {
         version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
     };
 
-    let err = match canonical_to_route_definition(spec) {
+    let err = match canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new()) {
         Ok(_) => panic!("invalid fallback step config must fail"),
         Err(e) => e,
     };
     let msg = err.to_string();
     assert!(msg.contains("circuit_breaker fallback"), "got: {msg}");
     assert!(msg.contains("cache_peek_stale"), "got: {msg}");
+}
+
+#[tokio::test]
+async fn canonical_runtime_registration_rejects_block() {
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, CanonicalTransactedSpec};
+    use camel_api::transaction::TransactionError;
+
+    // Journal replay at boot and the public register command share this
+    // lowering path (`handle_register` -> `canonical_to_route_definition` ->
+    // `canonical_step_to_builder_step`). Production registers no manager in
+    // slice 1, so a `transacted` block must fail with the typed transaction
+    // error — never the `#[non_exhaustive]` wildcard's `Config` error.
+    let execution: Arc<dyn RuntimeExecutionPort> = Arc::new(TrackingExecutionPort::new());
+    let deps = build_test_deps_with_execution(execution);
+    let spec = CanonicalRouteSpec {
+        route_id: "route-tx".into(),
+        from: "timer:test".into(),
+        steps: vec![
+            CanonicalStepSpec::To {
+                uri: "log:before".into(),
+            },
+            CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+                datasource: "pg".into(),
+                steps: vec![
+                    CanonicalStepSpec::To {
+                        uri: "sql:select 1?datasource=pg".into(),
+                    },
+                    CanonicalStepSpec::To {
+                        uri: "sql:insert into t values (1)?datasource=pg".into(),
+                    },
+                ],
+            }),
+        ],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let err = execute_command(
+        &deps,
+        RuntimeCommand::RegisterRoute {
+            spec,
+            command_id: "test".to_string(),
+            causation_id: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::ManagerMissing { datasource })
+                if datasource == "pg"
+        ),
+        "expected typed ManagerMissing('pg'), got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -1125,6 +1205,7 @@ async fn projection_error_on_start_phase1_is_not_swallowed() {
         uow: None,
         execution: None,
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
     let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-proj-fail-p1");
     handle_register_internal(&working_deps, def).await.unwrap();
@@ -1140,6 +1221,7 @@ async fn projection_error_on_start_phase1_is_not_swallowed() {
         uow: None,
         execution: None,
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     // Start the route — projection error should propagate, not be swallowed
@@ -1175,6 +1257,7 @@ async fn two_phase_start_happy_path() {
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     // Register a route
@@ -1217,6 +1300,7 @@ async fn two_phase_start_compensation_on_runtime_failure() {
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     // Register a route
@@ -1255,6 +1339,7 @@ async fn two_phase_start_idempotent_re_start() {
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     // Register a route
@@ -1308,6 +1393,7 @@ async fn handle_register_compensates_to_failed_on_runtime_failure() {
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
@@ -1357,6 +1443,7 @@ async fn registration_failure_has_no_duplicated_prefix() {
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
@@ -1414,6 +1501,7 @@ async fn registration_error_keeps_the_original_cause() {
         uow: None,
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
 
     use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
@@ -1692,6 +1780,7 @@ async fn build_phase2a_deps(
         uow: with_uow.then(|| Arc::new(SharedRepoUow { repo: repo.clone() }) as _),
         execution: Some(execution),
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
     let def = RouteDefinition::new("timer:test", vec![]).with_route_id(route_id);
     handle_register_internal(&deps, def).await.unwrap();
@@ -1823,6 +1912,7 @@ async fn build_phase2_resume_deps(
         uow: with_uow.then(|| Arc::new(SharedRepoUow { repo: repo.clone() }) as _),
         execution: None,
         health_registry: None,
+        transaction_registry: empty_transaction_registry(),
     };
     let def = RouteDefinition::new("timer:test", vec![]).with_route_id(route_id);
     handle_register_internal(&deps, def).await.unwrap();

@@ -40,6 +40,7 @@ schema = ["dep:schemars", "dep:ts-rs", "ts-rs/serde-json-impl", "camel-api/schem
 [dev-dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+camel-builder.workspace = true
 camel-component-api = { workspace = true, features = ["test-support"] }
 camel-component-direct.workspace = true
 camel-component-http.workspace = true

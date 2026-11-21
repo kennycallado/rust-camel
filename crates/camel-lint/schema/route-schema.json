@@ -2597,6 +2597,9 @@
           "$ref": "#/$defs/MulticastStep"
         },
         {
+          "$ref": "#/$defs/TransactedStep"
+        },
+        {
           "$ref": "#/$defs/RoutingSlipStep"
         },
         {
@@ -3526,6 +3529,41 @@
       },
       "required": [
         "to"
+      ],
+      "type": "object"
+    },
+    "TransactedData": {
+      "additionalProperties": false,
+      "description": "Body of an authored `transacted:` block.",
+      "properties": {
+        "datasource": {
+          "description": "Datasource whose transaction manager scopes the block.",
+          "type": "string"
+        },
+        "steps": {
+          "description": "Block body, compiled as one transacted section.",
+          "items": {
+            "$ref": "#/$defs/RouteDslStep"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "datasource"
+      ],
+      "type": "object"
+    },
+    "TransactedStep": {
+      "additionalProperties": false,
+      "description": "Authored `transacted:` block (sqltrans, slice 1).\n\nMirrors the sibling composite steps ([`MulticastStep`]): the enum payload\nwraps the authored key, and [`TransactedData`] carries the block body.",
+      "properties": {
+        "transacted": {
+          "$ref": "#/$defs/TransactedData",
+          "description": "The authored `transacted:` block body."
+        }
+      },
+      "required": [
+        "transacted"
       ],
       "type": "object"
     },

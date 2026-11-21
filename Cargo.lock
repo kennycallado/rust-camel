@@ -2527,6 +2527,7 @@ dependencies = [
  "bytes",
  "camel-api",
  "camel-auth",
+ "camel-builder",
  "camel-component-api",
  "camel-component-direct",
  "camel-component-http",

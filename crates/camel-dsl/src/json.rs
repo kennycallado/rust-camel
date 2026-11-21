@@ -52,6 +52,13 @@ fn parse_json_to_declarative_inner(
     json: &str,
     script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<crate::model::DeclarativeRoute>, CamelError> {
+    // Unknown keys inside `transacted:` blocks must be named, which the
+    // untagged `RouteDslStep` enum cannot do — same raw pre-scan as the YAML
+    // loader. JSON is a YAML 1.2 subset, so the `serde_yml::Value` walk
+    // applies unchanged; malformed JSON falls through (the pre-scan returns
+    // `Ok`) to the typed parse, which owns the error.
+    crate::route_ast::reject_unknown_transacted_keys(json).map_err(CamelError::RouteError)?;
+
     let mut dsl: RouteDslRoutes = serde_json::from_str(json)
         .map_err(|e| CamelError::RouteError(format!("JSON parse error: {e}")))?;
 

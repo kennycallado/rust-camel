@@ -2,6 +2,7 @@
 import type { CanonicalAggregateSpec } from "./CanonicalAggregateSpec";
 import type { CanonicalSplitAggregationSpec } from "./CanonicalSplitAggregationSpec";
 import type { CanonicalSplitExpressionSpec } from "./CanonicalSplitExpressionSpec";
+import type { CanonicalTransactedSpec } from "./CanonicalTransactedSpec";
 import type { CanonicalWhenSpec } from "./CanonicalWhenSpec";
 import type { LanguageExpressionDef } from "./LanguageExpressionDef";
 
@@ -10,7 +11,7 @@ export type CanonicalStepSpec = { "step": "to", "config": { uri: string, } } | {
  * Threshold above which split fragments start new traces (0 = off).
  * Absent means the runtime default applies.
  */
-trace_item_threshold: number | null, stop_on_exception: boolean, steps: Array<CanonicalStepSpec>, } } | { "step": "aggregate", "config": CanonicalAggregateSpec } | { "step": "stop" } | { "step": "delay", "config": { delay_ms: number, dynamic_header: string | null, } } | { "step": "cache", "config": { repository: string | null, key: string, ttl: string | null, max_entry_bytes: number | null, 
+trace_item_threshold: number | null, stop_on_exception: boolean, steps: Array<CanonicalStepSpec>, } } | { "step": "aggregate", "config": CanonicalAggregateSpec } | { "step": "transacted", "config": CanonicalTransactedSpec } | { "step": "stop" } | { "step": "delay", "config": { delay_ms: number, dynamic_header: string | null, } } | { "step": "cache", "config": { repository: string | null, key: string, ttl: string | null, max_entry_bytes: number | null, 
 /**
  * Coalesce concurrent misses on the same key into a single `on_miss`
  * run. Absent/null means `false`.

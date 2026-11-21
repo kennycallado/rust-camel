@@ -530,6 +530,20 @@ pub struct MulticastStepDef {
     pub aggregation: MulticastAggregationDef,
 }
 
+/// Authoring form of a `transacted:` database block.
+///
+/// The block scopes one database transaction, resolved by `datasource`, over
+/// its child steps. Dark in slice 1: the DSL load path fails with
+/// `TransactionError::ManagerMissing` because nothing registers a transaction
+/// manager yet; execution lands in slice 2 (`rc-qv2iz.6`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactedStepDef {
+    /// Datasource whose transaction manager scopes the block.
+    pub datasource: String,
+    /// Block body, compiled as one transacted section.
+    pub steps: Vec<DeclarativeStep>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptStepDef {
     pub expression: LanguageExpressionDef,
@@ -783,6 +797,8 @@ pub enum DeclarativeStep {
     Aggregate(AggregateStepDef),
     WireTap(WireTapStepDef),
     Multicast(MulticastStepDef),
+    /// A `transacted:` database block (sqltrans, slice 1).
+    Transacted(TransactedStepDef),
     RoutingSlip(RoutingSlipStepDef),
     RecipientList(RecipientListStepDef),
     Stop,
@@ -849,6 +865,7 @@ impl DeclarativeStep {
             DeclarativeStep::Aggregate(_) => crate::contract::DeclarativeStepKind::Aggregate,
             DeclarativeStep::WireTap(_) => crate::contract::DeclarativeStepKind::WireTap,
             DeclarativeStep::Multicast(_) => crate::contract::DeclarativeStepKind::Multicast,
+            DeclarativeStep::Transacted(_) => crate::contract::DeclarativeStepKind::Transacted,
             DeclarativeStep::RoutingSlip(_) => crate::contract::DeclarativeStepKind::RoutingSlip,
             DeclarativeStep::RecipientList(_) => {
                 crate::contract::DeclarativeStepKind::RecipientList

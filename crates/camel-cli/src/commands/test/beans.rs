@@ -139,7 +139,8 @@ fn collect_from_steps(steps: &[BuilderStep], calls: &mut Vec<(String, String)>) 
             | BuilderStep::LoadBalance { steps, .. }
             | BuilderStep::Loop { steps, .. }
             | BuilderStep::DeclarativeLoop { steps, .. }
-            | BuilderStep::IdempotentConsumer { steps, .. } => collect_from_steps(steps, calls),
+            | BuilderStep::IdempotentConsumer { steps, .. }
+            | BuilderStep::Transacted { steps, .. } => collect_from_steps(steps, calls),
             // Choice shapes: when-clause sub-pipelines plus optional
             // otherwise branch (declarative and programmatic forms).
             BuilderStep::DeclarativeChoice { whens, otherwise } => {

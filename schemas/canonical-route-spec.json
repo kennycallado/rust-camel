@@ -499,6 +499,23 @@
           ]
         },
         {
+          "description": "A `transacted:` database block (sqltrans, slice 1).\n\nDark in slice 1: the runtime cannot execute the block yet — no\ntransaction manager is registered, so the production lowering fails\nclosed with `TransactionError::ManagerMissing`.",
+          "type": "object",
+          "properties": {
+            "config": {
+              "$ref": "#/$defs/CanonicalTransactedSpec"
+            },
+            "step": {
+              "type": "string",
+              "const": "transacted"
+            }
+          },
+          "required": [
+            "step",
+            "config"
+          ]
+        },
+        {
           "type": "object",
           "properties": {
             "step": {
@@ -723,6 +740,28 @@
             "config"
           ]
         }
+      ]
+    },
+    "CanonicalTransactedSpec": {
+      "description": "Body of a canonical `transacted` step (sqltrans, slice 1).\n\nA dedicated struct (not an inline variant payload) so\n`deny_unknown_fields` applies to the block content: a mistyped key inside\na block is a parse error naming the key, never silently dropped.",
+      "type": "object",
+      "properties": {
+        "datasource": {
+          "description": "Datasource whose transaction manager scopes the block.",
+          "type": "string"
+        },
+        "steps": {
+          "description": "Block body, compiled as one transacted section.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CanonicalStepSpec"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "datasource",
+        "steps"
       ]
     },
     "CanonicalWhenSpec": {

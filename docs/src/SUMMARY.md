@@ -75,6 +75,7 @@
   - [Data stores](components/datastores.md)
     - [Redis](components/redis.md)
     - [Database (SQL)](components/database.md)
+    - [SQL transactions](sql-transactions.md)
     - [SurrealDB](components/surrealdb.md)
     - [OpenSearch](components/opensearch.md)
   - [Files, scheduling, and processes](components/local.md)

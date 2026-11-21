@@ -458,6 +458,12 @@ pub enum CamelError {
         /// Redacted structured diagnostics; never rendered by `Debug`.
         data: Option<RedactedJson>,
     },
+
+    /// Typed transaction failure from the `transacted { datasource }` port
+    /// (sql-transactions capability). Carries the offender and datasource so
+    /// operators can discriminate programmatically.
+    #[error(transparent)]
+    Transaction(#[from] crate::transaction::TransactionError),
 }
 
 /// Manual `Clone` impl: every arm clones its fields normally, except
@@ -546,6 +552,7 @@ impl Clone for CamelError {
                 message: message.clone(),
                 data: data.clone(),
             },
+            Self::Transaction(e) => Self::Transaction(e.clone()),
         }
     }
 }
@@ -586,6 +593,7 @@ impl CamelError {
             Self::UnsupportedMediaType { .. } => "unsupported_media_type",
             Self::NotAcceptable { .. } => "not_acceptable",
             Self::Business { .. } => "business",
+            Self::Transaction(_) => "transaction",
             _ => "unknown",
         }
     }
@@ -631,6 +639,7 @@ impl CamelError {
             Self::NotAcceptable { .. } => "NotAcceptable",
             Self::ExpressionFailed { .. } => "ExpressionFailed",
             Self::Business { .. } => "Business",
+            Self::Transaction(_) => "Transaction",
         }
     }
 }
@@ -1440,11 +1449,17 @@ mod variant_name_tests {
                 },
                 "Business",
             ),
+            (
+                CamelError::Transaction(crate::transaction::TransactionError::ManagerMissing {
+                    datasource: "pg".into(),
+                }),
+                "Transaction",
+            ),
         ];
 
         assert_eq!(
             cases.len(),
-            28,
+            29,
             "variant_name_covers_all_variants must cover every CamelError variant; \
              extend this table and the camel-dsl classification guard"
         );

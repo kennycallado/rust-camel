@@ -171,6 +171,9 @@ camel-json-schema | local | cargo test -p camel-json-schema
 camel-cli | local | cargo test -p camel-cli --no-default-features --features flavor-regular,exec --no-fail-fast
 # --- camel-component-mock: own tests/ suite
 camel-component-mock | local | cargo test -p camel-component-mock
+# --- camel-integration-test: tier.rs BuilderStep walk touched (sqltrans-portmodel);
+#     own tests/ suite, local (no infra needed for the unit surface)
+camel-integration-test | local | cargo test -p camel-integration-test
 # --- xtask: own tests/ (triggered by trustpub-registrations.toml edits)
 xtask | local | cargo test -p xtask
 camel-language-rhai | local | cargo test -p camel-language-rhai
@@ -178,6 +181,13 @@ camel-auth | local | cargo test -p camel-auth
 camel-bundles | local | cargo test -p camel-bundles
 # own tests/ (#[ignore] targets excluded by default)
 camel-component-wasm | local | cargo test -p camel-component-wasm
+# --- sqltrans-portmodel: crates with integration surfaces touched by the change
+camel-api | local | cargo test -p camel-api
+camel-dsl | local | cargo test -p camel-dsl
+camel-builder | local | cargo test -p camel-builder
+camel-lint | local | cargo test -p camel-lint
+# WITH the security feature: the bundle boot-rejection fixture cfg's out without it
+camel-bundles | local | cargo test -p camel-bundles --features security
 
 # --- integration-ollama-smoke.yml:64 (docker)
 camel-component-llm | docker | cargo test -p camel-component-llm --test ollama_live --features ollama -- --ignored ollama_embed

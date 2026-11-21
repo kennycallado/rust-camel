@@ -38,7 +38,7 @@ use crate::model::{
     RoutingSlipStepDef, SamplingStepDef, ScriptStepDef, SecurityCompileContext, SetBodyStepDef,
     SetHeaderStepDef, SetPropertyStepDef, SortStepDef, SplitAggregationDef, SplitExpressionDef,
     SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ThrowStepDef,
-    ToStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    ToStepDef, TransactedStepDef, ValidateStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use crate::route_ast::{
     AggregateData, AggregateStep, BeanStep, BeanStepData, CacheBody, CacheClearBody,
@@ -56,7 +56,7 @@ pub use crate::route_ast::{
     SetPropertyStep, SortBody, SortStep, SplitData, SplitExpressionConfig, SplitExpressionYaml,
     SplitStep, StopStep, StreamCacheBody, StreamCacheConfig, StreamCacheStep,
     StreamCapacityPolicyYaml, StreamGapPolicyYaml, ThrottleData, ThrottleStep, ThrowData,
-    ThrowStep, ToStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
+    ThrowStep, ToStep, TransactedStep, TransformStep, UnmarshalStep, ValidateStep, WireTapStep,
 };
 use crate::route_ast::{DoTryStep, LoopData, LoopStep, LoopWhileExpr};
 
@@ -148,6 +148,11 @@ pub(crate) fn deserialize_route_doc(
     yaml: &str,
     script_ctx: &ScriptLoadContext,
 ) -> Result<Vec<DeclarativeRoute>, DeserializeStageError> {
+    // Unknown keys inside `transacted:` blocks must be named, which the
+    // untagged `RouteDslStep` enum cannot do — hence the raw pre-scan BEFORE
+    // typed conversion.
+    crate::route_ast::reject_unknown_transacted_keys(yaml)
+        .map_err(|msg| DeserializeStageError::Shape(CamelError::RouteError(msg)))?;
     let mut dsl: RouteDslRoutes =
         serde_yml::from_str(yaml).map_err(DeserializeStageError::FromStr)?;
     debug!(route_count = %dsl.routes.len(), rest_count = %dsl.rest.len(), "yaml routes parsed successfully");
@@ -1484,6 +1489,23 @@ pub(crate) fn route_step_to_declarative_step(
                 stop_on_exception: multicast.stop_on_exception,
                 timeout_ms: multicast.timeout_ms,
                 aggregation,
+            }))
+        }
+        RouteDslStep::Transacted(TransactedStep { transacted }) => {
+            if transacted.datasource.trim().is_empty() {
+                return Err(CamelError::RouteError(
+                    "transacted: 'datasource' must not be empty".into(),
+                ));
+            }
+            let datasource = transacted.datasource;
+            let steps = transacted
+                .steps
+                .into_iter()
+                .map(|step| route_step_to_declarative_step(step, script_ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(DeclarativeStep::Transacted(TransactedStepDef {
+                datasource,
+                steps,
             }))
         }
         // ponytail: scatter_gather is pure DSL sugar over Multicast — lowers directly,

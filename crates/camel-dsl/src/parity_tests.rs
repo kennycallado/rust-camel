@@ -106,6 +106,7 @@ fn _assert_all_variants_covered(step: &RouteDslStep) {
         RouteDslStep::Aggregate(_) => (),
         RouteDslStep::WireTap(_) => (),
         RouteDslStep::Multicast(_) => (),
+        RouteDslStep::Transacted(_) => (),
         RouteDslStep::RoutingSlip(_) => (),
         RouteDslStep::RecipientList(_) => (),
         RouteDslStep::Stop(_) => (),
@@ -367,6 +368,21 @@ routes:
             - to: direct:end
 "#,
             json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"multicast":{"steps":[{"to":"direct:end"}]}}]}]}"#,
+            fixtures: &[],
+        },
+        ParityCase {
+            name: "Transacted",
+            yaml: r#"
+routes:
+  - id: r1
+    from: direct:start
+    steps:
+      - transacted:
+          datasource: pg
+          steps:
+            - to: sql:select 1?datasource=pg
+"#,
+            json: r#"{"routes":[{"id":"r1","from":"direct:start","steps":[{"transacted":{"datasource":"pg","steps":[{"to":"sql:select 1?datasource=pg"}]}}]}]}"#,
             fixtures: &[],
         },
         ParityCase {
@@ -861,7 +877,7 @@ fn test_variant_count_matches_matrix() {
     //   2. Bumped EXPECTED_VARIANTS below.
     //   3. Added a ParityCase for the new variant.
     // Step 3 is not mechanically enforced; review discipline applies.
-    const EXPECTED_VARIANTS: usize = 42;
+    const EXPECTED_VARIANTS: usize = 43;
     let actual = parity_cases().len();
     assert!(
         actual >= EXPECTED_VARIANTS,

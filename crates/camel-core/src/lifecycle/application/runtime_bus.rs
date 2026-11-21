@@ -43,6 +43,12 @@ pub struct RuntimeBus {
     execution: Option<Arc<dyn RuntimeExecutionPort>>,
     health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
     metrics: Option<Arc<dyn MetricsCollector>>,
+    /// Transaction-manager registry handed to canonical route lowering.
+    ///
+    /// Dark in slice 1 — stays empty, so canonical `transacted` blocks fail
+    /// closed at registration. Slice 2 populates it from the datasource
+    /// components (rc-qv2iz.6).
+    transaction_registry: Arc<crate::TransactionManagerRegistry>,
     journal_recovered_once: OnceCell<u64>,
 }
 
@@ -62,6 +68,7 @@ impl RuntimeBus {
             execution: None,
             health_registry: None,
             metrics: None,
+            transaction_registry: Arc::new(crate::TransactionManagerRegistry::new()),
             journal_recovered_once: OnceCell::new(),
         }
     }
@@ -150,6 +157,7 @@ impl RuntimeBus {
             uow: self.uow.clone(),
             execution: self.execution.clone(),
             health_registry: self.health_registry.clone(),
+            transaction_registry: Arc::clone(&self.transaction_registry),
         }
     }
 

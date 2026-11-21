@@ -32,6 +32,13 @@ pub struct CommandDeps {
     pub uow: Option<Arc<dyn RuntimeUnitOfWorkPort>>,
     pub execution: Option<Arc<dyn RuntimeExecutionPort>>,
     pub health_registry: Option<Arc<dyn HealthCheckRegistryTrait>>,
+    /// Transaction-manager registry used by canonical route lowering.
+    ///
+    /// Dark in slice 1 — no production wiring registers a manager, so a
+    /// canonical `transacted` block fails closed with the typed
+    /// `TransactionError::ManagerMissing`. Slice 2 wires the real registry
+    /// here and the lowering starts resolving (rc-qv2iz.6).
+    pub transaction_registry: Arc<crate::TransactionManagerRegistry>,
 }
 
 /// Detect optimistic-lock conflicts in the error chain.
@@ -168,7 +175,7 @@ async fn handle_register(
 
     // 2. Execute runtime side effect
     if let Some(execution) = &deps.execution {
-        let route_definition = canonical_to_route_definition(spec)?;
+        let route_definition = canonical_to_route_definition(spec, &deps.transaction_registry)?;
         if let Err(runtime_err) = execution.register_route(route_definition).await {
             // 3. Compensate: mark as Failed
             let failure_text = registration_failure_message(&runtime_err);
@@ -1006,9 +1013,10 @@ pub(crate) async fn upsert_projection_with_reconciliation(
 
 fn canonical_to_route_definition(
     spec: camel_api::CanonicalRouteSpec,
+    transaction_registry: &crate::TransactionManagerRegistry,
 ) -> Result<RouteDefinition, CamelError> {
     let route_id = spec.route_id.clone();
-    let steps = canonical_steps_to_builder_steps(spec.steps)?;
+    let steps = canonical_steps_to_builder_steps(spec.steps, transaction_registry)?;
     let mut definition = RouteDefinition::new(spec.from, steps).with_route_id(&route_id);
     if let Some(cb) = spec.circuit_breaker {
         definition = definition.with_circuit_breaker(
@@ -1017,7 +1025,7 @@ fn canonical_to_route_definition(
                 .open_duration(Duration::from_millis(cb.open_duration_ms)),
         );
         if !cb.fallback.is_empty() {
-            let fallback = canonical_steps_to_builder_steps(cb.fallback)
+            let fallback = canonical_steps_to_builder_steps(cb.fallback, transaction_registry)
                 .map_err(|e| CamelError::Config(format!("circuit_breaker fallback: {e}")))?;
             definition = definition.with_circuit_breaker_fallback(fallback);
         }
@@ -1028,16 +1036,18 @@ fn canonical_to_route_definition(
 
 fn canonical_steps_to_builder_steps(
     steps: Vec<camel_api::runtime::CanonicalStepSpec>,
+    transaction_registry: &crate::TransactionManagerRegistry,
 ) -> Result<Vec<BuilderStep>, CamelError> {
     let mut converted = Vec::with_capacity(steps.len());
     for step in steps {
-        converted.push(canonical_step_to_builder_step(step)?);
+        converted.push(canonical_step_to_builder_step(step, transaction_registry)?);
     }
     Ok(converted)
 }
 
 fn canonical_step_to_builder_step(
     step: camel_api::runtime::CanonicalStepSpec,
+    transaction_registry: &crate::TransactionManagerRegistry,
 ) -> Result<BuilderStep, CamelError> {
     match step {
         camel_api::runtime::CanonicalStepSpec::To { uri } => Ok(BuilderStep::To(uri)),
@@ -1052,7 +1062,7 @@ fn canonical_step_to_builder_step(
         camel_api::runtime::CanonicalStepSpec::Filter { predicate, steps } => {
             Ok(BuilderStep::DeclarativeFilter {
                 predicate,
-                steps: canonical_steps_to_builder_steps(steps)?,
+                steps: canonical_steps_to_builder_steps(steps, transaction_registry)?,
             })
         }
         camel_api::runtime::CanonicalStepSpec::Choice { whens, otherwise } => {
@@ -1060,11 +1070,14 @@ fn canonical_step_to_builder_step(
             for when in whens {
                 converted_whens.push(DeclarativeWhenStep {
                     predicate: when.predicate,
-                    steps: canonical_steps_to_builder_steps(when.steps)?,
+                    steps: canonical_steps_to_builder_steps(when.steps, transaction_registry)?,
                 });
             }
             let converted_otherwise = match otherwise {
-                Some(steps) => Some(canonical_steps_to_builder_steps(steps)?),
+                Some(steps) => Some(canonical_steps_to_builder_steps(
+                    steps,
+                    transaction_registry,
+                )?),
                 None => None,
             };
             Ok(BuilderStep::DeclarativeChoice {
@@ -1095,7 +1108,7 @@ fn canonical_step_to_builder_step(
                     return Err(CamelError::Config("unsupported split aggregation".into()));
                 }
             };
-            let steps = canonical_steps_to_builder_steps(steps)?;
+            let steps = canonical_steps_to_builder_steps(steps, transaction_registry)?;
             match expression {
                 camel_api::runtime::CanonicalSplitExpressionSpec::BodyLines => {
                     let mut config = SplitterConfig::new(split_body_lines())
@@ -1221,7 +1234,7 @@ fn canonical_step_to_builder_step(
             ttl,
             max_entry_bytes,
             coalesce_misses: coalesce_misses.unwrap_or(false),
-            on_miss: canonical_steps_to_builder_steps(on_miss)?,
+            on_miss: canonical_steps_to_builder_steps(on_miss, transaction_registry)?,
         }),
         camel_api::runtime::CanonicalStepSpec::CacheInvalidate {
             repository,
@@ -1256,6 +1269,20 @@ fn canonical_step_to_builder_step(
             },
             on_miss: camel_processor::PeekStaleMissPolicy::parse_on_miss(on_miss.as_deref())?,
         }),
+        camel_api::runtime::CanonicalStepSpec::Transacted(block) => {
+            // Dark contract (sqltrans, slice 1): resolution runs BEFORE any
+            // child lowering — structural checks live in the DSL validator,
+            // and the manager lookup is the last gate. Nothing registers a
+            // manager in this slice, so this arm always fails closed with the
+            // typed error naming the datasource; slice 2 registers managers and
+            // the recursive block lowering below becomes reachable.
+            let _manager =
+                crate::resolve_transaction_manager(transaction_registry, &block.datasource)?;
+            Ok(BuilderStep::Transacted {
+                datasource: block.datasource,
+                steps: canonical_steps_to_builder_steps(block.steps, transaction_registry)?,
+            })
+        }
         // keep: reachable for future #[non_exhaustive] CanonicalStepSpec
         // variants — the fail-closed step-naming contract depends on it.
         _ => Err(CamelError::Config(format!(

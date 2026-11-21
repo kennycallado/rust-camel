@@ -103,6 +103,29 @@ pub struct CanonicalRouteSpec {
     pub version: u32,
 }
 
+/// Body of a canonical `transacted` step (sqltrans, slice 1).
+///
+/// A dedicated struct (not an inline variant payload) so
+/// `deny_unknown_fields` applies to the block content: a mistyped key inside
+/// a block is a parse error naming the key, never silently dropped.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+    ts_rs::TS,
+)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalTransactedSpec {
+    /// Datasource whose transaction manager scopes the block.
+    pub datasource: String,
+    /// Block body, compiled as one transacted section.
+    pub steps: Vec<CanonicalStepSpec>,
+}
+
 #[derive(
     Debug,
     Clone,
@@ -149,6 +172,12 @@ pub enum CanonicalStepSpec {
         steps: Vec<CanonicalStepSpec>,
     },
     Aggregate(CanonicalAggregateSpec),
+    /// A `transacted:` database block (sqltrans, slice 1).
+    ///
+    /// Dark in slice 1: the runtime cannot execute the block yet — no
+    /// transaction manager is registered, so the production lowering fails
+    /// closed with `TransactionError::ManagerMissing`.
+    Transacted(CanonicalTransactedSpec),
     Stop,
     Delay {
         #[ts(type = "number")]
@@ -497,6 +526,15 @@ fn validate_steps(steps: &[CanonicalStepSpec]) -> Result<(), CamelError> {
             }
             CanonicalStepSpec::Cache { on_miss, .. } => {
                 validate_steps(on_miss)?;
+            }
+            CanonicalStepSpec::Transacted(block) => {
+                if block.datasource.trim().is_empty() {
+                    return Err(CamelError::RouteError(
+                        "canonical contract violation: transacted.datasource cannot be empty"
+                            .to_string(),
+                    ));
+                }
+                validate_steps(&block.steps)?;
             }
             CanonicalStepSpec::Log { .. }
             | CanonicalStepSpec::Script { .. }

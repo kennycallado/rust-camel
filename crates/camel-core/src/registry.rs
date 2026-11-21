@@ -30,7 +30,7 @@ pub enum RegistryError {
 ///
 /// Uses `Mutex<HashMap<String, Arc<T>>>` internally. All methods are safe
 /// to call from multiple threads.
-pub(crate) struct NamedRegistry<T: ?Sized + Send + Sync + 'static> {
+pub struct NamedRegistry<T: ?Sized + Send + Sync + 'static> {
     map: Mutex<HashMap<String, Arc<T>>>,
 }
 
@@ -127,6 +127,31 @@ pub(crate) type CacheRegistry = NamedRegistry<dyn camel_api::CacheRepository>;
 /// any consumer that needs read access during step compilation.
 pub(crate) type SharedCacheRegistry = Arc<CacheRegistry>;
 
+/// Registry of [`camel_api::TransactionManager`] ports, keyed by datasource name.
+///
+/// Dark in slice 1 — nothing registers a manager; camel-sql registers per
+/// datasource in slice 2 (rc-qv2iz.6).
+pub type TransactionManagerRegistry = NamedRegistry<dyn camel_api::TransactionManager>;
+
+/// Resolve the [`camel_api::TransactionManager`] registered for `datasource`.
+///
+/// Dark in slice 1 — nothing registers a manager; camel-sql registers per
+/// datasource in slice 2 (rc-qv2iz.6).
+///
+/// Fails closed with [`camel_api::TransactionError::ManagerMissing`] naming the
+/// datasource when no manager is registered. There is no fallback to another
+/// datasource and no `None` return: a missing manager is always an error.
+pub fn resolve_transaction_manager(
+    registry: &TransactionManagerRegistry,
+    datasource: &str,
+) -> Result<Arc<dyn camel_api::TransactionManager>, camel_api::TransactionError> {
+    registry
+        .get(datasource)
+        .ok_or_else(|| camel_api::TransactionError::ManagerMissing {
+            datasource: datasource.to_owned(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +208,54 @@ mod tests {
         assert!(prev.is_some());
         assert_eq!(*prev.unwrap(), *"second");
         assert_eq!(*registry.get("key1").unwrap(), *"third");
+    }
+
+    /// Minimal `TransactionManager` test double. Opening a session is
+    /// deliberately unimplemented in slice 1: the dark slice exercises registry
+    /// resolution only, never session lifecycle.
+    struct FakeManager {
+        datasource: String,
+    }
+
+    impl camel_api::TransactionManager for FakeManager {
+        fn datasource(&self) -> &str {
+            &self.datasource
+        }
+
+        fn open_session(&self) -> camel_api::transaction::OpenSessionFuture<'_> {
+            panic!("not implemented in slice 1")
+        }
+
+        fn acquire_deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
+    }
+
+    #[test]
+    fn registry_missing_manager_fails_closed() {
+        let registry = TransactionManagerRegistry::new();
+        let err = resolve_transaction_manager(&registry, "pg")
+            .err()
+            .expect("an empty registry must not resolve a manager");
+        assert!(
+            matches!(
+                &err,
+                camel_api::TransactionError::ManagerMissing { datasource } if datasource == "pg"
+            ),
+            "expected ManagerMissing('pg'), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn registry_round_trip_with_fake_manager() {
+        let registry = TransactionManagerRegistry::new();
+        let manager: Arc<dyn camel_api::TransactionManager> = Arc::new(FakeManager {
+            datasource: "pg".into(),
+        });
+        registry.register("pg", manager).expect("register manager");
+
+        let resolved =
+            resolve_transaction_manager(&registry, "pg").expect("registered manager must resolve");
+        assert_eq!(resolved.datasource(), "pg");
     }
 }

@@ -2257,6 +2257,7 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
         camel_api::runtime::CanonicalAggregateStrategySpec
     );
     ts_export!(ts_config, camel_api::runtime::CanonicalAggregateSpec);
+    ts_export!(ts_config, camel_api::runtime::CanonicalTransactedSpec);
     ts_export!(ts_config, camel_api::declarative::LanguageExpressionDef);
     // ExceptionDisposition — referenced by CatchClauseData in the DSL
     ts_export!(ts_config, camel_api::error_handler::ExceptionDisposition);
@@ -2328,6 +2329,7 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::LoopStep);
     ts_export!(ts_config, camel_dsl::route_ast::MarshalStep);
     ts_export!(ts_config, camel_dsl::route_ast::MulticastStep);
+    ts_export!(ts_config, camel_dsl::route_ast::TransactedStep);
     ts_export!(ts_config, camel_dsl::route_ast::PollEnrichStep);
     ts_export!(ts_config, camel_dsl::route_ast::RecipientListStep);
     ts_export!(ts_config, camel_dsl::route_ast::RoutingSlipStep);
@@ -2361,6 +2363,7 @@ fn export_ts_types(ts_config: &ts_rs::Config) -> Result<(), String> {
     ts_export!(ts_config, camel_dsl::route_ast::LogConfig);
     ts_export!(ts_config, camel_dsl::route_ast::LogMessageExpr);
     ts_export!(ts_config, camel_dsl::route_ast::MulticastData);
+    ts_export!(ts_config, camel_dsl::route_ast::TransactedData);
     ts_export!(ts_config, camel_dsl::route_ast::PredicateBlock);
     ts_export!(ts_config, camel_dsl::route_ast::RecipientListData);
     ts_export!(ts_config, camel_dsl::route_ast::RoutingSlipData);

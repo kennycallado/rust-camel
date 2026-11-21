@@ -63,6 +63,7 @@ pub mod stream_cache;
 pub mod supervision;
 pub mod template;
 pub mod throttler;
+pub mod transaction;
 pub mod unit_of_work;
 pub mod value;
 pub mod xml_convert;
@@ -168,6 +169,9 @@ pub use ssrf::{SsrfPolicy, is_ssrf_blocked_ip};
 pub use step_lifecycle::{StepLifecycle, StepShutdownReason};
 pub use supervision::SupervisionConfig;
 pub use throttler::{ThrottleStrategy, ThrottlerConfig};
+pub use transaction::{
+    TransactionError, TransactionManager, TransactionOutcome, TransactionSession, TransactionState,
+};
 pub use unit_of_work::UnitOfWorkConfig;
 pub use value::{Headers, Value, cmp_values, value_type_name};
 

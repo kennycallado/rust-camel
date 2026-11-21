@@ -127,3 +127,25 @@ fn builder_canonicalizes_circuit_breaker_without_fallback() {
     assert_eq!(cb.open_duration_ms, 250);
     assert!(cb.fallback.is_empty());
 }
+
+#[test]
+fn builder_canonical_supports_transacted_block() {
+    use camel_core::route::BuilderStep;
+
+    let spec = RouteBuilder::from("direct:start")
+        .route_id("r7")
+        .transacted(
+            "pg",
+            [BuilderStep::To("sql:select 1?datasource=pg".to_string())],
+        )
+        .build_canonical()
+        .unwrap();
+
+    match &spec.steps[0] {
+        CanonicalStepSpec::Transacted(block) => {
+            assert_eq!(block.datasource, "pg");
+            assert_eq!(block.steps.len(), 1);
+        }
+        other => panic!("expected Transacted, got {other:?}"),
+    }
+}

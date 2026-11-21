@@ -23,6 +23,7 @@ pub mod rest;
 pub mod route_ast;
 pub mod script_watch;
 pub mod template;
+pub mod transacted_validation;
 mod util;
 pub(crate) mod virtual_config;
 pub mod yaml;
@@ -30,7 +31,8 @@ pub mod yaml;
 pub use canonical::{parse_canonical_json, parse_canonical_route};
 pub use compile::{
     compile_declarative_route, compile_declarative_route_to_canonical,
-    compile_declarative_route_with_stream_cache_threshold, compile_declarative_step,
+    compile_declarative_route_with, compile_declarative_route_with_stream_cache_threshold,
+    compile_declarative_step,
 };
 pub use contract::{DeclarativeStepKind, is_rust_only_kind, mandatory_declarative_step_kinds};
 pub use discovery::{
@@ -55,10 +57,11 @@ pub use model::{
     LanguageExpressionDef, LogLevelDef, LogStepDef, MulticastAggregationDef, MulticastStepDef,
     ScriptStepDef, SecurityCompileContext, SetBodyStepDef, SetHeaderStepDef, SetPropertyStepDef,
     SplitAggregationDef, SplitExpressionDef, SplitStepDef, StreamCacheStepDef, ThrowStepDef,
-    ToStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
+    ToStepDef, TransactedStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
 };
 pub use openapi::generate_openapi;
 pub use script_watch::ScriptWatchRegistry;
+pub use transacted_validation::{SqlStepFacts, sql_step_facts, validate_transacted_blocks};
 pub use util::MAX_ROUTE_FILE_SIZE;
 pub use yaml::{
     RouteDslRoute, RouteDslRoutes, RouteDslStep, RoutesEnvError,

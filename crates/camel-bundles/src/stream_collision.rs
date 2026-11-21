@@ -143,6 +143,9 @@ fn steps_contain_stream_out(steps: &[BuilderStep]) -> bool {
                     .is_some_and(|fin| steps_contain_stream_out(&fin.steps))
         }
 
+        // Transacted blocks wrap a nested pipeline; scan the block body.
+        BuilderStep::Transacted { steps, .. } => steps_contain_stream_out(steps),
+
         // Static-URI leaves: WireTap, Enrich, PollEnrich, and the
         // middleware-wrapped send LayeredTo carry a
         // fixed endpoint URI (no nested pipeline), visited by
