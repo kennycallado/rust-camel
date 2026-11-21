@@ -118,18 +118,23 @@ the whole lifecycle).
   borrowed connection — **no sqlx `Transaction` wrapper is ever stored**
   (transaction state lives server-side on the connection); the borrow is
   confined to one await scope. `begin()` (lazy, once): hygiene already done at
-  open; send `BEGIN`; state → Active; an unacknowledged `BEGIN` is never
-  folded back to `Fresh` — acknowledged cleanup ROLLBACK or detach (see the
-  finalization table). `commit()`: state → Finalizing; classify the driver
-  result on exactly the probe-observed split — a DEFINITIVE database rejection
-  (severity Error + SQLSTATE, observed `23503`: the transaction conclusively
-  failed server-side) → `CommitFailed { datasource, reason }`, which the
-  caller may handle as a normal constraint outcome; an UNRESOLVED outcome —
-  severity Fatal `57P01`, connection death, Io error, or a timeout after the
-  handoff — → `CommitUncertain` + DiscardOnDrop detach, never mapped to
-  `CommitFailed` (the frozen spec reserves that variant for definitive
-  rejections); acknowledged → disarm guard (connection returns to pool),
-  state Done. `rollback()`: same bounded shape; acknowledged →
+  open (mandatory, probe P4); send `BEGIN`; state → Active. An unacknowledged
+  `BEGIN` is resolved entirely inside `begin()` per decision P2 — acknowledged
+  cleanup ROLLBACK (no-op WARNING on a clean server) or detach — it is never
+  folded back to `Fresh` and never reaches finalization. `commit()`: state →
+  Finalizing; classification happens ONLY in the handed-off state (decision
+  P6) and keys on exactly the probe-observed split: a DEFINITIVE database
+  rejection (severity Error + SQLSTATE, observed `23503` per probe P1: the
+  transaction conclusively failed server-side) → `CommitFailed
+  { datasource, reason }`, which the caller may handle as a normal constraint
+  outcome, with bounded cleanup (ROLLBACK attempt) or detach when the cleanup
+  is not acknowledged; an UNRESOLVED outcome — severity Fatal `57P01`
+  (probe P2), connection death, Io error, or a timeout after the handoff — →
+  `CommitUncertain` + DiscardOnDrop detach, never mapped to `CommitFailed`
+  (the frozen spec reserves that variant for definitive rejections), and never
+  claiming a rollback; acknowledged → disarm guard (connection returns to
+  pool), state Done — the three-way split is decision row P6 exactly.
+  `rollback()`: same bounded shape; acknowledged →
   `RolledBack`, disarm; unacknowledged → `RollbackUncertain` + Detach. Both
   finalizations bounded by the fixed **5 s finalize grace**; a finalization that
   stalls past the grace degrades to its uncertainty variant with the primary
@@ -214,21 +219,89 @@ the whole lifecycle).
   (the existing `CANCEL_TOKEN` task-local) happens immediately BEFORE handing
   COMMIT to the driver — that check is the cutoff: cancelled before it →
   bounded ROLLBACK (5 s grace); committed already → resolve within the grace,
-  never roll back; (5) finalize per the table below. **Finalization is a pure
-  function of the session's `TxState` at block exit; the table rows are
-  DISJOINT — each state has exactly one rule, and the body outcome never
-  widens a state's rule.**
+  detach, no `BEGIN` (probe 4); (3) set `BLOCK_SESSION` for the body task and
+  run the body under the deadline race (block timeout default 30 s, per-block
+  override); lazy `BEGIN` at the first joined step is likewise bounded by the
+  datasource acquire deadline; (4) finalize by the ordered decision list
+  below — a TOTAL function with STRICT PRECEDENCE: exactly ONE row is
+  selected, first match wins, no row's predicate matches another row's case,
+  and only a clean Ok/Stop body with no pending cancellation reaches the
+  COMMIT handoff (P6). Rows P5 and P6 were the ruling's P4 and P5; row P4 is
+  restored from the frozen "roll back on Err or cancellation" rule (accepted
+  attempt-2 round-1 finding). The `TxState` enum is a *precondition* for rows
+  P1 and P3–P5; row P2 never reaches the list (it is resolved inside
+  `begin()`); row P0 keys on the guard's internal marker, not on `TxState`.
 
-  | `TxState` at block exit | finalization rule (exactly one) |
-  |---|---|
-  | `Fresh` (BEGIN never sent) | NO finalizing SQL, for ANY body outcome (Ok, clean `PipelineOutcome::Stopped`, Err, or cancellation): disarm the guard, return the CLEAN connection to the pool, and preserve the original outcome untouched (Ok stays Ok, Stop propagates unchanged, the body error stays primary). No ROLLBACK rule exists for this state — `Fresh` cannot be rollback-only (`set_rollback_only` is reachable only after a joined DB error, which requires an acknowledged `BEGIN`). |
-  | `Active`, body Ok / clean Stop, not rollback-only | final cancellation check (the cutoff) → COMMIT bounded by the 5 s grace. Acknowledged → `Committed`, disarm, pool return (Stop propagates unchanged per ADR-0025; steps after the block do not run). DEFINITIVE rejection (severity Error + SQLSTATE, observed `23503`) → `CommitFailed` + bounded best-effort cleanup (acknowledged ROLLBACK or detach). UNRESOLVED outcome (Fatal `57P01`, connection death, Io, timeout after the handoff) → `CommitUncertain` + DiscardOnDrop. Never claim rollback for commit uncertainty. |
-  | `Active`, body Err, or cancellation before the cutoff | bounded ROLLBACK (5 s grace): acknowledged → `RolledBack`, disarm, pool return; unacknowledged → `RollbackUncertain` + Detach. The body error stays primary when present; rollback uncertainty is carried in the outcome, never substituted. |
-  | `Active`, `rollback_only` (any body outcome — Ok/Stop via a `do_try` catch included) | bounded ROLLBACK (5 s grace): acknowledged → the block fails typed `AbortedByHandledError` (a commit path must never report Committed for a server-aborted transaction); unacknowledged → `RollbackUncertain` + Detach. A pre-existing body error stays primary. |
-  | COMMIT/ROLLBACK already handed off, resolution pending (cancellation after the cutoff, grace expiry) | resolve within the grace: acknowledged → `Committed`/`RolledBack`; unresolved → `CommitUncertain`/`RollbackUncertain` + Detach. No new SQL beyond the in-flight statement. |
-  | `BEGIN` sent but NOT acknowledged (the `begin()` future itself failed or was lost) | NEVER treated as `Fresh`: require acknowledged cleanup — a ROLLBACK whose completion is observed, after which the connection may return to the pool — or detach (DiscardOnDrop). |
-  | `Detached` (any origin: unacknowledged hygiene, uncertain finalization, forced drop) | terminal: no further SQL on this connection; the pool is already usable (replacement backend, probe 2). |
-  | forced drop (pipeline future dropped mid-body, e.g. inline dispatcher) | cannot await anything, from ANY state: the armed guard's `Drop` detaches (DiscardOnDrop). |
+  **P0 — forced drop** (guard `Drop` reached; cooperative finalization not
+  entered). The connection is DETACHED (`DiscardOnDrop`) at any point — the
+  frozen spec's blanket rule ("a forced drop (task abort/panic) at any point
+  SHALL detach the connection") supersedes the ruling's narrower
+  "Fresh → return the clean connection" line; detaching a provably-clean
+  connection is the conservative superset (safe, costs one pooled backend in
+  an exceptional path, and drop-time in-memory state cannot be trusted —
+  probe P4's poisoning hazard). Supporting state: the guard carries a
+  `begin_sent` marker set BEFORE the BEGIN bytes can reach the driver and
+  cleared only after an acknowledged `BEGIN` (state → `Active`) or an
+  acknowledged cleanup; `Drop` with the marker set detaches even though the
+  public `TxState` may still read `Fresh`. `Drop` never runs cooperative SQL
+  and never returns a live transaction to the pool.
+
+  **P1 — BEGIN never attempted** (`Fresh` precondition AND `begin_sent`
+  marker clear). Return the clean connection to the pool; preserve the
+  original body/cancellation outcome untouched (Ok stays Ok, Stop propagates
+  unchanged, the body error stays primary); no finalizing SQL of any kind.
+  (`Fresh` cannot be rollback-only: `set_rollback_only` is reachable only
+  after a joined DB error, which requires an acknowledged `BEGIN`.)
+
+  **P2 — BEGIN sent but not acknowledged**: resolved INSIDE `begin()`, never
+  a finalization row — and only on the cooperative path, where the `begin()`
+  future still runs to completion (a dropped `begin()` future is P0
+  territory via the `begin_sent` marker, since cooperative cleanup cannot run
+  in a dropped future). On an unacknowledged `BEGIN` the `begin()` path
+  itself runs acknowledged cleanup — the hygiene ROLLBACK (probe P4: on a
+  server with no open transaction it is a no-op WARNING) — or detaches
+  (`DiscardOnDrop`) when the cleanup is not acknowledged. Because of probe
+  P4's poisoning reproduction, a pooled connection MUST receive the hygiene
+  ROLLBACK before `BEGIN` in every case.
+
+  **P3 — rollback-only** (a joined DB error was handled; `Active`
+  precondition): `ROLLBACK` if not yet rolled back, bounded by the 5 s
+  finalize grace; return the original handled outcome (an
+  `AbortedByHandledError` refinement when the body ended Ok/Stop; the body
+  error stays primary when it already failed); never COMMIT — a commit path
+  must never report Committed for a server-aborted transaction. Unacknowledged
+  ROLLBACK → `RollbackUncertain` + Detach.
+
+  **P4 — body error or block deadline elapsed** (`Active`, not rollback-only,
+  not handed off): bounded `ROLLBACK` (5 s finalize grace); acknowledged →
+  `RolledBack`, disarm, pool return; unacknowledged → `RollbackUncertain` +
+  Detach. The body error stays primary when present; a deadline that elapsed
+  first reports the typed `Timeout` naming datasource and elapsed time; the
+  rollback uncertainty is carried in the outcome, never substituted for the
+  primary error. (Frozen rule: "roll back on Err or cancellation"; req
+  "Block timeout": rollback + typed Timeout.)
+
+  **P5 — cancellation pending at the cutoff** (body ended clean Ok/Stop; the
+  final `CANCEL_TOKEN` check immediately before the COMMIT handoff):
+  `ROLLBACK`, bounded by the 5 s finalize grace; return cancellation; NO
+  COMMIT is sent. Unacknowledged ROLLBACK → `RollbackUncertain` + Detach.
+  Only a body that reached here clean may proceed to P6.
+
+  **P6 — handed off** (COMMIT sent; cancellation arriving AFTER the handoff
+  adds no row — the outcome is whichever of the three the driver reports):
+  - **`Committed`** — driver reports Ok: disarm the guard, connection returns
+    to the pool; Stop propagates unchanged per ADR-0025 (steps after the
+    block do not run).
+  - **`CommitFailed`** — DEFINITIVE rejection (severity Error + SQLSTATE,
+    e.g. `23503` per probe P1): the transaction conclusively failed
+    server-side; bounded cleanup (ROLLBACK attempt) or detach when the cleanup
+    is not acknowledged; the caller may handle it as a normal constraint
+    outcome.
+  - **`CommitUncertain`** — unresolved outcome (severity Fatal `57P01` per
+    probe P2, connection death, Io error, timeout after the handoff):
+    detach/discard (`DiscardOnDrop`); never return the connection; never
+    claim a rollback.
+
 
 - **Registry threading (obligation 2)**: `CommandDeps.transaction_registry`
   already reaches the loader; S2 adds the registration entry point on
