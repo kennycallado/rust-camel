@@ -8,14 +8,15 @@ C+D+E of that design (executor, join, finalization, docker suite, docs).
 
 ## Design probes — OBSERVED BEHAVIOUR (run 2026-11-21, before any bless)
 
-Probe crate: `/home/shared/tmp/sqltrans-exec-verify/probe` (workspace-pinned
+probe crate: `/home/shared/tmp/sqltrans-exec-verify/probe` (workspace-pinned
 sqlx 0.9.0, testcontainers-modules 0.15, postgres:16-alpine). Full digest with
-raw excerpts: `/home/shared/tmp/sqltrans-exec-verify/probe-digest.md`. Environment
-note: this machine's host→container-port data leg is dead (TCP accepted by
-docker-proxy, SSLRequest never answered), so probes and the PG suite run
-against `--network host` containers — the suite itself uses testcontainers'
-mapped-port path in CI; locally the lane is exercised via host-network (see
-"PG suite execution" below).
+raw excerpts: `/home/shared/tmp/sqltrans-exec-verify/probe-digest.md`.
+Environment note (recorded for the change docs): this machine's default
+container port mapping is DEAD — docker-proxy accepts the TCP connection on
+loopback but the data leg never answers (an SSLRequest gets no reply), so
+mapped-port testcontainers connections hang. Local PG runs (probes and suite)
+use `--network host` containers as the documented workaround; the
+testcontainers mapped-port path remains the CI-owned path unchanged.
 
 1. **`23503` at COMMIT** (`DEFERRABLE INITIALLY DEFERRED` FK): the INSERT
    succeeds inside the transaction; `commit()` returns
@@ -107,8 +108,9 @@ the whole lifecycle).
   surfaced from `open_session`), and return the session. The manager resolves
   the pool through the existing `DatasourceCatalog` (same pool the component
   uses) — no eager connect, no new pool.
-- **`SqlTxSession`** (`impl TransactionSession`, downcast target of
-  `as_any`): owns the guarded `PoolConnection` (sole owner; never in exchange
+- **`SqlTxSession`** (`impl TransactionSession`, the `Arc::downcast` target
+  reached via the `Any`-supertrait trait-object upcast): owns the guarded
+  `PoolConnection` (sole owner; never in exchange
   extensions), explicit `TxState` (`Fresh → Active → Finalizing → Done |
   Detached`) in a sync `Mutex` (`state()` is sync), `rollback_only: AtomicBool`,
   and a single admission slot (`tokio::sync::Mutex<()>`; `try_lock` → `Busy`,
@@ -116,11 +118,18 @@ the whole lifecycle).
   borrowed connection — **no sqlx `Transaction` wrapper is ever stored**
   (transaction state lives server-side on the connection); the borrow is
   confined to one await scope. `begin()` (lazy, once): hygiene already done at
-  open; send `BEGIN`; state → Active. `commit()`: state → Finalizing; classify
-  the driver result per the probe rule (severity Error + SQLSTATE →
-  `CommitFailed`; severity Fatal / connection-fatal → `CommitUncertain`);
-  acknowledged → disarm guard (connection returns to pool), state Done;
-  uncertain → detach. `rollback()`: same bounded shape; acknowledged →
+  open; send `BEGIN`; state → Active; an unacknowledged `BEGIN` is never
+  folded back to `Fresh` — acknowledged cleanup ROLLBACK or detach (see the
+  finalization table). `commit()`: state → Finalizing; classify the driver
+  result on exactly the probe-observed split — a DEFINITIVE database rejection
+  (severity Error + SQLSTATE, observed `23503`: the transaction conclusively
+  failed server-side) → `CommitFailed { datasource, reason }`, which the
+  caller may handle as a normal constraint outcome; an UNRESOLVED outcome —
+  severity Fatal `57P01`, connection death, Io error, or a timeout after the
+  handoff — → `CommitUncertain` + DiscardOnDrop detach, never mapped to
+  `CommitFailed` (the frozen spec reserves that variant for definitive
+  rejections); acknowledged → disarm guard (connection returns to pool),
+  state Done. `rollback()`: same bounded shape; acknowledged →
   `RolledBack`, disarm; unacknowledged → `RollbackUncertain` + Detach. Both
   finalizations bounded by the fixed **5 s finalize grace**; a finalization that
   stalls past the grace degrades to its uncertainty variant with the primary
@@ -129,8 +138,9 @@ the whole lifecycle).
   probe 2 backend replacement).
 - **Joined execution**: a joined sql step's producer reads the channel:
   `JOIN_SCOPE` set but no `BLOCK_SESSION` → `JoinSessionMissing`; scope or
-  datasource mismatch → `JoinScopeMismatch`/missing; then downcast
-  (`as_any`) to `SqlTxSession`, `try_lock` the slot (Busy), auto-admit
+  datasource mismatch → `JoinScopeMismatch`/missing; then upcast
+  (`Arc<dyn Any + Send + Sync>`) and `Arc::downcast` to `SqlTxSession`,
+  `try_lock` the slot (Busy), auto-admit
   (hygiene at open; `begin()` on first join), execute the statement on the
   guarded connection via `plan_binds` (unchanged signature — still the only
   bind path), and on ANY joined database execution error call
@@ -204,22 +214,22 @@ the whole lifecycle).
   (the existing `CANCEL_TOKEN` task-local) happens immediately BEFORE handing
   COMMIT to the driver — that check is the cutoff: cancelled before it →
   bounded ROLLBACK (5 s grace); committed already → resolve within the grace,
-  never roll back; (5) finalize per the table below. A block whose body never
-  attempts `BEGIN` (no joined step ran) sends NO finalizing SQL: finalization
-  observes `TxState::Fresh`, disarms the guard, and returns the connection to
-  the pool. Forced drop (the pipeline future dropped, e.g. by the inline
-  dispatcher) cannot await anything — the armed guard detaches (DiscardOnDrop).
+  never roll back; (5) finalize per the table below. **Finalization is a pure
+  function of the session's `TxState` at block exit; the table rows are
+  DISJOINT — each state has exactly one rule, and the body outcome never
+  widens a state's rule.**
 
-  | body outcome | session state | finalization |
-  |---|---|---|
-  | Ok | clean (`Active`) | final cancellation check → COMMIT; ack → propagate Ok; definitive rejection (observed 23503) → `CommitFailed`; Fatal/lost ack → `CommitUncertain` |
-  | `PipelineOutcome::Stopped` (clean) | clean (`Active`) | COMMIT; propagate Stop unchanged (ADR-0025), steps after block do not run |
-  | Err | any | bounded ROLLBACK (5 s grace); body error primary; rollback uncertainty carried in outcome, never substituted |
-  | Ok/Stop but `rollback_only` | rollback-only | bounded ROLLBACK; block fails typed `AbortedByHandledError` |
-  | Ok/Stop but never begun | `Fresh` | no SQL at all: disarm guard, connection returns to pool |
-  | cancel before the cutoff | clean/`Active` | bounded ROLLBACK (5 s grace) |
-  | cancel after the cutoff | `Finalizing` | resolve COMMIT within the grace (ack → Committed / `CommitUncertain`); no rollback claim |
-  | forced drop (future dropped) | any | armed guard detaches (DiscardOnDrop) |
+  | `TxState` at block exit | finalization rule (exactly one) |
+  |---|---|
+  | `Fresh` (BEGIN never sent) | NO finalizing SQL, for ANY body outcome (Ok, clean `PipelineOutcome::Stopped`, Err, or cancellation): disarm the guard, return the CLEAN connection to the pool, and preserve the original outcome untouched (Ok stays Ok, Stop propagates unchanged, the body error stays primary). No ROLLBACK rule exists for this state — `Fresh` cannot be rollback-only (`set_rollback_only` is reachable only after a joined DB error, which requires an acknowledged `BEGIN`). |
+  | `Active`, body Ok / clean Stop, not rollback-only | final cancellation check (the cutoff) → COMMIT bounded by the 5 s grace. Acknowledged → `Committed`, disarm, pool return (Stop propagates unchanged per ADR-0025; steps after the block do not run). DEFINITIVE rejection (severity Error + SQLSTATE, observed `23503`) → `CommitFailed` + bounded best-effort cleanup (acknowledged ROLLBACK or detach). UNRESOLVED outcome (Fatal `57P01`, connection death, Io, timeout after the handoff) → `CommitUncertain` + DiscardOnDrop. Never claim rollback for commit uncertainty. |
+  | `Active`, body Err, or cancellation before the cutoff | bounded ROLLBACK (5 s grace): acknowledged → `RolledBack`, disarm, pool return; unacknowledged → `RollbackUncertain` + Detach. The body error stays primary when present; rollback uncertainty is carried in the outcome, never substituted. |
+  | `Active`, `rollback_only` (any body outcome — Ok/Stop via a `do_try` catch included) | bounded ROLLBACK (5 s grace): acknowledged → the block fails typed `AbortedByHandledError` (a commit path must never report Committed for a server-aborted transaction); unacknowledged → `RollbackUncertain` + Detach. A pre-existing body error stays primary. |
+  | COMMIT/ROLLBACK already handed off, resolution pending (cancellation after the cutoff, grace expiry) | resolve within the grace: acknowledged → `Committed`/`RolledBack`; unresolved → `CommitUncertain`/`RollbackUncertain` + Detach. No new SQL beyond the in-flight statement. |
+  | `BEGIN` sent but NOT acknowledged (the `begin()` future itself failed or was lost) | NEVER treated as `Fresh`: require acknowledged cleanup — a ROLLBACK whose completion is observed, after which the connection may return to the pool — or detach (DiscardOnDrop). |
+  | `Detached` (any origin: unacknowledged hygiene, uncertain finalization, forced drop) | terminal: no further SQL on this connection; the pool is already usable (replacement backend, probe 2). |
+  | forced drop (pipeline future dropped mid-body, e.g. inline dispatcher) | cannot await anything, from ANY state: the armed guard's `Drop` detaches (DiscardOnDrop). |
+
 - **Registry threading (obligation 2)**: `CommandDeps.transaction_registry`
   already reaches the loader; S2 adds the registration entry point on
   `RuntimeBus` (the registry field is private with no setter) and camel-bundles
@@ -265,10 +275,11 @@ backend PIDs, prior-borrower discard + poisoning regression, 23503
 `CommitFailed`, backend-kill `CommitUncertain` + pool replacement,
 cancel-before/after cutoff, block timeout (`pg_sleep`), named pool exhaustion,
 joined mixed-shape batch rollback, idempotent dispositions. New lane rows in
-`AGENTS.md ## COMPONENT LANES`. Locally this machine's NAT is broken, so the
-suite runs via a host-network Postgres for the probe-backed cases; the
-testcontainers mapped-port path stays the CI-owned default and the local run
-uses the same test bodies (documented in the park report).
+`AGENTS.md ## COMPONENT LANES`. Local execution workaround (this host only):
+the default mapped-port path is dead (TCP accepted, SSLRequest unanswered —
+data leg blocked), so the suite runs against a `--network host` Postgres with
+the same test bodies; the testcontainers mapped-port path stays the CI-owned
+default and is not modified.
 
 ### Docs
 
@@ -281,8 +292,8 @@ database.md`: the operational note. English, ste-writing.
 
 ## Affected crates
 
-camel-api (additive join module + `as_any`), camel-sql, camel-core, camel-dsl,
-camel-bundles, camel-test, docs, AGENTS.md.
+camel-api (additive join module + session-port `Any` supertrait), camel-sql,
+camel-core, camel-dsl, camel-bundles, camel-test, docs, AGENTS.md.
 
 ## Architecture boundaries
 

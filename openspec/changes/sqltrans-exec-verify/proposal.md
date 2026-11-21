@@ -67,8 +67,8 @@ mission (`blocked: design`), never rewrite the frozen spec.
 
 ## Affected crates
 
-camel-api (additive join channel + `as_any`), camel-sql (manager/session,
-executor refactor, registration), camel-core (lowering walk, block executor,
-scope baking), camel-dsl (vocabulary guard), camel-bundles (manager
-registration), camel-test (PG suite), docs (ADR amendment, operational note,
-sql-transactions page), AGENTS.md (lane rows).
+camel-api (additive join channel + the `Any` supertrait on the session port),
+camel-sql (manager/session, executor refactor, registration), camel-core
+(lowering walk, block executor, scope baking), camel-dsl (vocabulary guard),
+camel-bundles (manager registration), camel-test (PG suite), docs (ADR
+amendment, operational note, sql-transactions page), AGENTS.md (lane rows).

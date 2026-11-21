@@ -9,7 +9,7 @@
       "verdict": "APPROVED-WITH-FIXES",
       "session": "ses_e017483b9ffeys8BTXiQgO13n1",
       "findings": 6,
-      "note": "3 semantic + 3 editorial; all six fixes applied (req-5 SQL guards in the walk; explicit ordered lifecycle with entry-time deadlines, CUTOFF token check, Fresh no-SQL case; as_any replaced by Any supertrait + upcast; probe claims narrowed; persistence note corrected; Phase A bisectability note)."
+      "note": "3 semantic + 3 editorial; all six master-reviewed fixes applied (req-5 SQL guards in the shared walk; explicit ordered lifecycle with entry-time deadlines + CUTOFF token check; as_any replaced by Any supertrait + trait-object upcast; probe claims narrowed; persistence note corrected; Phase A bisectability note)."
     },
     {
       "round": 2,
@@ -17,11 +17,20 @@
       "verdict": "REJECTED",
       "session": "ses_e016fc892ffeYJdJpIFvr8To4Z",
       "findings": 3,
-      "note": "2 semantic + 1 editorial. Semantic findings at round 2+ stop the gate per mission order: parked blocked: design, no fix-and-retry."
+      "note": "2 semantic + 1 editorial. Gate stopped per mission order; master ACCEPTED the park and ordered a closed 3-item fix list (finalization table disjointness; COMMIT classification aligned to probe evidence; stale as_any refs)."
+    },
+    {
+      "round": 3,
+      "hash": "sha256:47aedf17f9867c58011045b5f4ea642aef16127406549bbc3e9d9525c2061440",
+      "verdict": "REJECTED",
+      "session": "ses_e0168655cffeoT7Z2evdZYAS89",
+      "findings": 3,
+      "note": "3 semantic. Final allowed round under the cap — parked blocked: design and STOPPED per the master's standing order. Expert confirmed: Fix 3 complete (no stale as_any), delta untouched and byte-identical, validation clean, hash matches."
     }
   ],
   "final_verdict": "REJECTED",
-  "final_hash": "sha256:826566ef76197ca0c58fda3a69dd25b98f865de3ec7791c97494fb8954377104",
+  "final_hash": "sha256:47aedf17f9867c58011045b5f4ea642aef16127406549bbc3e9d9525c2061440",
   "blocked": "design",
+  "budget": "3 of 4 expert dispatches used for the spec gate; the final allowed round returned REJECTED — spec gate exhausted for this attempt",
   "date": "2026-11-21"
 }
