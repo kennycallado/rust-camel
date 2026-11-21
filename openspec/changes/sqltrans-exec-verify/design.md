@@ -97,11 +97,18 @@ exception, gate-visible): camel-api gains exactly two additive items** —
   `BLOCK_SESSION` (per-block `{ datasource, scope: u64, session:
   Arc<dyn TransactionSession> }`) and `JOIN_SCOPE` (`u64` baked per joined
   sql step), plus `JoinScope` newtype helpers. No sqlx types in camel-api.
+- a **docs-only contract delta** on the existing methods (ruling 2, 604d —
+  no signature change, no new variants, bless must accept): `rollback()` is
+  TOTAL over every lifecycle state (the implementation selects the action
+  from its private `TxPhase` — see the phase map in §SqlTxSession), and
+  `commit()` gains the precondition "Precondition `Active`. Otherwise no SQL
+  is sent and the call returns `Err(SessionAborted)`. The owner SHALL call
+  `commit` only when `state() == Active`."
 
 Everything else in the port is final and unchanged (S1 promised slice 2 could
 implement finalization without changing signatures — confirmed: `begin`,
 `set_rollback_only`, `commit`, `rollback`, `state`, `TransactionOutcome` cover
-the whole lifecycle).
+the whole lifecycle; the delta above is rustdoc/contract text only).
 
 ### camel-sql: manager, session, executor
 
@@ -143,6 +150,26 @@ the whole lifecycle).
   Guard invariant: armed from checkout until `Done` or the R2 clean return;
   `Detached` is terminal.
 
+  **`rollback()` is TOTAL** (ruling 2, 604d — the SESSION owns the non-`Open`
+  rows inside it; the segment never needs `TxPhase`). Phase→action:
+  `Clean` → R2, `BeginPending` → R3, `Open` → R4/R5/R6 SQL,
+  `Detached`/defensive → R1. Its rustdoc (the disclosed docs-only port
+  delta):
+
+  ```rust
+  /// End the block without committing. Total over every lifecycle state; the
+  /// implementation selects the action from its private phase:
+  /// - nothing begun (`Fresh`, BEGIN never sent): no SQL, connection returned
+  ///   clean, `Ok(RolledBack)` (nothing was begun, so nothing is durable);
+  /// - BEGIN sent but unacknowledged (`Fresh`): no SQL, detach,
+  ///   `Err(RollbackUncertain)`;
+  /// - `Active`: ROLLBACK within the finalize grace; acknowledged →
+  ///   `Ok(RolledBack)`, else detach + `Err(RollbackUncertain)`;
+  /// - `Detached`, or a defensive `Finalizing`/`Done` entry: no SQL,
+  ///   `Err(RollbackUncertain)` (`error!` log for the defensive entry).
+  fn rollback(&self) -> FinalizeFuture<'_>;
+  ```
+
   `begin()` resolution (lazy, once; hygiene already done at open — mandatory,
   probe P4):
   1. Precondition `Clean`; else `Ok(())` if `Open`, else `SessionAborted`.
@@ -164,7 +191,12 @@ the whole lifecycle).
   in that run (COMMIT plus any cleanup ROLLBACK) — so the session detaches
   itself; acknowledged → disarm guard (connection returns to pool), `Done`;
   not acknowledged / stalled past grace → the uncertainty variant
-  (`CommitUncertain` / `RollbackUncertain`) + `Detached`. `Drop` of the
+  (`CommitUncertain` / `RollbackUncertain`) + `Detached`. **`commit()` on a
+  non-`Open` phase → `Err(SessionAborted)`, no SQL** (docs-only port delta,
+  ruling 2). The SEGMENT only decides commit-vs-rollback from what the frozen
+  port already exposes (`state()`, `is_rollback_only()`, `BodyEnd`, the
+  cutoff); the session returns only the cleanup result, and a cleanup result
+  never replaces an existing primary error. `Drop` of the
   session while the guard is armed = R0 DiscardOnDrop (detach: close the raw
   connection, never return to pool; pool stays usable — probe 2 backend
   replacement).
@@ -206,13 +238,39 @@ the whole lifecycle).
   else `Timeout` (tie included); unacknowledged hygiene → `open_session`
   returns `Err(RollbackUncertain)`, connection detached; (3) set
   `BLOCK_SESSION` for the body task and run the body race; (4) cooperative
-  finalization via R1–R7 below — evaluated ONCE, after the body race, first
-  match wins.
+  finalization via the segment pseudocode below — the SEGMENT only decides
+  commit-vs-rollback from what the frozen port already exposes (`state()`,
+  `is_rollback_only()`, `BodyEnd`, the cutoff); the SESSION owns the
+  non-`Open` rows inside a total `rollback()` (ruling 2, 604d, option ii).
 
   Body race: `biased select { sleep_until(block_deadline),
   CANCEL_TOKEN.cancelled(), body }` in that order →
   `BodyEnd ∈ {Ok(Continue), Ok(Stopped), Err(e), Deadline, Cancelled}`.
   Tie → deadline wins → `Timeout`.
+
+  Segment pseudocode (replaces row selection in camel-core; the R-rows below
+  stay as the normative outcome table):
+
+  ```text
+  primary = match body_end {                       // precedence lives here, unchanged
+    Deadline => Some(Timeout), Err(e) => Some(e), Cancelled => Some(Cancelled),
+    Ok(_) if s.is_rollback_only() => Some(AbortedByHandledError), Ok(_) => None }
+  if primary.is_none() && s.state() == Active {    // R7 gate
+    if CANCEL_TOKEN.is_cancelled() || now >= block_deadline {      // R6
+      primary = Some(if now >= block_deadline { Timeout } else { Cancelled }) }
+    else { return map_commit(s.commit().await, body_end) } }       // R7, no re-consult
+  let r = s.rollback().await;                      // R1–R6: session selects by TxPhase
+  match (primary, r) {
+    (None, Ok(_))          => body_end_ok_unchanged,   // R2 clean, Stop per ADR-0025
+    (None, Err(u))         => Err(u),                  // e.g. step-local drop left BeginPending
+    (Some(p), Ok(_))       => Err(p),
+    (Some(p), Err(u))      => Err(p).with_cleanup(u),  // RollbackUncertain + Detached context
+  }
+  ```
+
+  Precedence (Timeout > body Err > cancellation > `AbortedByHandledError`)
+  stays in the segment. The session returns only the cleanup result; a
+  cleanup result never replaces an existing primary error.
 
   **R0 — forced drop** (guard `Drop`, any `TxPhase` except `Done`/`Detached`).
   Includes mid-body, pending BEGIN, open_session/hygiene, stalled
@@ -220,7 +278,11 @@ the whole lifecycle).
   closed/detached, never returned), no SQL. This is the guard invariant, not a
   cooperative row.
 
-  Cooperative rows — first match wins, evaluated once after the body race:
+  Cooperative rows — first match wins, evaluated once after the body race.
+  SELECTION SPLIT: R1–R3 are selected inside `SqlTxSession::rollback` (the
+  session knows its private `TxPhase`); R4–R7 are selected by the segment on
+  `state()`, the flag, `BodyEnd` and the cutoff — the rows remain the
+  normative outcome table.
 
   **R1 — `TxPhase == Detached`** (a failed `begin()` or a joined transport
   failure already detached). No SQL. Primary by precedence: Timeout > body
@@ -267,11 +329,9 @@ the whole lifecycle).
     per probe P2), Io, Protocol, PoolClosed, any other code, or grace elapsed.
     Detach immediately; no ROLLBACK, no rollback claim.
 
-  Totality: at finalization entry `TxPhase ∈ {Clean, BeginPending, Open,
-  Detached}` (only the segment enters `*InFlight`/`Done`). R1–R3 partition on
-  `TxPhase`; R4–R7 partition `Open` by flag → BodyEnd → cutoff. Defensive
-  fallback for an entry phase of `*InFlight`/`Done`: `error!` log, treat as
-  R1.
+  Segment totality: commit iff `state()==Active ∧ !rollback_only ∧ body
+  Ok/Stop ∧ cutoff passed`, else `rollback()`. Session totality: `rollback()`
+  covers every `TxPhase`.
 
 ### PG suite execution (rc-f3145)
 
@@ -282,18 +342,22 @@ backend PIDs, prior-borrower discard + poisoning regression, 23503
 cancel-before/after cutoff, block timeout (`pg_sleep`), named pool exhaustion,
 joined mixed-shape batch rollback, idempotent dispositions. Unit-tier
 virtual-clock fixtures (injected timer, no Docker) pin the decision-list
-paths: `transacted_begin_pending_deadline` (R3 — the body race expires while
-`begin()` awaits ACK: detach, no SQL, Timeout primary, `RollbackUncertain` +
-`Detached` context) and `transacted_commit_classifier_table` (R7 classifier
-table: SQLSTATE class `23` and `40` → `CommitFailed`; `57P01`, `57014`,
-`08006`, Io → `CommitUncertain` + detach). All frozen fixture names are kept
+paths: `transacted_begin_pending_deadline` — a **camel-sql unit fixture**
+(`rollback()` from `BeginPending` → detach, no SQL, `Err(RollbackUncertain)`,
+R3 via the total rollback); `transacted_fresh_rollback_precedence` — a
+**camel-core segment fixture** with a fake session returning Ok/Err from
+`rollback()` under Deadline, Err and Ok bodies, asserting the primary error
+and the cleanup context (the pseudocode's precedence table); and
+`transacted_commit_classifier_table` (R7 classifier table: SQLSTATE class
+`23` and `40` → `CommitFailed`; `57P01`, `57014`, `08006`, Io →
+`CommitUncertain` + detach). All frozen fixture names are kept
 (`transacted_cancel_before_commit`, `transacted_cancel_after_commit_ack`,
-`transacted_cancel_after_commit_lost`, `transacted_commit_deferred_fk`,
-`transacted_forced_drop_inline`, `transacted_hygiene_unacknowledged`,
-`transacted_hygiene_deadline_expiry`, `transacted_block_deadline_first`,
-`transacted_acquire_deadline_first`, `transacted_deadline_tie`,
-`transacted_stalled_rollback`, `transacted_stalled_commit`,
-`transacted_commit_classifier_table`). New lane rows in
+`transacted_cancel_after_commit_lost`, `transacted_commit_rejected`,
+`transacted_commit_deferred_fk`, `transacted_forced_drop_inline`,
+`transacted_hygiene_unacknowledged`, `transacted_hygiene_deadline_expiry`,
+`transacted_block_deadline_first`, `transacted_acquire_deadline_first`,
+`transacted_deadline_tie`, `transacted_stalled_rollback`,
+`transacted_stalled_commit`). New lane rows in
 `AGENTS.md ## COMPONENT LANES`. Local execution workaround (this host only):
 the default mapped-port path is dead (TCP accepted, SSLRequest unanswered —
 data leg blocked), so the suite runs against a `--network host` Postgres with

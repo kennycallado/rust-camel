@@ -36,9 +36,13 @@ subset: `openspec/specs/sql-transactions/spec.md`.
   (timeout/driver-error → typed errors, never cleanup SQL), grace enforced
   inside `commit()`/`rollback()` (one absolute finalize deadline), join
   admission via task-local channel + scope baking.
-- **PORT DELTA (explicitly accepted by the 604c ruling)**: the `Any`
-  supertrait on `TransactionSession` (trait-object upcast, MSRV 1.96) and the
-  additive `transaction::join` task-local module. No signature changes.
+- **PORT DELTA (explicitly accepted by the 604c ruling; extended docs-only by
+  ruling 2, 604d)**: the `Any` supertrait on `TransactionSession`
+  (trait-object upcast, MSRV 1.96), the additive `transaction::join`
+  task-local module, and a DOCS-ONLY contract delta on the existing methods
+  (`rollback()` total over every lifecycle state; `commit()` precondition
+  `Active` else `Err(SessionAborted)`). No signature changes, no new
+  variants.
 - **PG suite** in camel-test (testcontainers, `postgres` feature already
   present) with one scenario per acceptance line and the probe cases as
   regression tests; lane rows; local runs via the documented `--network host`

@@ -52,14 +52,22 @@ dialects). Registry resolution stays fail-closed (`ManagerMissing` names the
 datasource). Each rejection keeps its named unit-tier fixture asserting the
 exact variant and offender fields.
 
-## Registry threading and registration (moved verbatim)
+## Registry threading and registration (moved verbatim; corrected by ruling 2, 604d)
 
 - **Registry threading (obligation 2)**: `CommandDeps.transaction_registry`
   already reaches the loader; this slice adds the registration entry point on
-  `RuntimeBus` (the registry field is private with no setter) and
-  camel-bundles registers a `SqlTransactionManager` per catalog datasource at
-  boot, before routes load (fail-closed `ManagerMissing` otherwise).
+  `RuntimeBus` (the registry field is private with no setter) and camel-bundles
+  registers a `SqlTransactionManager` per catalog datasource at boot, before
+  routes load (fail-closed `ManagerMissing` otherwise).
   camel-cli's assembly path registers through the same entry point.
+  **RULING-2 CORRECTION (604d §C, binding): S2a adds ONLY the
+  `RuntimeBus::register_transaction_manager` entry point; bundle and CLI
+  register NOTHING in this slice (no `SqlTransactionManager` exists yet —
+  that implementation and the real registration land with S2b,
+  rc-qv2iz.6).** S2a instead adds the guard test
+  `bundle_boot_leaves_transaction_registry_empty` (zero managers at boot,
+  mission 607); S2b replaces that guard with
+  `bundle_boot_registers_catalog_datasources`.
 - **Obligation 4 (documented constraint)**: `handle_register` persists the
   aggregate first (`repo.save`), then propagates lowering errors — including
   typed `ManagerMissing` from `canonical_to_route_definition` — via `?`

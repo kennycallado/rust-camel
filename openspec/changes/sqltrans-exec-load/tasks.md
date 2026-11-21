@@ -125,36 +125,41 @@ already exist from S1; add the BuilderStep/canonical twins):
 **Acceptance**: `- [x] 2.1` when every fixture passes on the canonical/
 programmatic path and the existing DSL-path fixtures still pass.
 
-### 2.2 RuntimeBus registration entry point + bundle/CLI registration
+### 2.2 RuntimeBus registration entry point (S2a scope per ruling 2, 604d)
 
 - [ ] 2.2
 
 **Files**: `crates/camel-core/src/lifecycle/application/runtime_bus.rs`,
-`crates/camel-bundles/src/lib.rs`
+`crates/camel-core/src/registry.rs` (test-only fake)
 
 **Steps**:
 1. Add `RuntimeBus::register_transaction_manager(name, Arc<dyn
    TransactionManager>) -> Result<(), RegistryError>` (duplicate-rejecting,
    delegating to the `NamedRegistry`).
-2. In bundle boot, after the datasource catalog is built, register a
-   `SqlTransactionManager` per catalog datasource (constructor from
-   camel-sql; fail-loud on duplicate).
-3. Register through the same entry point on the camel-cli assembly path.
-4. Keep routes failing closed with `ManagerMissing` when nothing registers.
+2. Tests use a TEST-ONLY fake manager inside camel-core (the existing
+   `FakeManager` precedent). **Bundle and CLI register NOTHING in S2a** —
+   there is no `SqlTransactionManager` implementation in this slice (it
+   lands with S2b, rc-qv2iz.6); this guards mission 607: zero managers at
+   boot, transacted routes fail closed with `ManagerMissing`.
+3. Add the boot guard test `bundle_boot_leaves_transaction_registry_empty`.
+   (S2b replaces this guard with `bundle_boot_registers_catalog_datasources`
+   when real registration lands.)
 
 **Tests** (executable):
 - name: `runtime_bus_registers_and_resolves_manager` — arrange: `RuntimeBus`
-  + fake manager for `pg`; act: `register_transaction_manager("pg", m)`,
-  then `resolve_transaction_manager(deps.transaction_registry, "pg")`;
-  assert: resolves to the same Arc; duplicate registration errors.
+  + test-only fake manager for `pg` (camel-core); act:
+  `register_transaction_manager("pg", m)`, then
+  `resolve_transaction_manager(deps.transaction_registry, "pg")`; assert:
+  resolves to the same Arc; duplicate registration errors.
 - name: `unregistered_datasource_still_fails_closed` — arrange: registry
   without `audit`; act: resolve; assert: `ManagerMissing` naming `audit`.
-- name: `bundle_boot_registers_catalog_datasources` — arrange: bundle config
-  with datasources `pg` + `audit`; act: boot; assert: both resolvable via the
-  bus registry.
+- name: `bundle_boot_leaves_transaction_registry_empty` — arrange: bundle
+  config with datasources `pg` + `audit`; act: boot; assert: the transaction
+  registry resolves NO manager for either datasource (zero managers at boot,
+  per mission 607).
 
-**Acceptance**: `- [x] 2.2` when all three tests pass and bundle boot
-registers every catalog datasource before routes load.
+**Acceptance**: `- [x] 2.2` when the entry point exists, both bus tests pass,
+and the bundle registry is empty at boot.
 
 ### 2.3 DEFERRED_VARIANTS move (vocabulary decision)
 

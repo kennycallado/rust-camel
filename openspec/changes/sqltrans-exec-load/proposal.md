@@ -31,9 +31,11 @@ subset: `openspec/specs/sql-transactions/spec.md`.
 - **rc-c3mjp closed**: the S1 structural walk extended to `BuilderStep` trees
   at BOTH fan-ins (the `compile_step` `Transacted` arm — the shared point for
   ALL authoring paths — and the canonical arm in `commands.rs`).
-- **Registry + registration**: the `RuntimeBus` registration entry point;
-  camel-bundles registers a `SqlTransactionManager` per catalog datasource at
-  boot; camel-cli's assembly path registers through the same entry point.
+- **Registry + entry point**: the `RuntimeBus` registration entry point
+  (`register_transaction_manager`); a test-only fake manager in camel-core
+  for its tests; the boot guard `bundle_boot_leaves_transaction_registry_empty`
+  (zero managers at boot, mission 607). Bundle/CLI registration of the real
+  `SqlTransactionManager` moves to S2b (ruling 2, 604d).
 - **`DEFERRED_VARIANTS` move**: `CamelError::Transaction` becomes a supported
   in-pipeline kind; the vocabulary-guard test asserts the moved bucket.
 - **Excluded** (S2b, `sqltrans-exec-verify`): manager/session implementation,
