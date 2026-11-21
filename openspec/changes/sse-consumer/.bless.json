@@ -1,0 +1,13 @@
+{
+  "kind": "plan",
+  "verdict": "BLESSED",
+  "hash": "sha256:4d5edd57b1045887cf06bdfe45b6b430c37090725c998dfecb505c2e062525b1",
+  "expert": "e_gpt",
+  "rounds": 1,
+  "date": "2026-11-21",
+  "history": [
+    "round 0: REJECTED (1 semantic: finish() dispatched unterminated block at EOF; 1 important: budget-reset test proved nothing + missed event branch; 2 minor: cargo filter syntax, proposal missing total-bytes exclusion)",
+    "reviewer loop: r_glm REJECT (7 findings) -> all fixed -> APPROVE-WITH-FINDINGS (3 one-line minors) -> all applied",
+    "round 1: BLESSED"
+  ]
+}

@@ -177,6 +177,113 @@ The Producer resolves the trio in this order: the `httpMethod` option beats `Cam
 
 Default path inheritance and `bridgeEndpoint=true` semantics are Apache Camel parity. The `CamelHttpQuery` composition rules are a rust-camel divergence, documented in [ADR-0071](https://github.com/kennycallado/rust-camel/blob/main/docs/adr/0071-http-outbound-url-policy.md). Neither is a defect. The component emits no runtime warning for it.
 
+## Server-Sent Events consumer (sse:)
+
+`sse://host/path` is a Consumer Endpoint that subscribes to a Server-Sent Events stream. The Consumer sends one `GET` with `Accept: text/event-stream`, reads the response body, and submits one Exchange per complete event.
+
+The scheme is consumer-only. An `sse:` endpoint in a `to:` position fails at endpoint creation with `sse: is consumer-only`.
+
+```text
+sse://<host>[/<path>][?query]
+```
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `maxEventBytes` | `1048576` | Upper bound for one event's accumulated `data` bytes. Must be greater than 0. |
+| `idleTimeoutMs` | `90000` | Silence budget between body reads. Any received bytes, comments included, reset it. |
+| `connectTimeoutMs` | `10000` | Budget for one connect attempt, response head included. |
+| `retryInitialMs` | `3000` | First reconnect delay. Clamped into [1 s, 60 s]. |
+| `retryMaxMs` | `60000` | Reconnect delay cap. Clamped into [1 s, 60 s] and never below `retryInitialMs`. |
+| `allowInternal` | `false` | Allow internal targets: blocklisted IP literals, `localhost`, and `.local` domains. |
+| `allowCleartext` | `false` | Allow cleartext `http://` to a public target. |
+| `authHeaders` | empty | Outbound headers as `Name1=Value1,Name2=Value2`. |
+
+`sse:` rides HTTP on the wire. The Consumer translates the URI to `https://` by default and to `http://` only where the egress policy allows cleartext: an internal target under `allowInternal=true`, or any target under `allowCleartext=true`. A component `tls.enabled = true` always forces `https://`. See [Uniform public-cleartext egress policy](https://github.com/kennycallado/rust-camel/blob/main/docs/adr/0081-uniform-public-cleartext-egress-policy.md).
+
+A route that logs every event from a public stream:
+
+```rust,ignore
+use camel_builder::RouteBuilder;
+
+let route = RouteBuilder::from("sse://events.example.org/stream")
+    .to("log:sse-events?showHeaders=true&showBody=true")
+    .build()?;
+```
+
+<details>
+<summary>YAML equivalent</summary>
+
+```yaml
+routes:
+  - id: sse-events
+    from: "sse://events.example.org/stream"
+    steps:
+      - to: "log:sse-events?showHeaders=true&showBody=true"
+```
+
+</details>
+
+A stream that needs credentials and tighter reconnect bounds:
+
+```yaml
+routes:
+  - id: sse-authorized
+    from: "sse://events.example.org/stream?retryInitialMs=2000&retryMaxMs=30000&idleTimeoutMs=45000&authHeaders=Authorization=Bearer%20token"
+    steps:
+      - to: "direct:handle-event"
+```
+
+### Event mapping
+
+Each complete event becomes one InOnly Exchange with a `Body::Text` body. Multi-line `data:` values join with a newline, and the trailing newline of the block is dropped. The body is never parsed: JSON stays text until a route step unmarshals it.
+
+| Header | Source | Presence |
+| --- | --- | --- |
+| `CamelSseEvent` | `event:` field | always; `message` when the field is absent |
+| `CamelSseId` | `id:` field | omitted when absent or empty |
+| `CamelSseRetry` | `retry:` field, decimal milliseconds | omitted when absent or invalid |
+
+A comment-only block and a block with no data emit nothing. Comments still reset the idle timer. The Consumer strips one UTF-8 BOM at stream start, accepts CRLF, CR, and LF line endings, and discards a block cut off by the end of the stream.
+
+An event larger than `maxEventBytes`, or one whose `data` is not valid UTF-8, fails the route. The failure increments the route error label `b-prime:sse:oversize` or `b-prime:sse:utf8`.
+
+The Consumer has no internal channel. It submits an Exchange with `ctx.send().await` and reads the next chunk only after that call completes, so the pipeline applies back-pressure.
+
+### Terminal and retried failures
+
+Transport errors, an idle timeout, a connect timeout, a `5xx` response, and the server closing the stream all end the current connection and trigger a resubscription. A `204`, any other non-2xx status, and a response whose `Content-Type` is not `text/event-stream` fail the route with a task error and never reconnect. A DNS resolution failure and an SSRF or redirect policy rejection also fail the route: route supervision owns any restart.
+
+Reconnects target the configured URL, never a redirect target from an earlier connect. The Consumer re-applies SSRF validation, DNS resolution and pinning, the TLS allowlist, and redirect handling on every attempt.
+
+The reconnect budget is ten attempts. It resets at the first complete event or comment parsed after a reconnect, not at the HTTP 200. A server `retry:` field overrides the configured delay for later reconnects, clamped into [1 s, 60 s]. The Consumer stores the last event id in memory and resends it as `Last-Event-ID` on reconnect. An id longer than 1 KiB is delivered in the Exchange but not stored for resend.
+
+When the budget is exhausted the Consumer returns a task error, and the route supervision policy decides the restart. The route reports ready when the consumer task starts; the first connect runs in the background and is bounded by `connectTimeoutMs`.
+
+### authHeaders and percent-encoding
+
+`authHeaders` splits entries on commas and each entry on its first `=`. The URI query parser percent-decodes the value before that split, so write a space as `%20`:
+
+```yaml
+routes:
+  - id: sse-authorized
+    from: "sse://events.example.org/stream?authHeaders=Authorization=Bearer%20token"
+    steps:
+      - to: "direct:handle-event"
+```
+
+The header then carries `Bearer token`.
+
+A comma cannot appear in a value. `%2C` decodes to `,` before the entry split, so the entry is read as two entries and endpoint creation fails with `invalid authHeaders entry, expected Name=Value`. Use a header whose value does not need a comma.
+
+Header names and values are validated at endpoint creation. Values are credential material: diagnostics and logs show the header names only, never the values.
+
+### MVP limits
+
+- No request body. The Consumer sends `GET` only; a stream endpoint that requires a POST body is out of scope.
+- No persisted ids. `Last-Event-ID` is memory-only and lost on restart.
+- No max-events cap and no total-bytes cap. An event stream is endless by design; `maxEventBytes` is the memory bound, and route cancellation controls lifetime.
+- Only the per-event bound exists. There is no `maxEvents` or `totalBytes` option.
+
 ## Direction choice
 
 A route that serves an API uses HTTP as a source. A route that calls another service uses HTTP as a sink. A route that does both needs two Endpoints, one in each position. The second Endpoint belongs to a second Route. The component supports both directions because the same crate owns the connection plumbing. Each Endpoint still picks one direction at creation time.

@@ -8,6 +8,7 @@ pub mod health;
 mod health_wiring_tests;
 pub mod registry;
 pub mod rest_match;
+pub(crate) mod sse;
 pub(crate) mod ssrf;
 pub mod static_config;
 pub mod static_dispatch;
