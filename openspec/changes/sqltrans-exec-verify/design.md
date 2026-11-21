@@ -1,10 +1,16 @@
-# Design: sqltrans-exec-verify
+# Design: sqltrans-exec-verify (S2b — runtime semantics)
 
 Parent ruling (e_opus 2026-11-15/2026-11-20, restated in the frozen
 `openspec/changes/sqltrans/design.md`, do not re-litigate): surface (b),
 explicit `transacted { datasource }` block, owned transaction per block,
-lexical scope, PostgreSQL-only joins in v1, no 2PC. This slice owns Phases
-C+D+E of that design (executor, join, finalization, docker suite, docs).
+lexical scope, PostgreSQL-only joins in v1, no 2PC. Per the 604c split ruling
+this change is **S2b: runtime semantics** — reqs 2, 3, 4, 8, 9, 10, 11; req 5
+RUNTIME (join channel, missing/mismatch, hygiene fixtures, maxconn1, PIDs,
+sequential split, direct callee); req 12 runtime scenarios; req 14; the PG
+suite; the req 15 remainder docs. The load-side half moved to the new
+`sqltrans-exec-load` (S2a), which this change depends on. The camel-api
+`Any` supertrait + `join` task-local module are a PORT DELTA owned here and
+explicitly accepted by the 604c ruling (the port was declared frozen in S1).
 
 ## Design probes — OBSERVED BEHAVIOUR (run 2026-11-21, before any bless)
 
@@ -22,12 +28,14 @@ testcontainers mapped-port path remains the CI-owned path unchanged.
    succeeds inside the transaction; `commit()` returns
    `Err(Database(PgDatabaseError { severity: Error, code: "23503",
    constraint: Some("p1_child_pid_fkey") }))`; `is_foreign_key_violation()`
-   true; 0 rows persist; pool immediately usable. → the observed definitive
-   rejection (severity Error + `23503`) maps to **`CommitFailed`
-   { datasource, reason }**; bounded best-effort cleanup; never a silent
-   rollback. (Classification is stated for the observed pair — definitive
-   rejection vs connection-fatal — not generalized to every severity-Error
-   code.)
+   true; 0 rows persist; pool immediately usable. → classified per the R7
+   rule: **`CommitFailed`** requires affirmative evidence of definitive
+   rejection — `sqlx::Error::Database` with PG severity exactly `ERROR` AND
+   SQLSTATE class `23` (integrity violation; probe P1 proves `23503` only) or
+   class `40` ("transaction rollback": the server affirms abort). Everything
+   else — other severity-Error codes, FATAL severity, Io — classifies
+   conservatively as **`CommitUncertain`** + detach. Bounded cleanup; never a
+   silent rollback.
 2. **Connection killed mid-COMMIT** (`pg_terminate_backend` inside a deferred
    constraint trigger): `commit()` returns
    `Err(Database(PgDatabaseError { severity: Fatal, code: "57P01" }))` — sqlx
@@ -110,37 +118,56 @@ the whole lifecycle).
   uses) — no eager connect, no new pool.
 - **`SqlTxSession`** (`impl TransactionSession`, the `Arc::downcast` target
   reached via the `Any`-supertrait trait-object upcast): owns the guarded
-  `PoolConnection` (sole owner; never in exchange
-  extensions), explicit `TxState` (`Fresh → Active → Finalizing → Done |
-  Detached`) in a sync `Mutex` (`state()` is sync), `rollback_only: AtomicBool`,
-  and a single admission slot (`tokio::sync::Mutex<()>`; `try_lock` → `Busy`,
-  probe 6). BEGIN/COMMIT/ROLLBACK are issued as plain statements on the
-  borrowed connection — **no sqlx `Transaction` wrapper is ever stored**
-  (transaction state lives server-side on the connection); the borrow is
-  confined to one await scope. `begin()` (lazy, once): hygiene already done at
-  open (mandatory, probe P4); send `BEGIN`; state → Active. An unacknowledged
-  `BEGIN` is resolved entirely inside `begin()` per decision P2 — acknowledged
-  cleanup ROLLBACK (no-op WARNING on a clean server) or detach — it is never
-  folded back to `Fresh` and never reaches finalization. `commit()`: state →
-  Finalizing; classification happens ONLY in the handed-off state (decision
-  P6) and keys on exactly the probe-observed split: a DEFINITIVE database
-  rejection (severity Error + SQLSTATE, observed `23503` per probe P1: the
-  transaction conclusively failed server-side) → `CommitFailed
-  { datasource, reason }`, which the caller may handle as a normal constraint
-  outcome, with bounded cleanup (ROLLBACK attempt) or detach when the cleanup
-  is not acknowledged; an UNRESOLVED outcome — severity Fatal `57P01`
-  (probe P2), connection death, Io error, or a timeout after the handoff — →
-  `CommitUncertain` + DiscardOnDrop detach, never mapped to `CommitFailed`
-  (the frozen spec reserves that variant for definitive rejections), and never
-  claiming a rollback; acknowledged → disarm guard (connection returns to
-  pool), state Done — the three-way split is decision row P6 exactly.
-  `rollback()`: same bounded shape; acknowledged →
-  `RolledBack`, disarm; unacknowledged → `RollbackUncertain` + Detach. Both
-  finalizations bounded by the fixed **5 s finalize grace**; a finalization that
-  stalls past the grace degrades to its uncertainty variant with the primary
-  error preserved. `Drop` of the session while the guard is armed = DiscardOnDrop
-  (detach: close the raw connection, never return to pool; pool stays usable —
-  probe 2 backend replacement).
+  `PoolConnection` (sole owner; never in exchange extensions), a single
+  admission slot (`tokio::sync::Mutex<()>`; `try_lock` → `Busy`, probe 6), and
+  `rollback_only` as the port's `AtomicBool`. BEGIN/COMMIT/ROLLBACK are issued
+  as plain statements on the borrowed connection — **no sqlx `Transaction`
+  wrapper is ever stored** (transaction state lives server-side on the
+  connection); the borrow is confined to one await scope.
+
+  Decision state keys on a private **`TxPhase`**, never on `state()`: the
+  frozen `TransactionState` cannot express "BEGIN bytes may be on the wire" or
+  "COMMIT handed off"; both drive the outcome, so the gap is real and lives
+  behind the enum.
+
+  | TxPhase | Meaning | `state()` |
+  |---|---|---|
+  | `Clean` | hygiene acknowledged, nothing sent | `Fresh` |
+  | `BeginPending` | set before the BEGIN write; cleared only by the ACK | `Fresh` (lossy — nothing may decide on `state()`) |
+  | `Open` | BEGIN acknowledged | `Active` |
+  | `CommitInFlight` | handed-off marker, set immediately before the COMMIT write | `Finalizing` |
+  | `RollbackInFlight` | rollback sent, not yet acknowledged | `Finalizing` |
+  | `Done` | acknowledged finalization, guard disarmed | `Done` |
+  | `Detached` | connection discarded | `Detached` |
+
+  Guard invariant: armed from checkout until `Done` or the R2 clean return;
+  `Detached` is terminal.
+
+  `begin()` resolution (lazy, once; hygiene already done at open — mandatory,
+  probe P4):
+  1. Precondition `Clean`; else `Ok(())` if `Open`, else `SessionAborted`.
+  2. Set `BeginPending`, send `BEGIN` under
+     `timeout_at(begin_start + acquire_deadline())` (req 11).
+  3. ACK → `Open`.
+  4. Own timeout → detach, `Detached`, return
+     `PoolExhausted { datasource, max_connections, waited_ms }`.
+  5. Any driver error → detach, `Detached`, return
+     `RollbackUncertain { datasource }`.
+  6. NO cleanup SQL in any case: protocol position unknown, nothing durable.
+  7. Future dropped → phase stays `BeginPending` → R3 (cooperative) or R0
+     (forced).
+  8. The joined step calls `set_rollback_only()` before returning ANY
+     `begin()` error.
+
+  `commit()`/`rollback()`: enforce the grace INTERNALLY — ONE absolute
+  finalize deadline, `finalize_start + 5 s`, covering every finalization SQL
+  in that run (COMMIT plus any cleanup ROLLBACK) — so the session detaches
+  itself; acknowledged → disarm guard (connection returns to pool), `Done`;
+  not acknowledged / stalled past grace → the uncertainty variant
+  (`CommitUncertain` / `RollbackUncertain`) + `Detached`. `Drop` of the
+  session while the guard is armed = R0 DiscardOnDrop (detach: close the raw
+  connection, never return to pool; pool stays usable — probe 2 backend
+  replacement).
 - **Joined execution**: a joined sql step's producer reads the channel:
   `JOIN_SCOPE` set but no `BLOCK_SESSION` → `JoinSessionMissing`; scope or
   datasource mismatch → `JoinScopeMismatch`/missing; then upcast
@@ -150,50 +177,15 @@ the whole lifecycle).
   guarded connection via `plan_binds` (unchanged signature — still the only
   bind path), and on ANY joined database execution error call
   `set_rollback_only()` BEFORE the error is returned to the pipeline (probe
-  note: never run statements on a server-aborted transaction). A later join on
+  note: never run statements on a server-aborted transaction). Any error
+  from `begin()` or statement execution sets `rollback_only` before return;
+  Busy/SessionAborted/JoinSessionMissing/JoinScopeMismatch are admission
+  errors and do not touch the connection. A later join on
   a rollback-only session is rejected at admission with `SessionAborted`
   without touching the connection.
-- **Executor refactor (Phase A, no behaviour change)**: the four execute fns
-  (`fetch_single_rows`, `execute_select`, `execute_modify`, `execute_batch`)
-  move onto a borrowed-connection surface `DbHandle<'a>` over `&mut
-  AnyConnection`; the producer call site acquires from the pool exactly as
-  today and lends the handle. Joined steps lend the session's guarded
-  connection instead — same downstream code. Preserved unchanged in Phase A:
-  standalone (non-joined) batch execution keeps its own pool transaction for
-  the statement batch, and StreamList keeps its deferred pooled acquisition
-  (StreamList production inside a block is already rejected at load, so the
-  streaming path never borrows a session connection).
-- **Batch planner (req 12)**: `execute_batch` today plans per-shape via
-  separate single-shape calls; batch planning moves to ONE shared entry point
-  (`plan_batch_binds`) that accepts all batch shapes together, without
-  changing `sql-binds` whole-batch rules or `plan_binds`' signature.
 
-### camel-core: lowering, structural walk, block executor
+### camel-core: block executor
 
-- **Structural walk at the fan-in (closes rc-c3mjp)**: S1's
-  `validate_transacted_blocks` walks the declarative AST only. S2 adds the
-  equivalent walk over `BuilderStep` trees in camel-core — the SHARED
-  validation point for ALL authoring paths is the `BuilderStep::Transacted`
-  arm of `StepCompilerRegistry::compile_step` (every path — DSL-lowered,
-  builder-authored, canonical-lowered, programmatic — compiles through it;
-  it replaces the `ManagerMissing` backstop). The canonical arm in
-  `commands.rs` (`canonical_step_to_builder_step`) runs the same walk as an
-  early gate before aggregate-side effects continue. The walk enforces the
-  FULL rejection set in two groups:
-  (a) the S1 structural set: parallel split/multicast/wiretap/async
-  handoff/seda escape reaching a joined sql step, StreamList inside a block,
-  foreign/unnamed datasource, nested block, dynamic target unprovable;
-  (b) the req-5 join-side SQL guards on every joined step's STATIC route SQL:
-  reject header/body runtime sources and `file:` sources
-  (`RuntimeSqlInJoinedStep`), reject transaction-ending/implicit-commit
-  statement text — BEGIN/COMMIT/ROLLBACK/SAVEPOINT and dialect equivalents
-  (`TransactionControlSql` naming the step and the offending statement),
-  resolve the dialect from the datasource URL scheme with a registered
-  manager (`DialectUnprovable` naming the unresolved scheme for unrecognized
-  schemes; `UnsupportedJoinDialect` naming MySQL/SQLite for resolved
-  non-PostgreSQL dialects). Registry resolution stays fail-closed
-  (`ManagerMissing` names the datasource). Each rejection keeps its named
-  unit-tier fixture asserting the exact variant and offender fields.
 - **Scope baking + decorators**: the `Transacted` compiler allocates a `u64`
   scope id, lowers the body with a join context, and wraps ONLY the compiled
   processors of lexically-in-block sql steps on the block datasource with a
@@ -204,141 +196,82 @@ the whole lifecycle).
   so their fragments' sql steps are decorated individually. Parallel split /
   multicast / wiretap / async / seda reaching joined sql are rejected at load
   before any decoration matters.
-- **`TransactedSegment` runtime** (explicit lifecycle, in order): the block
-  deadline is computed at BLOCK ENTRY — before admission — so session open
-  (pool checkout) and hygiene are already raced against it. Per execution:
-  (1) resolve nothing (the manager `Arc` was captured at lowering); (2) open
-  the session: pool checkout AND the hygiene ROLLBACK raced against the two
-  absolute deadlines (`block_deadline` and `now + manager.acquire_deadline()`
-  as `Instant`s, compared absolutely — the one that elapses first wins; on an
-  exact tie the block-timeout error is reported); unacknowledged hygiene →
-  detach, no `BEGIN` (probe 4); (3) set `BLOCK_SESSION` for the body task and
-  run the body under the deadline race (block timeout default 30 s, per-block
-  override); lazy `BEGIN` at the first joined step is likewise bounded by the
-  datasource acquire deadline; (4) the final cancellation check
-  (the existing `CANCEL_TOKEN` task-local) happens immediately BEFORE handing
-  COMMIT to the driver — that check is the cutoff: cancelled before it →
-  bounded ROLLBACK (5 s grace); committed already → resolve within the grace,
-  detach, no `BEGIN` (probe 4); (3) set `BLOCK_SESSION` for the body task and
-  run the body under the deadline race (block timeout default 30 s, per-block
-  override); lazy `BEGIN` at the first joined step is likewise bounded by the
-  datasource acquire deadline; (4) finalize by the ordered decision list
-  below — a TOTAL function with STRICT PRECEDENCE: exactly ONE row is
-  selected, first match wins, no row's predicate matches another row's case,
-  and only a clean Ok/Stop body with no pending cancellation reaches the
-  COMMIT handoff (P6). Rows P5 and P6 were the ruling's P4 and P5; row P4 is
-  restored from the frozen "roll back on Err or cancellation" rule (accepted
-  attempt-2 round-1 finding). The `TxState` enum is a *precondition* for rows
-  P1 and P3–P5; row P2 never reaches the list (it is resolved inside
-  `begin()`); row P0 keys on the guard's internal marker, not on `TxState`.
+- **`TransactedSegment` runtime** (explicit lifecycle, ONE sequence, in
+  order): (1) resolve nothing — the manager `Arc` was captured at lowering;
+  (2) compute `block_deadline` at BLOCK ENTRY (default 30 s, per-block
+  override) and open the session: pool checkout AND the hygiene ROLLBACK race
+  `min(block_abs, acquire_abs)` as absolute instants; the guard arms at
+  checkout; expiry drops the open future so R0 detaches after exactly one
+  ROLLBACK attempt; primary: `PoolExhausted` if `acquire_abs < block_abs`,
+  else `Timeout` (tie included); unacknowledged hygiene → `open_session`
+  returns `Err(RollbackUncertain)`, connection detached; (3) set
+  `BLOCK_SESSION` for the body task and run the body race; (4) cooperative
+  finalization via R1–R7 below — evaluated ONCE, after the body race, first
+  match wins.
 
-  **P0 — forced drop** (guard `Drop` reached; cooperative finalization not
-  entered). The connection is DETACHED (`DiscardOnDrop`) at any point — the
-  frozen spec's blanket rule ("a forced drop (task abort/panic) at any point
-  SHALL detach the connection") supersedes the ruling's narrower
-  "Fresh → return the clean connection" line; detaching a provably-clean
-  connection is the conservative superset (safe, costs one pooled backend in
-  an exceptional path, and drop-time in-memory state cannot be trusted —
-  probe P4's poisoning hazard). Supporting state: the guard carries a
-  `begin_sent` marker set BEFORE the BEGIN bytes can reach the driver and
-  cleared only after an acknowledged `BEGIN` (state → `Active`) or an
-  acknowledged cleanup; `Drop` with the marker set detaches even though the
-  public `TxState` may still read `Fresh`. `Drop` never runs cooperative SQL
-  and never returns a live transaction to the pool.
+  Body race: `biased select { sleep_until(block_deadline),
+  CANCEL_TOKEN.cancelled(), body }` in that order →
+  `BodyEnd ∈ {Ok(Continue), Ok(Stopped), Err(e), Deadline, Cancelled}`.
+  Tie → deadline wins → `Timeout`.
 
-  **P1 — BEGIN never attempted** (`Fresh` precondition AND `begin_sent`
-  marker clear). Return the clean connection to the pool; preserve the
-  original body/cancellation outcome untouched (Ok stays Ok, Stop propagates
-  unchanged, the body error stays primary); no finalizing SQL of any kind.
-  (`Fresh` cannot be rollback-only: `set_rollback_only` is reachable only
-  after a joined DB error, which requires an acknowledged `BEGIN`.)
+  **R0 — forced drop** (guard `Drop`, any `TxPhase` except `Done`/`Detached`).
+  Includes mid-body, pending BEGIN, open_session/hygiene, stalled
+  COMMIT/ROLLBACK await. Action: detach synchronously (connection
+  closed/detached, never returned), no SQL. This is the guard invariant, not a
+  cooperative row.
 
-  **P2 — BEGIN sent but not acknowledged**: resolved INSIDE `begin()`, never
-  a finalization row — and only on the cooperative path, where the `begin()`
-  future still runs to completion (a dropped `begin()` future is P0
-  territory via the `begin_sent` marker, since cooperative cleanup cannot run
-  in a dropped future). On an unacknowledged `BEGIN` the `begin()` path
-  itself runs acknowledged cleanup — the hygiene ROLLBACK (probe P4: on a
-  server with no open transaction it is a no-op WARNING) — or detaches
-  (`DiscardOnDrop`) when the cleanup is not acknowledged. Because of probe
-  P4's poisoning reproduction, a pooled connection MUST receive the hygiene
-  ROLLBACK before `BEGIN` in every case.
+  Cooperative rows — first match wins, evaluated once after the body race:
 
-  **P3 — rollback-only** (a joined DB error was handled; `Active`
-  precondition): `ROLLBACK` if not yet rolled back, bounded by the 5 s
-  finalize grace; return the original handled outcome (an
-  `AbortedByHandledError` refinement when the body ended Ok/Stop; the body
-  error stays primary when it already failed); never COMMIT — a commit path
-  must never report Committed for a server-aborted transaction. Unacknowledged
-  ROLLBACK → `RollbackUncertain` + Detach.
+  **R1 — `TxPhase == Detached`** (a failed `begin()` or a joined transport
+  failure already detached). No SQL. Primary by precedence: Timeout > body
+  Err > cancellation > `AbortedByHandledError`. Cleanup context
+  `RollbackUncertain` + `Detached`. Connection already detached.
 
-  **P4 — body error or block deadline elapsed** (`Active`, not rollback-only,
-  not handed off): bounded `ROLLBACK` (5 s finalize grace); acknowledged →
-  `RolledBack`, disarm, pool return; unacknowledged → `RollbackUncertain` +
-  Detach. The body error stays primary when present; a deadline that elapsed
-  first reports the typed `Timeout` naming datasource and elapsed time; the
-  rollback uncertainty is carried in the outcome, never substituted for the
-  primary error. (Frozen rule: "roll back on Err or cancellation"; req
-  "Block timeout": rollback + typed Timeout.)
+  **R2 — `TxPhase == Clean`** (BEGIN never attempted). Disarm, return the
+  connection clean, no SQL. Outcome = body end unchanged (Ok stays Ok, Stop
+  propagates per ADR-0025, Err primary, Deadline → Timeout, Cancelled →
+  cancellation). `rollback_only` unreachable (`debug_assert`).
 
-  **P5 — cancellation pending at the cutoff** (body ended clean Ok/Stop; the
-  final `CANCEL_TOKEN` check immediately before the COMMIT handoff):
-  `ROLLBACK`, bounded by the 5 s finalize grace; return cancellation; NO
-  COMMIT is sent. Unacknowledged ROLLBACK → `RollbackUncertain` + Detach.
-  Only a body that reached here clean may proceed to P6.
+  **R3 — `TxPhase == BeginPending`** (the race dropped `begin()`'s future).
+  Detach, no SQL: protocol position unknown, nothing of the block's
+  acknowledged. Primary: Timeout or cancellation. Cleanup context
+  `RollbackUncertain` + `Detached`.
 
-  **P6 — handed off** (COMMIT sent; cancellation arriving AFTER the handoff
-  adds no row — the outcome is whichever of the three the driver reports):
-  - **`Committed`** — driver reports Ok: disarm the guard, connection returns
-    to the pool; Stop propagates unchanged per ADR-0025 (steps after the
-    block do not run).
-  - **`CommitFailed`** — DEFINITIVE rejection (severity Error + SQLSTATE,
-    e.g. `23503` per probe P1): the transaction conclusively failed
-    server-side; bounded cleanup (ROLLBACK attempt) or detach when the cleanup
-    is not acknowledged; the caller may handle it as a normal constraint
-    outcome.
-  - **`CommitUncertain`** — unresolved outcome (severity Fatal `57P01` per
-    probe P2, connection death, Io error, timeout after the handoff):
-    detach/discard (`DiscardOnDrop`); never return the connection; never
-    claim a rollback.
+  **R4 — `Open` ∧ `rollback_only`.** The FLAG alone triggers this row (req 4),
+  whether or not the error was caught. `rollback()` within the grace; never
+  COMMIT. Primary: Timeout (req 9) > body Err > cancellation >
+  `AbortedByHandledError`. Acknowledged → `RolledBack`, disarm, return to
+  pool; not acknowledged / stalled past grace → `RollbackUncertain` +
+  `Detached`, primary unchanged.
 
+  **R5 — `Open` ∧ `BodyEnd ∈ {Err, Deadline, Cancelled}`.** As R4. Primary:
+  body Err, Timeout, or cancellation.
 
-- **Registry threading (obligation 2)**: `CommandDeps.transaction_registry`
-  already reaches the loader; S2 adds the registration entry point on
-  `RuntimeBus` (the registry field is private with no setter) and camel-bundles
-  registers a `SqlTransactionManager` per catalog datasource at boot, before
-  routes load (fail-closed `ManagerMissing` otherwise). camel-cli's assembly
-  path registers through the same entry point.
-- **Obligation 4 (documented constraint)**: `handle_register` persists the
-  aggregate first (`repo.save`), then propagates lowering errors — including
-  typed `ManagerMissing` from `canonical_to_route_definition` — via `?`
-  BEFORE the runtime registration; only `execution.register_route` errors
-  enter the pre-existing `runtime_err` compensation branch (Failed marking).
-  We do not restructure the aggregate in this slice.
+  **R6 — `Open` ∧ body Ok/Stop ∧ cutoff FAILS.** The check runs immediately
+  before the handoff: `CANCEL_TOKEN.is_cancelled() || now >= block_deadline`.
+  As R4; COMMIT never sent. Primary: Timeout if the deadline elapsed (tie
+  included), else cancellation.
 
-### Decisions carried in from S1 (blocking obligations)
+  **R7 — `Open` ∧ body Ok/Stop ∧ cutoff PASSED.** Set `CommitInFlight`, hand
+  COMMIT to the driver; after this point deadline and cancellation are never
+  consulted.
+  - **`Committed`** (driver Ok): disarm, return to pool, Stop propagates
+    unchanged per ADR-0025 (steps after the block do not run).
+  - **`CommitFailed`** (affirmative evidence ONLY): `sqlx::Error::Database`
+    with PG severity exactly `ERROR` AND SQLSTATE class `23` (integrity
+    violation; `23503` probed, probe P1) or `40` ("transaction rollback": the
+    server affirms abort). One cleanup ROLLBACK within the remaining grace (a
+    no-op WARNING on PG, probe P4). Acknowledged → return to pool; not
+    acknowledged → detach with `RollbackUncertain` + `Detached`.
+  - **`CommitUncertain`** (everything else): FATAL/PANIC severity (`57P01`
+    per probe P2), Io, Protocol, PoolClosed, any other code, or grace elapsed.
+    Detach immediately; no ROLLBACK, no rollback claim.
 
-1. **rc-c3mjp**: covered by the new `BuilderStep`-tree structural walk at both
-   fan-ins (above); canonical/BuilderStep-authored blocks get exactly the DSL
-   path's rejections. Named unit-tier fixtures assert each rejection.
-2. **Registry threading**: bundle-boot registration via the new `RuntimeBus`
-   entry point; resolution at the canonical lowering seam already lands in
-   `commands.rs`.
-3. **`DEFERRED_VARIANTS` decision**: `CamelError::Transaction` becomes a
-   supported in-pipeline kind — `"Transaction"` enters
-   `supported_exception_kinds()` with a match arm over `TransactionError`
-   variants, and is removed from `DEFERRED_VARIANTS`. Rationale: block
-   finalization failures must be catchable by `on_exceptions` (an operator can
-   route transaction failures without flattening them into
-   `ProcessorError`), while a `do_try` catch inside a block still cannot
-   produce a commit (`AbortedByHandledError`). The vocabulary-guard test
-   asserts the moved bucket.
-4. **handle_register constraint**: documented above; no restructuring.
-5. **Dynamic targets (req 5)**: REJECT at load. `RecipientList`/`RoutingSlip`
-   (and other runtime-target steps) inside a block fail closed with
-   `DynamicTargetUnprovable` — membership cannot be proven statically, and
-   silent auto-commit inside a block is the degrade class this family exists
-   to remove. One line in the ADR amendment, one named fixture.
+  Totality: at finalization entry `TxPhase ∈ {Clean, BeginPending, Open,
+  Detached}` (only the segment enters `*InFlight`/`Done`). R1–R3 partition on
+  `TxPhase`; R4–R7 partition `Open` by flag → BodyEnd → cutoff. Defensive
+  fallback for an entry phase of `*InFlight`/`Done`: `error!` log, treat as
+  R1.
 
 ### PG suite execution (rc-f3145)
 
@@ -347,7 +280,20 @@ commit/rollback, join proof, `max_connections=1` join, concurrent distinct
 backend PIDs, prior-borrower discard + poisoning regression, 23503
 `CommitFailed`, backend-kill `CommitUncertain` + pool replacement,
 cancel-before/after cutoff, block timeout (`pg_sleep`), named pool exhaustion,
-joined mixed-shape batch rollback, idempotent dispositions. New lane rows in
+joined mixed-shape batch rollback, idempotent dispositions. Unit-tier
+virtual-clock fixtures (injected timer, no Docker) pin the decision-list
+paths: `transacted_begin_pending_deadline` (R3 — the body race expires while
+`begin()` awaits ACK: detach, no SQL, Timeout primary, `RollbackUncertain` +
+`Detached` context) and `transacted_commit_classifier_table` (R7 classifier
+table: SQLSTATE class `23` and `40` → `CommitFailed`; `57P01`, `57014`,
+`08006`, Io → `CommitUncertain` + detach). All frozen fixture names are kept
+(`transacted_cancel_before_commit`, `transacted_cancel_after_commit_ack`,
+`transacted_cancel_after_commit_lost`, `transacted_commit_deferred_fk`,
+`transacted_forced_drop_inline`, `transacted_hygiene_unacknowledged`,
+`transacted_hygiene_deadline_expiry`, `transacted_block_deadline_first`,
+`transacted_acquire_deadline_first`, `transacted_deadline_tie`,
+`transacted_stalled_rollback`, `transacted_stalled_commit`,
+`transacted_commit_classifier_table`). New lane rows in
 `AGENTS.md ## COMPONENT LANES`. Local execution workaround (this host only):
 the default mapped-port path is dead (TCP accepted, SSLRequest unanswered —
 data leg blocked), so the suite runs against a `--network host` Postgres with
@@ -365,39 +311,33 @@ database.md`: the operational note. English, ste-writing.
 
 ## Affected crates
 
-camel-api (additive join module + session-port `Any` supertrait), camel-sql,
-camel-core, camel-dsl, camel-bundles, camel-test, docs, AGENTS.md.
+camel-api (additive join module + session-port `Any` supertrait — PORT DELTA,
+explicitly accepted by the 604c ruling), camel-sql, camel-core (block
+executor + scope baking only), camel-test, docs, AGENTS.md. The load-side
+crates (camel-dsl, camel-bundles) belong to `sqltrans-exec-load`.
 
 ## Architecture boundaries
 
 Port stays provider-neutral; camel-core resolves via the registry only (no
-camel-sql dependency); camel-sql implements and registers. Statements execute
-only on lent connections; `plan_binds` remains the only bind path. No XA/2PC,
-no per-exchange transactions, no transaction EIP, no new route surface, no new
-dependencies. S3 scope untouched (`Managed` join-required, endpoint creation,
-Auto-fallback warnings, `txnreject`).
+camel-sql dependency); camel-sql implements. Statements execute only on lent
+connections; `plan_binds` remains the only bind path (its borrowed-connection
+planner changes live in `sqltrans-exec-load`). No XA/2PC, no per-exchange
+transactions, no transaction EIP, no new route surface, no new dependencies.
+S3 scope untouched (`Managed` join-required, endpoint creation, Auto-fallback
+warnings, `txnreject`).
 
 ## Phases
 
-### Phase A: borrowed-connection executor (own commit, no behaviour change)
-- **Goal**: the four execute fns run on a borrowed connection; one shared
-  batch-planner entry point. Zero behaviour change; every existing suite green
-  unmodified.
-- **Dependencies**: none.
-- **Deliverable**: `DbHandle<'a>` + refactored fns + `plan_batch_binds`;
-  existing unit + lane suites pass untouched. Standalone batch keeps its own
-  transaction; StreamList keeps deferred pooled acquisition.
-- **Exit-criteria**: `cargo test -p camel-component-sql` green;
-  `cargo test -p camel-test --features integration-tests --no-run` compiles;
-  `plan_binds` signature unchanged. Bisectable: Phase A changes plumbing only;
-  joining and block-owned finalization arrive with Phase B alone.
+**Depends on: `sqltrans-exec-load`** (S2a: `DbHandle`/`plan_batch_binds`, req
+5 LOAD rejections, the rc-c3mjp BuilderStep walk at both fan-ins, the
+`RuntimeBus` registry entry point + bundle/CLI registration, the
+`DEFERRED_VARIANTS` move). S2b lands on top of it.
 
 ### Phase B: owned transaction + finalization + verification
-- **Goal**: manager/session, join channel, lowering walk + block executor,
-  registration, dynamic-target rejection, `DEFERRED_VARIANTS` resolution, PG
-  suite, docs, lanes.
-- **Dependencies**: Phase A.
-- **Deliverable**: all S2 scenarios exercised (unit-tier where possible, PG
-  suite for runtime capability scenarios).
+- **Goal**: manager/session (`TxPhase`, R0–R7), join channel + admission,
+  scope baking + `TransactedSegment` runtime, PG suite, docs, lanes.
+- **Dependencies**: `sqltrans-exec-load` landed.
+- **Deliverable**: all S2b runtime scenarios exercised (unit-tier virtual
+  clock where possible, PG suite for runtime capability scenarios).
 - **Exit-criteria**: PG suite green locally; gates-local exit 0; openspec
   validate clean; `.review.json` committed.

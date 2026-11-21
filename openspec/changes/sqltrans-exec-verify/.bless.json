@@ -7,21 +7,28 @@
       "attempt": 1,
       "rounds": [
         { "round": 1, "hash": "sha256:29af5f1093144bb34730baee022cd62dee3945bdc21b46e326a5d4156698f1a4", "verdict": "APPROVED-WITH-FIXES", "session": "ses_e017483b9ffeys8BTXiQgO13n1", "note": "6 findings (3 semantic, 3 editorial), all applied" },
-        { "round": 2, "hash": "sha256:826566ef76197ca0c58fda3a69dd25b98f865de3ec7791c97494fb8954377104", "verdict": "REJECTED", "session": "ses_e016fc892ffeYJdJpIFvr8To4Z", "note": "2 semantic + 1 editorial; first park; master accepted and issued the closed fix list" },
-        { "round": 3, "hash": "sha256:47aedf17f9867c58011045b5f4ea642aef16127406549bbc3e9d9525c2061440", "verdict": "REJECTED", "session": "ses_e0168655cffeoT7Z2evdZYAS89", "note": "3 semantic (finalization table precision); attempt-1 gate exhausted; master issued the P0..P5 ruling as addendum 604b" }
+        { "round": 2, "hash": "sha256:826566ef76197ca0c58fda3a69dd25b98f865de3ec7791c97494fb8954377104", "verdict": "REJECTED", "session": "ses_e016fc892ffeYJdJpIFvr8To4Z", "note": "2 semantic + 1 editorial; first park; master issued a closed fix list" },
+        { "round": 3, "hash": "sha256:47aedf17f9867c58011045b5f4ea642aef16127406549bbc3e9d9525c2061440", "verdict": "REJECTED", "session": "ses_e0168655cffeoT7Z2evdZYAS89", "note": "3 semantic; attempt-1 gate exhausted; master issued the P0..P5 ruling (604b addendum), then the 604c SPLIT ruling" }
       ]
     },
     {
       "attempt": 2,
       "rounds": [
-        { "round": 1, "hash": "sha256:ec415f47f340896df1d8b6df5ee90a31526d3cadb624df0452c97ee25461bab7", "verdict": "REJECTED", "session": "ses_e0163964effejITjOcN4vVR1tO", "note": "3 semantic: P0 Fresh-return conflicted with the frozen blanket detach rule; decision list not total (no body-Err/timeout row); Drop could not distinguish pending BEGIN from Fresh. All three addressed: frozen-supremacy P0 rewrite, P4 body-Err/timeout row restored with renumbering, begin_sent guard marker added." },
-        { "round": 2, "hash": "sha256:532d6d55c75fbd3a2d5d3000ea8b1e50259dfb0bc0dd6b03497e87da94f6b6ee", "verdict": "REJECTED", "session": "ses_e015eac1effeX2DipUv88F1x9f", "note": "5 semantic — ATTEMPT-2 STOP RULE FIRED: parked blocked: design, stopped immediately. No further rounds, no fix-and-retry." }
+        { "round": 1, "hash": "sha256:ec415f47f340896df1d8b6df5ee90a31526d3cadb624df0452c97ee25461bab7", "verdict": "REJECTED", "session": "ses_e0163964effejITjOcN4vVR1tO", "note": "3 semantic: P0 vs frozen blanket detach; non-total list; pending-BEGIN indistinguishable from Fresh. All three addressed (frozen-supremacy P0, restored row P4, begin_sent marker, renumber P0..P6)." },
+        { "round": 2, "hash": "sha256:532d6d55c75fbd3a2d5d3000ea8b1e50259dfb0bc0dd6b03497e87da94f6b6ee", "verdict": "REJECTED", "session": "ses_e015eac1effeX2DipUv88F1x9f", "note": "5 semantic — attempt-2 stop rule fired; master escalated to the 604c ruling" }
+      ]
+    },
+    {
+      "attempt": 3,
+      "rounds": [
+        { "round": 1, "hash": "sha256:8caf575b3c8b21ef99133771caa9a6979151d9c4c52bac64d4e01513ea2d730d", "verdict": "REJECTED", "session": "ses_e014ea9e1ffe2jpfYq92tCfIzE", "note": "2 semantic + 1 mechanical — ATTEMPT-3 STRICT RULE FIRED at round 1: parked blocked: design. PORT DELTA EXPLICITLY ACCEPTED (Any supertrait + transaction::join task-locals). All 604c edit-list items 1-9 verified applied; delta byte-identical; both change dirs validate; bd wiring verified." }
       ]
     }
   ],
   "final_verdict": "REJECTED",
-  "final_hash": "sha256:532d6d55c75fbd3a2d5d3000ea8b1e50259dfb0bc0dd6b03497e87da94f6b6ee",
+  "final_hash": "sha256:8caf575b3c8b21ef99133771caa9a6979151d9c4c52bac64d4e01513ea2d730d",
   "blocked": "design",
-  "budget": "attempt 2 used 2 of 4 dispatches; the round-2 stop rule ended the gate before the budget did. A THIRD attempt needs the human (per 604b).",
+  "budget": "attempt 3 used 1 dispatch; the strict round-1 rule ended the gate. A FOURTH attempt needs the human/master.",
+  "port_delta": "ACCEPTED by the gate (604c-authorized): camel-api Any supertrait on TransactionSession + additive transaction::join task-local module. No longer a rejection reason.",
   "date": "2026-11-21"
 }
