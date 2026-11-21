@@ -22,6 +22,8 @@ use camel_component_redis::MultiplexedExecutor;
 use camel_component_redis::RedisTopology;
 #[cfg(test)]
 use camel_component_redis::ServerKind;
+use camel_component_redis::commands::scan;
+use camel_component_redis::commands::scan::ScanVerb;
 use redis::from_redis_value;
 #[cfg(test)]
 use std::collections::VecDeque;
@@ -147,16 +149,10 @@ pub(crate) async fn scan_unlink_pattern_where(
     let mut cursor: u64 = 0;
     let mut removed: u64 = 0;
     loop {
-        let mut scan = redis::Cmd::new();
-        scan.arg("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(PAGE);
-        let reply = execute_retry_safe(ex, scan, metrics, operation).await?;
-        let (next, keys): (u64, Vec<String>) = from_redis_value(reply)
-            .map_err(|e| CamelError::Io(format!("SCAN reply parse: {e}")))?;
+        let scan_page =
+            scan::encode_scan_page(ScanVerb::Scan, None, cursor, pattern, PAGE as u64, None);
+        let reply = execute_retry_safe(ex, scan_page, metrics, operation).await?;
+        let (next, keys): (u64, Vec<String>) = scan::parse_scan_reply::<String>(reply, "SCAN")?;
         let live: Vec<&String> = keys.iter().filter(|key| !skip(key)).collect();
         for batch in live.chunks(PAGE) {
             if batch.is_empty() {
@@ -619,6 +615,9 @@ mod tests {
     use super::RepoCommandExecutor;
     use super::execute_retry_safe;
     use super::is_transient_redis_error;
+    use super::scan_unlink_pattern;
+    use super::test_support::cmd_args;
+    use super::test_support::scan_reply;
     use camel_api::CamelError;
     use camel_api::ComponentMetrics;
     use camel_component_redis::MultiplexedExecutor;
@@ -802,6 +801,37 @@ mod tests {
         assert!(
             matches!(reply, redis::Value::SimpleString(ref s) if s == "PONG"),
             "expected +PONG, got: {reply:?}"
+        );
+    }
+
+    // Pins the pager's whole wire frame, not just the verb and pattern: the
+    // shared encoder must render the same cursor/MATCH/COUNT page the pager
+    // needs. A drift in the page size or cursor position fails here rather
+    // than silently changing the scan.
+    #[tokio::test]
+    async fn repo_pager_uses_shared_encoder() {
+        let fake = Arc::new(FakeRepoExecutor::new());
+        fake.push_result(Ok(scan_reply(0, &[])));
+        let ex: Arc<dyn RepoCommandExecutor> = fake.clone();
+
+        let removed = scan_unlink_pattern(&ex, "camel:*", &test_facade(), "scan")
+            .await
+            .expect("a complete empty scan must succeed");
+
+        assert_eq!(removed, 0, "an empty page removes nothing");
+        let commands = fake.commands();
+        assert_eq!(commands.len(), 1, "one page, no UNLINK for an empty page");
+        assert_eq!(
+            cmd_args(&commands[0]),
+            vec![
+                b"SCAN".to_vec(),
+                b"0".to_vec(),
+                b"MATCH".to_vec(),
+                b"camel:*".to_vec(),
+                b"COUNT".to_vec(),
+                b"100".to_vec(),
+            ],
+            "the pager must emit the exact SCAN frame: fresh cursor, pattern, page 100"
         );
     }
 }

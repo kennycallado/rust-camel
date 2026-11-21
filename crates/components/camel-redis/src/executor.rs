@@ -259,6 +259,11 @@ pub async fn dispatch_command(
         | RedisCommand::Copy
         | RedisCommand::Touch => commands::key::dispatch(cmd, conn, exchange).await,
 
+        // SCAN family commands: one exchange per cursor page.
+        RedisCommand::Scan | RedisCommand::Sscan | RedisCommand::Hscan | RedisCommand::Zscan => {
+            commands::scan::dispatch(cmd, conn, exchange).await
+        }
+
         // List commands
         RedisCommand::Lpush
         | RedisCommand::Rpush
@@ -546,7 +551,7 @@ enum Deadline {
 /// # Generation tagging
 ///
 /// Every stored connection carries a monotonically increasing generation
-/// drawn from an allocator shared by all clones ([`Self::next_gen`]);
+/// drawn from an allocator shared by all clones (`Self::next_gen`);
 /// generation `0` is reserved for "never used a connection", so the first
 /// stored generation is `1`. The pairing lets a failure clear the cache by
 /// compare-and-clear instead of unconditionally: a clone that observed a
@@ -915,7 +920,7 @@ impl RedisCommandExecutor for MultiplexedExecutor {
 ///
 /// Each failed attempt is classified by
 /// [`retry_class`](crate::transport_error::retry_class) (or the script
-/// classifier for [`RequestKind::Script`]) into one of:
+/// classifier for `RequestKind::Script`) into one of:
 ///
 /// - `NotExecuted` — the request provably never ran (pre-send dial/checkout
 ///   failures, `LOADING`/`BUSY` whole-request rejections). Always replayed,
@@ -928,7 +933,7 @@ impl RedisCommandExecutor for MultiplexedExecutor {
 /// # Redial and invalidation
 ///
 /// Invalidation is its own track: a failure that proves the connection dead
-/// ([`invalidates_connection`](crate::transport_error::invalidates_connection))
+/// `invalidates_connection`
 /// is evicted inside `execute_command` even when it is never replayed, and the
 /// next attempt redials first. Non-invalidating rejections (`LOADING`,
 /// `BUSY`) reuse the current connection, so its generation tag stays valid.

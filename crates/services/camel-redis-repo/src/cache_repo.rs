@@ -865,11 +865,17 @@ mod tests {
         let commands = fake.commands();
         assert_eq!(commands.len(), 2, "one SCAN then one UNLINK");
         let scan_args = cmd_args(&commands[0]);
-        assert_eq!(scan_args[0], b"SCAN".to_vec());
         assert_eq!(
-            arg_after(&scan_args, b"MATCH"),
-            b"camel:cache:default:*".to_vec(),
-            "clear must SCAN only this repository's keyspace"
+            scan_args,
+            vec![
+                b"SCAN".to_vec(),
+                b"0".to_vec(),
+                b"MATCH".to_vec(),
+                b"camel:cache:default:*".to_vec(),
+                b"COUNT".to_vec(),
+                b"100".to_vec(),
+            ],
+            "clear must issue the exact SCAN frame: fresh cursor, this repository's keyspace, page 100"
         );
         let unlink_args = cmd_args(&commands[1]);
         assert_eq!(unlink_args[0], b"UNLINK".to_vec());

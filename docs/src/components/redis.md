@@ -312,6 +312,60 @@ WAIT is retried after a transport error. It changes no server state. A replay pr
 
 `COPY` is not retried after a transport error. Without `REPLACE`, a retry reports `false` after an unconfirmed success. With `REPLACE`, the retry re-reads the source, and the source can change between attempts. `UNLINK` and `TOUCH` are retried. A retry of `UNLINK` can report a count of `0` when the first attempt already removed the key. The state converges, so the component accepts the smaller count.
 
+### SCAN family (cursor iteration)
+
+`SCAN`, `SSCAN`, `HSCAN`, and `ZSCAN` walk a keyspace or one collection one page per Exchange. The route drives the iteration: every reply carries the next cursor, and the route sends that cursor back in the next request. Prefer `SCAN` over `KEYS` for a large keyspace, because `KEYS` collects every key in one blocking call.
+
+| Command | Iterates | Required headers |
+| --- | --- | --- |
+| `SCAN` | The keyspace | — |
+| `SSCAN` | The members of one set | `CamelRedis.Key` |
+| `HSCAN` | The field/value pairs of one hash | `CamelRedis.Key` |
+| `ZSCAN` | The member/score pairs of one sorted set | `CamelRedis.Key` |
+
+| Header | Direction | Default | Description |
+| --- | --- | --- | --- |
+| `CamelRedis.Cursor` | input and output | absent starts at `0` | Opaque iteration position. An absent header, JSON `null`, an empty or whitespace-only string, or `0` starts a fresh iteration. A value that is not a whole number in `0..=u64::MAX` fails before send with a named error naming `CamelRedis.Cursor`. The reply carries the next position; `0` marks the end of the iteration |
+| `CamelRedis.Pattern` | input | `*` | `MATCH` glob applied by the server to the page's elements; always sent |
+| `CamelRedis.Count` | input | `100` | `COUNT` page hint; must be positive and is always sent. The server may return more or fewer elements per page |
+| `CamelRedis.Type` | input | none | `TYPE` filter for `SCAN` only; requires Redis >= 6.0 |
+| `CamelRedis.ScanComplete` | output | absent | JSON `true` on the final page only |
+
+The cursor is caller state. The component never stores a cursor and derives no meaning from one beyond the wire argument, so a route that loses the cursor cannot resume the iteration. The reply carries the next position on `CamelRedis.Cursor`.
+
+Each command consumes exactly one Exchange per page. The body holds that page's elements in the encoding of the matching read command:
+
+| Command | Page body |
+| --- | --- |
+| `SCAN` | JSON array of key strings, the `KEYS` shape |
+| `SSCAN` | JSON array of member strings |
+| `HSCAN` | JSON object mapping field to value, the `HGETALL` shape |
+| `ZSCAN` | JSON array of `{"member": <string>, "score": <number>}` objects, the `ZRANGE ... WITHSCORES` shape |
+
+The reply sets `CamelRedis.ScanComplete=true` on the final page only. A non-final page leaves the header absent, even when the page is empty, so a route tests the header and never the page size.
+
+Iteration covers every element, but it is not unique: an element present for the whole walk is returned at least once and can appear on more than one page. The component forwards repeats unchanged, so deduplication is the route's decision. Keep `MATCH`, `COUNT`, and `TYPE` fixed across an iteration; the component is stateless per Exchange and enforces no cross-page consistency, so an iteration that varies its options holds no coverage guarantee.
+
+The four commands are reads, so a transport retry re-issues the same cursor page. They are not `command=multi` batch entries: a batch that lists one of them fails at plan time with a named error, because cursor round-trips do not compose inside one pipeline. `CamelRedis.Type` fails before send with a named error on `SSCAN`, `HSCAN`, and `ZSCAN`; the header is never silently ignored. On `SCAN` it requires a Redis >= 6.0 server, and an older server surfaces its version error through the transport error mapping.
+
+```rust,ignore
+use camel_api::Exchange;
+use camel_builder::{RouteBuilder, StepAccumulator};
+use camel_component_redis::RedisComponent;
+
+ctx.register_component("redis", Box::new(RedisComponent::new()));
+
+// One Exchange per page. The producer overwrites `CamelRedis.Cursor` with the
+// next position, so the next loop iteration feeds it back into the request.
+let scan_keyspace = RouteBuilder::from("timer:scan?period=60000&repeatCount=1")
+    .route_id("redis-scan-keyspace")
+    .loop_while(|ex: &Exchange| ex.input.header("CamelRedis.ScanComplete").is_none())
+    .to("redis://127.0.0.1:6379?command=SCAN")
+    .to("log:info?showHeaders=true&showBody=true")
+    .end_loop()
+    .build()?;
+```
+
 ### List command inputs
 
 `LMPOP` and `BLMPOP` pop from the first non-empty key. `LMOVE` and `BLMOVE` move one element between two lists. `LPOS` finds the index of an element in a list.

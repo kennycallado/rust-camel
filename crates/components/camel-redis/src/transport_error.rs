@@ -615,7 +615,7 @@ pub fn invalidates_connection(err: &CamelError) -> bool {
 ///
 /// Precedence is strict (see the module docs):
 ///
-/// 1. [`BatchEntryError`]-marked errors → [`RetryClass::NeverTransient`]:
+/// 1. `BatchEntryError`-marked errors → [`RetryClass::NeverTransient`]:
 ///    the failing entry is a business outcome of a batch whose earlier
 ///    entries already executed, so a per-entry `LOADING`/`BUSY` reply never
 ///    becomes the whole-request `NotExecuted` path (the marker is transparent
@@ -627,7 +627,7 @@ pub fn invalidates_connection(err: &CamelError) -> bool {
 ///    can retain demoted-master `READONLY` evidence, which makes the
 ///    invalidation track fire without making the request replayable (the
 ///    blessed spec pins `EXECABORT` as never retried);
-/// 4. [`NOT_EXECUTED_SERVER_CODES`] (`LOADING`, `BUSY`) →
+/// 4. `NOT_EXECUTED_SERVER_CODES` (`LOADING`, `BUSY`) →
 ///    [`RetryClass::NotExecuted`], whatever the phase (the whole request was
 ///    rejected before running);
 /// 5. [`is_transient_redis_error`] → [`RetryClass::NotExecuted`] for
@@ -635,11 +635,11 @@ pub fn invalidates_connection(err: &CamelError) -> bool {
 ///    [`SendPhase::PostFlush`] (the conservative split; `READONLY` stays
 ///    here);
 /// 6. everything else (semantic/business errors such as the remaining
-///    [`NEVER_TRANSIENT_SERVER_CODES`], `WRONGTYPE`, `BUSYKEY`, `NOSCRIPT`,
+///    `NEVER_TRANSIENT_SERVER_CODES`, `WRONGTYPE`, `BUSYKEY`, `NOSCRIPT`,
 ///    `ERR …`) → [`RetryClass::NeverTransient`], whatever the phase.
 ///
 /// The bucket answers only "may this attempt be replayed?". Connection
-/// invalidation remains a separate decision ([`invalidates_connection`]), and
+/// invalidation remains a separate decision (`invalidates_connection`), and
 /// the error-class invariant `invalidates_connection(e) ⇒
 /// is_transient_redis_error(e)` holds independently of the bucket.
 pub fn retry_class(err: &CamelError, phase: SendPhase) -> RetryClass {
@@ -688,14 +688,14 @@ pub fn retry_class(err: &CamelError, phase: SendPhase) -> RetryClass {
 /// The EVAL/FCALL dispatch resolves each reply first with its atomic
 /// provenance pair (`MULTI; SCRIPT EXISTS; EVALSHA; EXEC`): proven-forged
 /// replies and runtime terminal failures arrive here as named business errors
-/// carrying the [`ScriptTerminalError`] marker. Precedence:
+/// carrying the `ScriptTerminalError` marker. Precedence:
 ///
 /// 1. config/validation errors and native `AuthenticationFailed` →
 ///    [`RetryClass::NeverTransient`];
-/// 2. [`ScriptTerminalError`]-marked errors (proven-forged reply,
+/// 2. `ScriptTerminalError`-marked errors (proven-forged reply,
 ///    reload-exhausted `NOSCRIPT`, failed `SCRIPT LOAD`, malformed pair) →
 ///    [`RetryClass::NeverTransient`]; a failed load keeps its driver error
-///    beneath the marker, which feeds [`invalidates_connection`] without
+///    beneath the marker, which feeds `invalidates_connection` without
 ///    changing this bucket;
 /// 3. `EXECABORT` → [`RetryClass::NeverTransient`]: the atomic provenance
 ///    pair can abort at queue time, and the blessed spec never replays an
@@ -710,7 +710,7 @@ pub fn retry_class(err: &CamelError, phase: SendPhase) -> RetryClass {
 ///    opt-in;
 /// 6. any other (non-transient, non-script) error → [`RetryClass::NeverTransient`].
 ///
-/// Deliberately absent: the [`NOT_EXECUTED_SERVER_CODES`] rule. For scripts
+/// Deliberately absent: the `NOT_EXECUTED_SERVER_CODES` rule. For scripts
 /// those codes are forgeable, so they are never treated as proof of
 /// non-execution.
 pub fn retry_class_script(err: &CamelError, phase: SendPhase) -> RetryClass {

@@ -63,6 +63,12 @@ pub enum RedisCommand {
     Copy,
     Touch,
 
+    // SCAN family operations
+    Scan,
+    Sscan,
+    Hscan,
+    Zscan,
+
     // List operations
     Lpush,
     Rpush,
@@ -231,6 +237,12 @@ impl FromStr for RedisCommand {
             "UNLINK" => Ok(RedisCommand::Unlink),
             "COPY" => Ok(RedisCommand::Copy),
             "TOUCH" => Ok(RedisCommand::Touch),
+
+            // SCAN family operations
+            "SCAN" => Ok(RedisCommand::Scan),
+            "SSCAN" => Ok(RedisCommand::Sscan),
+            "HSCAN" => Ok(RedisCommand::Hscan),
+            "ZSCAN" => Ok(RedisCommand::Zscan),
 
             // List operations
             "LPUSH" => Ok(RedisCommand::Lpush),
@@ -413,6 +425,12 @@ impl RedisCommand {
             RedisCommand::Unlink => "UNLINK",
             RedisCommand::Copy => "COPY",
             RedisCommand::Touch => "TOUCH",
+
+            // SCAN family operations
+            RedisCommand::Scan => "SCAN",
+            RedisCommand::Sscan => "SSCAN",
+            RedisCommand::Hscan => "HSCAN",
+            RedisCommand::Zscan => "ZSCAN",
 
             // List operations
             RedisCommand::Lpush => "LPUSH",
@@ -2011,6 +2029,13 @@ pub fn is_idempotent_command(cmd: &RedisCommand) -> bool {
             | RedisCommand::Lpos
             // TOUCH only refreshes idle time
             | RedisCommand::Touch
+            // SCAN family: a page fetch is a converging read; a transport
+            // retry re-issues the same cursor page (repository pager
+            // precedent in camel-redis-repo executor.rs).
+            | RedisCommand::Scan
+            | RedisCommand::Sscan
+            | RedisCommand::Hscan
+            | RedisCommand::Zscan
             // Idempotent writes (same result if retried)
             // SETRANGE re-writes the same bytes at a fixed offset; a retry converges
             | RedisCommand::Setrange
@@ -4399,6 +4424,10 @@ mod tests {
             ("UNLINK", RedisCommand::Unlink),
             ("COPY", RedisCommand::Copy),
             ("TOUCH", RedisCommand::Touch),
+            ("SCAN", RedisCommand::Scan),
+            ("SSCAN", RedisCommand::Sscan),
+            ("HSCAN", RedisCommand::Hscan),
+            ("ZSCAN", RedisCommand::Zscan),
             ("LPUSH", RedisCommand::Lpush),
             ("RPUSH", RedisCommand::Rpush),
             ("LPUSHX", RedisCommand::Lpushx),
@@ -4494,7 +4523,7 @@ mod tests {
         ];
         assert_eq!(
             cases.len(),
-            135,
+            139,
             "table must list every RedisCommand variant"
         );
         for (token, expected) in cases {
@@ -4505,6 +4534,40 @@ mod tests {
                 parsed.as_str(),
                 token,
                 "{token} must round-trip through as_str"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_command_from_str_roundtrip() {
+        for (token, expected) in [
+            ("SCAN", RedisCommand::Scan),
+            ("SSCAN", RedisCommand::Sscan),
+            ("HSCAN", RedisCommand::Hscan),
+            ("ZSCAN", RedisCommand::Zscan),
+        ] {
+            let parsed =
+                RedisCommand::from_str(token).unwrap_or_else(|e| panic!("{token} must parse: {e}"));
+            assert_eq!(parsed, expected, "{token} must parse to its variant");
+            assert_eq!(
+                parsed.as_str(),
+                token,
+                "{token} must round-trip through as_str"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_family_classifies_retry_safe() {
+        for cmd in [
+            RedisCommand::Scan,
+            RedisCommand::Sscan,
+            RedisCommand::Hscan,
+            RedisCommand::Zscan,
+        ] {
+            assert!(
+                is_idempotent_command(&cmd),
+                "{cmd:?} is a converging read and must be retry-safe"
             );
         }
     }

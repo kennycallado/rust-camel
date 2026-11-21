@@ -23,6 +23,8 @@ use futures::{FutureExt, StreamExt};
 use redis::AsyncCommands;
 use redis::aio::MultiplexedConnection;
 use serde_json::json;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use support::send_to_direct;
@@ -1649,6 +1651,34 @@ async fn live_redis_harness(conn_str: &str, routes: &[(&str, &str)]) -> CamelTes
     h
 }
 
+/// Sends one exchange to a `direct:` endpoint and returns the whole reply
+/// exchange, so callers can read output headers (`CamelRedis.Cursor`,
+/// `CamelRedis.ScanComplete`) as well as the body.
+///
+/// The round-trip is bounded by a 10 s deadline: a Redis command is a
+/// single request/response, `send_to_direct` adds only its own short
+/// not-registered retry budget, so anything slower means the harness or
+/// the container is wedged and the test should fail fast instead of
+/// hanging the lane.
+async fn live_redis_reply_full(
+    h: &CamelTestContext,
+    direct_uri: &str,
+    headers: &[(&str, Value)],
+    body: Body,
+) -> Exchange {
+    let mut ex = Exchange::new(Message::new(body));
+    for (name, value) in headers {
+        ex.input.set_header(*name, value.clone());
+    }
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        send_to_direct(h, direct_uri, ex),
+    )
+    .await
+    .expect("redis command round-trip must return within 10s")
+    .expect("redis command must succeed")
+}
+
 /// Sends one exchange to a `direct:` endpoint and returns its JSON reply body.
 async fn live_redis_reply(
     h: &CamelTestContext,
@@ -1656,17 +1686,53 @@ async fn live_redis_reply(
     headers: &[(&str, Value)],
     body: Body,
 ) -> serde_json::Value {
-    let mut ex = Exchange::new(Message::new(body));
-    for (name, value) in headers {
-        ex.input.set_header(*name, value.clone());
-    }
-    let reply = send_to_direct(h, direct_uri, ex)
-        .await
-        .expect("redis command must succeed");
+    let reply = live_redis_reply_full(h, direct_uri, headers, body).await;
     match reply.input.body {
         Body::Json(v) => v,
         other => panic!("redis reply body must be JSON, got {other:?}"),
     }
+}
+
+/// Borrows a reply exchange's JSON body, failing loudly on a non-JSON body.
+fn live_redis_json_body(reply: &Exchange) -> &serde_json::Value {
+    match &reply.input.body {
+        Body::Json(v) => v,
+        other => panic!("redis reply body must be JSON, got {other:?}"),
+    }
+}
+
+/// Reads the `CamelRedis.Cursor` output header every SCAN family page carries.
+fn live_redis_cursor(reply: &Exchange) -> u64 {
+    let value = reply
+        .input
+        .header("CamelRedis.Cursor")
+        .unwrap_or_else(|| panic!("every SCAN family reply carries CamelRedis.Cursor"));
+    value
+        .as_u64()
+        .unwrap_or_else(|| panic!("CamelRedis.Cursor must be a whole number, got {value}"))
+}
+
+/// Seeds `keys` with a placeholder string value over an admin connection.
+async fn seed_string_keys(conn: &mut MultiplexedConnection, keys: &[String]) {
+    let mut pipe = redis::pipe();
+    for key in keys {
+        pipe.cmd("SET").arg(key).arg("1").ignore();
+    }
+    pipe.query_async::<()>(conn)
+        .await
+        .expect("admin SET pipeline must seed the keys");
+}
+
+/// UNLINKs `keys` over an admin connection (best-effort test cleanup: the
+/// shared container keeps every other test's keys).
+async fn unlink_keys(conn: &mut MultiplexedConnection, keys: &[String]) {
+    let mut pipe = redis::pipe();
+    for key in keys {
+        pipe.cmd("UNLINK").arg(key).ignore();
+    }
+    pipe.query_async::<()>(conn)
+        .await
+        .expect("admin UNLINK pipeline must remove the seeded keys");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1936,4 +2002,501 @@ async fn redis_live_wait_reply_body() {
     );
 
     h.stop().await;
+}
+
+// ===========================================================================
+// Live SCAN family (rediscan)
+// ===========================================================================
+
+/// Upper bound on pages a live SCAN walk may take: real walks stay far below
+/// it, so hitting it means the walk never terminates.
+const MAX_SCAN_PAGES: usize = 100_000;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_scan_multipage_match_count() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let mut admin = admin_connection(&conn_str).await;
+
+    let seeded: Vec<String> = (0..250).map(|i| format!("scan:it:{i}")).collect();
+    seed_string_keys(&mut admin, &seeded).await;
+
+    let h = live_redis_harness(&conn_str, &[("live-scan", "SCAN")]).await;
+
+    let mut cursor: Option<u64> = None;
+    let mut pages = 0usize;
+    let mut forwarded: Vec<String> = Vec::new();
+    loop {
+        // allow-test-wait: each page round-trip is bounded by live_redis_reply_full's 10s deadline
+        let mut headers: Vec<(&str, Value)> = vec![
+            ("CamelRedis.Pattern", json!("scan:it:*")),
+            ("CamelRedis.Count", json!(10u64)),
+        ];
+        if let Some(cursor) = cursor {
+            headers.push(("CamelRedis.Cursor", json!(cursor)));
+        }
+        let reply = live_redis_reply_full(&h, "direct:live-scan", &headers, Body::Empty).await;
+        pages += 1;
+        assert!(
+            pages <= MAX_SCAN_PAGES,
+            "SCAN walk exceeded {MAX_SCAN_PAGES} pages"
+        );
+
+        let body = live_redis_json_body(&reply);
+        let page = body
+            .as_array()
+            .unwrap_or_else(|| panic!("a SCAN page body is a JSON array of keys, got {body}"));
+        for element in page {
+            let key = element
+                .as_str()
+                .unwrap_or_else(|| panic!("a SCAN page element is a key string, got {element}"));
+            assert!(
+                key.starts_with("scan:it:"),
+                "MATCH scan:it:* must filter every page element, got {key}"
+            );
+            forwarded.push(key.to_string());
+        }
+
+        let next = live_redis_cursor(&reply);
+        if reply.input.header("CamelRedis.ScanComplete").is_some() {
+            assert_eq!(
+                reply.input.header("CamelRedis.ScanComplete"),
+                Some(&json!(true)),
+                "ScanComplete on the final page is the JSON boolean true"
+            );
+            assert_eq!(next, 0, "the final page reports cursor 0");
+            break;
+        }
+        assert_ne!(next, 0, "a non-final page carries a non-zero cursor");
+        cursor = Some(next);
+    }
+
+    let seen: HashSet<&str> = forwarded.iter().map(String::as_str).collect();
+    for key in &seeded {
+        assert!(
+            seen.contains(key.as_str()),
+            "full coverage: {key} must appear in some page (saw {} elements over {pages} pages)",
+            forwarded.len()
+        );
+    }
+    assert!(
+        pages > 1,
+        "COUNT 10 over 250 keys must take several pages, got {pages}"
+    );
+
+    h.stop().await;
+    unlink_keys(&mut admin, &seeded).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_hscan_map_shape() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let mut admin = admin_connection(&conn_str).await;
+
+    // 600 fields exceed `hash-max-listpack-entries`, so the hash is
+    // hashtable-encoded and COUNT 1 walks it over several pages. The default
+    // is 128 up to Redis 7.2 and 512 from 7.4, so 600 stays above both.
+    let key = "scan:it:hash".to_string();
+    let seeded: HashMap<String, String> = (0..600)
+        .map(|i| (format!("f{i}"), format!("v{i}")))
+        .collect();
+    {
+        let mut pipe = redis::pipe();
+        for (field, value) in &seeded {
+            pipe.cmd("HSET").arg(&key).arg(field).arg(value).ignore();
+        }
+        pipe.query_async::<()>(&mut admin)
+            .await
+            .expect("admin HSET pipeline must seed the hash");
+    }
+
+    let h = live_redis_harness(&conn_str, &[("live-hscan", "HSCAN")]).await;
+
+    let mut cursor: Option<u64> = None;
+    let mut pages = 0usize;
+    let mut union: HashMap<String, String> = HashMap::new();
+    loop {
+        // allow-test-wait: each page round-trip is bounded by live_redis_reply_full's 10s deadline
+        let mut headers: Vec<(&str, Value)> = vec![
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.Count", json!(1u64)),
+        ];
+        if let Some(cursor) = cursor {
+            headers.push(("CamelRedis.Cursor", json!(cursor)));
+        }
+        let reply = live_redis_reply_full(&h, "direct:live-hscan", &headers, Body::Empty).await;
+        pages += 1;
+        assert!(
+            pages <= MAX_SCAN_PAGES,
+            "HSCAN walk exceeded {MAX_SCAN_PAGES} pages"
+        );
+
+        let body = live_redis_json_body(&reply);
+        let page = body.as_object().unwrap_or_else(|| {
+            panic!("an HSCAN page body is a JSON field/value object, got {body}")
+        });
+        for (field, value) in page {
+            let value = value
+                .as_str()
+                .unwrap_or_else(|| panic!("an HSCAN page value is a string, got {value}"));
+            let expected = seeded
+                .get(field)
+                .unwrap_or_else(|| panic!("HSCAN returned field {field} that was never seeded"));
+            assert_eq!(
+                expected, value,
+                "HSCAN page entries are a subset of the seeded pairs"
+            );
+            union.insert(field.clone(), value.to_string());
+        }
+
+        let next = live_redis_cursor(&reply);
+        if reply.input.header("CamelRedis.ScanComplete").is_some() {
+            assert_eq!(
+                reply.input.header("CamelRedis.ScanComplete"),
+                Some(&json!(true))
+            );
+            assert_eq!(next, 0, "the final page reports cursor 0");
+            break;
+        }
+        assert_ne!(next, 0, "a non-final page carries a non-zero cursor");
+        cursor = Some(next);
+    }
+
+    assert_eq!(
+        union, seeded,
+        "the union of HSCAN pages must equal all 600 seeded field/value pairs"
+    );
+    assert!(
+        pages > 1,
+        "COUNT 1 over 600 hashtable fields must take several pages, got {pages}"
+    );
+
+    h.stop().await;
+    unlink_keys(&mut admin, std::slice::from_ref(&key)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_zscan_pair_shape() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let mut admin = admin_connection(&conn_str).await;
+
+    // 200 members exceed the sorted-set small-collection encodings, so the
+    // zset is skiplist-encoded and COUNT 1 walks it over several pages.
+    let key = "scan:it:zset".to_string();
+    let seeded: HashMap<String, f64> = (0..200)
+        .map(|i| (format!("m{i}"), i as f64 + 1.0))
+        .collect();
+    {
+        let mut pipe = redis::pipe();
+        for (member, score) in &seeded {
+            pipe.cmd("ZADD").arg(&key).arg(*score).arg(member).ignore();
+        }
+        pipe.query_async::<()>(&mut admin)
+            .await
+            .expect("admin ZADD pipeline must seed the sorted set");
+    }
+
+    let h = live_redis_harness(&conn_str, &[("live-zscan", "ZSCAN")]).await;
+
+    let mut cursor: Option<u64> = None;
+    let mut pages = 0usize;
+    let mut union: HashMap<String, f64> = HashMap::new();
+    loop {
+        // allow-test-wait: each page round-trip is bounded by live_redis_reply_full's 10s deadline
+        let mut headers: Vec<(&str, Value)> = vec![
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.Count", json!(1u64)),
+        ];
+        if let Some(cursor) = cursor {
+            headers.push(("CamelRedis.Cursor", json!(cursor)));
+        }
+        let reply = live_redis_reply_full(&h, "direct:live-zscan", &headers, Body::Empty).await;
+        pages += 1;
+        assert!(
+            pages <= MAX_SCAN_PAGES,
+            "ZSCAN walk exceeded {MAX_SCAN_PAGES} pages"
+        );
+
+        let body = live_redis_json_body(&reply);
+        let page = body.as_array().unwrap_or_else(|| {
+            panic!("a ZSCAN page body is a JSON array of member/score objects, got {body}")
+        });
+        for element in page {
+            let pair = element
+                .as_object()
+                .unwrap_or_else(|| panic!("a ZSCAN page element is an object, got {element}"));
+            assert_eq!(
+                pair.len(),
+                2,
+                "a ZSCAN page element carries exactly member and score, got {pair:?}"
+            );
+            let member = pair
+                .get("member")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| panic!("a ZSCAN element names its member, got {element}"));
+            let score = pair
+                .get("score")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_else(|| {
+                    panic!("a ZSCAN element carries a numeric score, got {element}")
+                });
+            let expected = seeded
+                .get(member)
+                .unwrap_or_else(|| panic!("ZSCAN returned member {member} that was never seeded"));
+            assert_eq!(
+                *expected, score,
+                "ZSCAN reports member {member} with its exact seeded score"
+            );
+            union.insert(member.to_string(), score);
+        }
+
+        let next = live_redis_cursor(&reply);
+        if reply.input.header("CamelRedis.ScanComplete").is_some() {
+            assert_eq!(
+                reply.input.header("CamelRedis.ScanComplete"),
+                Some(&json!(true))
+            );
+            assert_eq!(next, 0, "the final page reports cursor 0");
+            break;
+        }
+        assert_ne!(next, 0, "a non-final page carries a non-zero cursor");
+        cursor = Some(next);
+    }
+
+    assert_eq!(
+        union, seeded,
+        "the union of ZSCAN pages must cover all 200 members with exact scores"
+    );
+    assert!(
+        pages > 1,
+        "COUNT 1 over 200 skiplist members must take several pages, got {pages}"
+    );
+
+    h.stop().await;
+    unlink_keys(&mut admin, std::slice::from_ref(&key)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_sscan_member_array_body() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let mut admin = admin_connection(&conn_str).await;
+
+    // 200 members exceed `set-max-listpack-entries` (128), so the set is
+    // hashtable-encoded and COUNT 1 walks it over several pages.
+    let key = "scan:it:set".to_string();
+    let seeded: HashSet<String> = (0..200).map(|i| format!("m{i}")).collect();
+    {
+        let mut pipe = redis::pipe();
+        for member in &seeded {
+            pipe.cmd("SADD").arg(&key).arg(member).ignore();
+        }
+        pipe.query_async::<()>(&mut admin)
+            .await
+            .expect("admin SADD pipeline must seed the set");
+    }
+
+    let h = live_redis_harness(&conn_str, &[("live-sscan", "SSCAN")]).await;
+
+    let mut cursor: Option<u64> = None;
+    let mut pages = 0usize;
+    let mut union: HashSet<String> = HashSet::new();
+    loop {
+        // allow-test-wait: each page round-trip is bounded by live_redis_reply_full's 10s deadline
+        let mut headers: Vec<(&str, Value)> = vec![
+            ("CamelRedis.Key", json!(key)),
+            ("CamelRedis.Count", json!(1u64)),
+        ];
+        if let Some(cursor) = cursor {
+            headers.push(("CamelRedis.Cursor", json!(cursor)));
+        }
+        let reply = live_redis_reply_full(&h, "direct:live-sscan", &headers, Body::Empty).await;
+        pages += 1;
+        assert!(
+            pages <= MAX_SCAN_PAGES,
+            "SSCAN walk exceeded {MAX_SCAN_PAGES} pages"
+        );
+
+        let body = live_redis_json_body(&reply);
+        let page = body.as_array().unwrap_or_else(|| {
+            panic!("an SSCAN page body is a JSON array of member strings, got {body}")
+        });
+        for element in page {
+            let member = element.as_str().unwrap_or_else(|| {
+                panic!("an SSCAN page element is a member string, got {element}")
+            });
+            assert!(
+                seeded.contains(member),
+                "SSCAN returned member {member} that was never seeded"
+            );
+            union.insert(member.to_string());
+        }
+
+        let next = live_redis_cursor(&reply);
+        if reply.input.header("CamelRedis.ScanComplete").is_some() {
+            assert_eq!(
+                reply.input.header("CamelRedis.ScanComplete"),
+                Some(&json!(true))
+            );
+            assert_eq!(next, 0, "the final page reports cursor 0");
+            break;
+        }
+        assert_ne!(next, 0, "a non-final page carries a non-zero cursor");
+        cursor = Some(next);
+    }
+
+    assert_eq!(
+        union, seeded,
+        "the union of SSCAN pages must cover all 200 seeded members"
+    );
+    assert!(
+        pages > 1,
+        "COUNT 1 over 200 hashtable members must take several pages, got {pages}"
+    );
+
+    h.stop().await;
+    unlink_keys(&mut admin, std::slice::from_ref(&key)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_scan_repeats_across_pages_full_coverage() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let mut admin = admin_connection(&conn_str).await;
+
+    let seeded: Vec<String> = (0..30).map(|i| format!("scan:it:repeat:{i}")).collect();
+    seed_string_keys(&mut admin, &seeded).await;
+
+    let h = live_redis_harness(&conn_str, &[("live-scan-repeat", "SCAN")]).await;
+
+    // The loop condition is the ABSENCE of CamelRedis.ScanComplete, never body
+    // emptiness: an empty (MATCH-filtered) page structurally continues the
+    // iteration.
+    let mut cursor: Option<u64> = None;
+    let mut pages = 0usize;
+    let mut empty_pages = 0usize;
+    let mut forwarded: Vec<String> = Vec::new();
+    loop {
+        // allow-test-wait: each page round-trip is bounded by live_redis_reply_full's 10s deadline
+        let mut headers: Vec<(&str, Value)> = vec![
+            ("CamelRedis.Pattern", json!("scan:it:repeat:*")),
+            ("CamelRedis.Count", json!(1u64)),
+        ];
+        if let Some(cursor) = cursor {
+            headers.push(("CamelRedis.Cursor", json!(cursor)));
+        }
+        let reply =
+            live_redis_reply_full(&h, "direct:live-scan-repeat", &headers, Body::Empty).await;
+        pages += 1;
+        assert!(
+            pages <= MAX_SCAN_PAGES,
+            "SCAN walk exceeded {MAX_SCAN_PAGES} pages"
+        );
+
+        let body = live_redis_json_body(&reply);
+        let page = body
+            .as_array()
+            .unwrap_or_else(|| panic!("a SCAN page body is a JSON array of keys, got {body}"));
+        if page.is_empty() {
+            empty_pages += 1;
+        }
+        for element in page {
+            let key = element
+                .as_str()
+                .unwrap_or_else(|| panic!("a SCAN page element is a key string, got {element}"));
+            assert!(
+                key.starts_with("scan:it:repeat:"),
+                "MATCH scan:it:repeat:* must filter every page element, got {key}"
+            );
+            forwarded.push(key.to_string());
+        }
+
+        let next = live_redis_cursor(&reply);
+        if reply.input.header("CamelRedis.ScanComplete").is_some() {
+            assert_eq!(
+                reply.input.header("CamelRedis.ScanComplete"),
+                Some(&json!(true))
+            );
+            assert_eq!(next, 0, "the final page reports cursor 0");
+            break;
+        }
+        assert_ne!(next, 0, "a non-final page carries a non-zero cursor");
+        cursor = Some(next);
+    }
+
+    let unique: HashSet<&str> = forwarded.iter().map(String::as_str).collect();
+    for key in &seeded {
+        assert!(
+            unique.contains(key.as_str()),
+            "full coverage: {key} must appear in some page (saw {} elements over {pages} pages, {empty_pages} empty)",
+            forwarded.len()
+        );
+    }
+    // Page bodies are forwarded verbatim: no component-side dedup or
+    // filtering, so the forwarded total is at least one occurrence per key
+    // (it exceeds it when the server repeats a key across pages).
+    assert!(
+        forwarded.len() >= seeded.len(),
+        "page bodies forwarded verbatim: got {} elements for {} seeded keys",
+        forwarded.len(),
+        seeded.len()
+    );
+    assert!(
+        pages > 1,
+        "COUNT 1 over 30 keys must take several pages, got {pages}"
+    );
+
+    h.stop().await;
+    unlink_keys(&mut admin, &seeded).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn redis_live_keys_unchanged_frame() {
+    install_crypto_provider();
+    let conn_str = shared_redis().await.to_string();
+    let mut admin = admin_connection(&conn_str).await;
+
+    let seeded: Vec<String> = vec!["keys:it:a".to_string(), "keys:it:b".to_string()];
+    seed_string_keys(&mut admin, &seeded).await;
+
+    let h = live_redis_harness(&conn_str, &[("live-keys", "KEYS")]).await;
+
+    let reply = live_redis_reply_full(
+        &h,
+        "direct:live-keys",
+        &[("CamelRedis.Pattern", json!("keys:it:*"))],
+        Body::Empty,
+    )
+    .await;
+
+    let body = live_redis_json_body(&reply);
+    let keys = body
+        .as_array()
+        .unwrap_or_else(|| panic!("a KEYS body is the full JSON key array, got {body}"));
+    let mut returned: Vec<&str> = keys
+        .iter()
+        .map(|key| {
+            key.as_str()
+                .unwrap_or_else(|| panic!("a KEYS element is a key string, got {key}"))
+        })
+        .collect();
+    returned.sort_unstable();
+    assert_eq!(
+        returned,
+        vec!["keys:it:a", "keys:it:b"],
+        "KEYS returns every matching key in one exchange"
+    );
+    assert!(
+        reply.input.header("CamelRedis.Cursor").is_none(),
+        "KEYS must not emit a CamelRedis.Cursor header"
+    );
+    assert!(
+        reply.input.header("CamelRedis.ScanComplete").is_none(),
+        "KEYS must not emit a CamelRedis.ScanComplete header"
+    );
+
+    h.stop().await;
+    unlink_keys(&mut admin, &seeded).await;
 }

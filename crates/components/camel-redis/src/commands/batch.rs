@@ -914,6 +914,32 @@ mod tests {
     }
 
     #[test]
+    fn batch_entry_scan_is_named_rejection() {
+        let exchange = batch_exchange(serde_json::json!([{"command": "SCAN"}]), Body::Empty);
+
+        assert!(
+            !batchable(&RedisCommand::Scan),
+            "the SCAN family is outside the batch allowlist"
+        );
+
+        let err = plan_batch(&exchange).expect_err("a SCAN entry must fail closed");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("CamelRedis.Batch"),
+            "the error must name the header: {message}"
+        );
+        assert!(
+            message.contains("entry 0"),
+            "the error must name the failing entry index: {message}"
+        );
+        assert!(
+            message.contains("SCAN"),
+            "the error must name the rejected command: {message}"
+        );
+    }
+
+    #[test]
     fn batch_unknown_field_or_bad_type_fails_with_index() {
         let cases = [
             (

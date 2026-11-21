@@ -1,0 +1,10 @@
+{
+  "kind": "plan",
+  "change": "redis-scan",
+  "verdict": "BLESS-APPROVED",
+  "hash": "sha256:d84fc50b4c93252614f692303b406d8855cd641ed07a996003c957fa82a85c09",
+  "expert": "experts/e_glm",
+  "rounds": 2,
+  "date": "2026-11-21",
+  "notes": "Supersedes the spec blessing (kind: spec, 35378d78). Round 1 BLESS-WITH-FIXES (F1 invalid cargo multi-filter CLI, F2 drift-guard table rows, F3 builder-invariant wording, F4 cursor-0 verbatim pin + explicit-options test). All applied; round 2 confirmed with verbatim spec-to-test traceability. Reviewer pass (r_glm APPROVE-WITH-FINDINGS, 8 findings) applied before the first bless dispatch. e_gpt quota-exhausted; e_glm per mission-order owner override."
+}

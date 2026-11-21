@@ -7,6 +7,7 @@ pub mod key;
 pub mod list;
 pub mod other;
 pub mod pubsub;
+pub mod scan;
 pub mod set;
 pub mod stream;
 pub mod string;
@@ -571,7 +572,7 @@ fn server_error_body_error(err: &redis::ServerError) -> CamelError {
 
 /// Maps a rich `redis::Value` reply to an exchange body.
 ///
-/// The script and batch paths use this instead of [`reply_to_body`] because
+/// The script and batch paths use this instead of `reply_to_body` because
 /// they must represent nested replies. The mapping:
 ///
 /// - `Nil` → JSON `null`; `Int` → JSON number; `Double` → JSON number;
