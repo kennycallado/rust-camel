@@ -41,35 +41,49 @@ camel-component-sql suite passes with NO test modifications, and
 
 **Steps**:
 1. Add `pub(crate) async fn plan_batch_binds(tx, items:
-   &[(String, Vec<serde_json::Value>)]) -> Result<Vec<BatchItemPlan>,
-   CamelError>` — `items` carries each batch item's OWN resolved SQL text
-   plus bindings (IN-clause expansion yields distinct texts; one shared
-   `sql: &str` cannot represent them — bless round 1, probe Q3). The fn
-   performs exactly today's sequence internally: group texts by shape
-   (`group_rows_by_sql`), message-wide no-loosening scan
-   (`scan_bind_targets`), probe each distinct shape once on the caller's
-   in-flight batch transaction (`probe_batch_shapes`), per-item planning
-   (`plan_batch_items`).
-2. Rewrite `execute_batch` to resolve items then delegate ALL planning to
-   `plan_batch_binds`; execute per the returned plans. The whole-batch alias
-   rule stays decided before item 0.
-3. Keep `sql-binds` whole-batch rules and `plan_binds`' signature unchanged.
+   &[(String, Vec<serde_json::Value>)]) -> Result<BatchPlan, CamelError>` —
+   `items` carries each batch item's OWN resolved SQL text plus bindings
+   (IN-clause expansion yields distinct texts; one shared `sql: &str`
+   cannot represent them — bless round 1, probe Q3). The fn performs
+   exactly today's sequence internally AND owns the named read-back
+   agreement loop that today lives after `plan_batch_items` (probe R2-2:
+   producer.rs:781–813): group texts by shape (`group_rows_by_sql`),
+   message-wide no-loosening scan (`scan_bind_targets`), probe each
+   distinct shape once on the caller's in-flight batch transaction
+   (`probe_batch_shapes`), per-item planning (`plan_batch_items`), then per
+   item in order: probe-kind lookup, `readback_kinds` on the same
+   transaction, `named_kinds_agree` — the FIRST missing/unusable/
+   disagreeing read-back flips the WHOLE batch to aliases (short-circuit).
+2. Return the FINAL decision as
+   `enum BatchPlan { Aliased { targets: Vec<Option<BindTarget>> },
+   Named { per_item_targets: Vec<Vec<Option<BindTarget>>> } }` — `Aliased`
+   = today's whole-batch fallback (message-wide scan targets on the
+   uncached alias text), `Named` = per-item read-back-agreed targets.
+3. Rewrite `execute_batch` to resolve items then delegate ALL planning and
+   the whole-batch/read-back decision to `plan_batch_binds`; execute per
+   the returned `BatchPlan`.
+4. Keep `sql-binds` whole-batch rules and `plan_binds`' signature unchanged.
 
 **Tests** (executable):
 - name: `batch_planner_accepts_distinct_expansions_together` — arrange: a
   batch whose items expand `in (:list)` to TWO distinct placeholder counts
   (two distinct SQL texts) plus a third item of a different bind shape,
-  against the test connection; act: `plan_batch_binds`; assert: one plan set
-  covering every item, per-shape metadata tracked per distinct text (not per
-  batch), whole-batch decision computed before item 0.
-- name: `later_shape_mismatch_still_sends_whole_batch_to_aliases` — arrange:
+  against the test connection; act: `plan_batch_binds`; assert: one
+  `BatchPlan` covering every item, per-shape metadata tracked per distinct
+  text (not per batch), whole-batch decision computed before item 0.
+- name: `unusable_later_probe_still_sends_whole_batch_to_aliases` — arrange:
   first shape probes usable, a later distinct shape unusable; act: plan;
-  assert: the whole batch aliases (pre-existing whole-batch rule preserved).
+  assert: `BatchPlan::Aliased` with the message-wide scan targets.
+- name: `readback_disagreement_flips_whole_batch` — arrange: at the pure
+  decision layer, a described probe whose read-back kinds disagree
+  (extend the existing `decide_path_aliases_on_disagreement` coverage
+  through the planner contract; bd rc-0eiqm path); act: plan; assert:
+  alias path chosen — the disagreement flip survives the refactor.
 - name: `existing_bind_rules_unchanged` — arrange: run the existing
   `bind_kinds` suite (31 tests) and the sql-binds rule tests unmodified; act:
   full run; assert: zero failures, zero edits.
 
-**Acceptance**: `- [x] 1.2` when all three tests pass and `execute_batch`
+**Acceptance**: `- [x] 1.2` when all four tests pass and `execute_batch`
 routes through `plan_batch_binds` with `plan_binds` untouched.
 
 ## Phase B: load rejections + walk + registration
@@ -103,13 +117,16 @@ change)
    S1's `ManagerMissing` contract.
 3. Extend the DSL declarative walk (`validate_transacted_blocks`) with the
    same guards (2)–(3) and the `resolve_url` parameter; production parse
-   seams keep the always-absent manager resolver and gain a URL resolver
-   built from `config.datasources` `db_url`s.
+   seams keep the ALWAYS-ABSENT manager resolver and the ALWAYS-ABSENT URL
+   resolver (probe R2-3: parse seams receive raw text and no `CamelConfig`
+   — yaml.rs:110/218/286, json.rs:29; with nothing registered, dialect is
+   unreachable there anyway, and `ManagerMissing` keeps the S1 contract).
+   The resolver parameters exist for the parameterized test seam.
 4. Wire the same walk into the camel-dsl canonical arm
-   (`compile_canonical_step` `Transacted`) before child lowering, via new
-   resolver parameters on the canonical lowering seam (production callers
-   pass the config-derived URL resolver and the always-absent manager
-   resolver in S2a — the dark contract holds at both DSL seams).
+   (`compile_canonical_step` `Transacted`) before child lowering, via the
+   same always-absent-in-production resolver parameters (the dark contract
+   holds at both DSL seams; production canonical-DSL blocks fail
+   `ManagerMissing` at the DSL seam).
 
 **Tests** (executable, unit-tier, DECLARATIVE fan-in — S1 structural fixtures
 in `crates/camel-dsl/tests/transacted_load_rejections.rs` stay green
@@ -156,17 +173,21 @@ canonical fixtures live there)
    `datasource_catalog: Option<&dyn DatasourceCatalog>`); absent ⇒
    always-absent closures ⇒ `ManagerMissing` — outcomes byte-identical to
    today's backstop for every existing caller.
-2. Replace the `BuilderStep::Transacted` blanket backstop in
-   `StepCompilerRegistry::compile_step` with the full walk
-   (`validate_transacted_block_builder`), then manager resolution
-   (`ManagerMissing`), then the DARK terminal gate: walk-clean +
-   manager-resolved ⇒ `TransactionError::JoinSessionMissing { datasource }`.
-   NO transacted block compiles or runs in S2a.
-3. Thread the optional datasource catalog through `CommandDeps` (same
-   pattern as S1's `transaction_registry`) and run the same walk in
-   `canonical_step_to_builder_step` before child lowering, with the LIVE
-   registry + catalog closures.
-4. Keep manager resolution fail-closed everywhere.
+2. Rewrite the `CanonicalStepSpec::Transacted` arm of
+   `canonical_step_to_builder_step` as THE CANONICAL REJECTION BOUNDARY
+   (probe R2-1): walk → manager resolution → DARK GATE, with NO success
+   path in S2a — the arm never emits `BuilderStep::Transacted`. It runs
+   inside `handle_register` BEFORE `execution.register_route`, so
+   rejections land in the `?` propagation zone: no compensation, no Failed
+   marking, the runtime port never sees the route (obligation 4 intact).
+3. Replace the `BuilderStep::Transacted` blanket backstop in
+   `StepCompilerRegistry::compile_step` with the same walk → resolution →
+   dark-gate sequence (shared backstop for programmatic/DSL-lowered
+   BuilderSteps; for canonical routes unreachable in S2a since the early
+   gate errors first; fires-inside-compensation property documented).
+4. Thread the optional datasource catalog through `CommandDeps` (same
+   pattern as S1's `transaction_registry`). Keep manager resolution
+   fail-closed everywhere.
 
 **Tests** (executable, unit-tier, BUILDERSTEP/CANONICAL fan-in):
 - name: `builder_walk_rejects_parallel_split_reaching_joined_sql` — arrange:
@@ -187,70 +208,85 @@ canonical fixtures live there)
 - name: `builder_walk_rejects_unprovable_dialect` — arrange: datasource URL
   `opaque://host/db`, fake manager registered in the context registry; act:
   compile; assert: `DialectUnprovable` naming `opaque`.
+- name: `builder_walk_rejects_urlless_registered_datasource` — arrange:
+  fake manager registered, `resolve_url` returns `None`; act: compile;
+  assert: `DialectUnprovable` naming the DATASOURCE in the `scheme` field
+  (probe R2-3 rule: no scheme exists to name).
 - name: `builder_walk_rejects_mysql_and_sqlite_joins` — arrange: `mysql://`
   and `sqlite://` datasources with registered fake manager; act: compile;
   assert: `UnsupportedJoinDialect` naming the dialect; standalone steps
   outside blocks still compile.
 - name: `builder_walk_rejects_dynamic_targets_in_block` — arrange: block
-  containing `RecipientList` and `RoutingSlip` steps; act: compile; assert:
-  `DynamicTargetUnprovable` naming the step.
+  containing BuilderStep dynamic-target steps (`DeclarativeDynamicRouter`/
+  `DeclarativeRoutingSlip`/`DynamicRouter`/`RoutingSlip` — probe R2-4:
+  `CanonicalStepSpec` cannot author one, this seam can); act: compile;
+  assert: `DynamicTargetUnprovable` naming the step.
 - name: `manager_missing_still_fails_closed_after_walk` — arrange: block on
   an unregistered datasource (no context registry); act: compile; assert:
   `ManagerMissing` naming the datasource.
 - name: `registered_manager_dark_gate_no_block_compiles` — arrange: clean
   PostgreSQL block, fake manager REGISTERED in the context registry; act:
-  compile through `StepCompilerRegistry` AND through
-  `canonical_to_route_definition`; assert: `JoinSessionMissing` naming the
-  datasource in both — proves no transacted block compiles or runs in S2a
-  (bless round 1, probe Q1).
+  compile through `StepCompilerRegistry`; assert: `JoinSessionMissing`
+  naming the datasource — no transacted block compiles or runs in S2a.
+- name: `canonical_dark_gate_propagates_before_runtime_registration` —
+  arrange: `CommandDeps` with a fake manager registered + a stub
+  `RuntimeExecutionPort` recording invocations; act:
+  `handle_register` (or `canonical_to_route_definition`) with a clean
+  PostgreSQL `CanonicalRouteSpec` transacted block; assert:
+  `JoinSessionMissing` propagates as the command error, the stub execution
+  port was NEVER invoked, and the aggregate projection is NOT Failed
+  (probe R2-1 boundary: rejection in the `?` zone, no compensation).
 
 **Acceptance**: `- [x] 2.2` when every canonical/BuilderStep fixture asserts
-the exact variant + offender fields, the dark gate holds with a registered
-manager, and all pre-existing compile_step behavior (non-transacted steps,
-no-registry contexts) is unchanged.
+the exact variant + offender fields, the dark gate holds at BOTH the
+canonical boundary (`?` zone, port never invoked) and `compile_step`, and
+all pre-existing compile_step behavior (non-transacted steps, no-registry
+contexts) is unchanged.
 
-### 2.3 RuntimeBus registration entry point + SqlTransactionManager + bundle/CLI registration
+### 2.3 RuntimeBus registration entry point (test-exercised only — ruling 2 §C)
 
 - [ ] 2.3
 
 **Files**: `crates/camel-core/src/lifecycle/application/runtime_bus.rs`,
-`crates/components/camel-sql/src/` (new `transaction_manager.rs` or nearest
-existing module), `crates/camel-bundles/src/lib.rs`
+`crates/camel-bundles/src/lib.rs` (registry-empty test only)
 
 **Steps**:
 1. Add `RuntimeBus::register_transaction_manager(name, Arc<dyn
    TransactionManager>) -> Result<(), RegistryError>` (duplicate-rejecting,
-   delegating to the `NamedRegistry`).
-2. Add `SqlTransactionManager` in camel-sql: constructed per catalog
-   datasource from the datasource name, lazy pool resolution through the
-   existing `DatasourceCatalog`/`OnceCell` path — no eager connect;
-   `open_session`/`acquire_deadline` are dark stubs in S2a (session
-   machinery is S2b).
-3. In bundle boot, after the datasource catalog is built and BEFORE routes
-   load, register a `SqlTransactionManager` per catalog datasource through
-   the entry point (fail-loud on duplicate). camel-cli's run/job/test
-   entries drive `camel_bundles::boot`, covering the CLI path transitively.
-4. Keep routes failing closed with `ManagerMissing` when nothing registers.
+   delegating to the `NamedRegistry`). NO production caller registers in
+   S2a.
+2. Add a TEST-ONLY fake `TransactionManager` in camel-core (beside the
+   bus/walk tests); it exercises the entry point and resolution without
+   touching camel-sql. NO `SqlTransactionManager` is built in S2a (S2b
+   owns the manager type — ruling 2 §C).
+3. camel-bundles and camel-cli register NOTHING: boot leaves the
+   transaction registry EMPTY.
+4. `CommandDeps.transaction_registry` (exists from S1) stays threaded end
+   to end, resolving zero managers — every block fails `ManagerMissing`.
 
 **Tests** (executable):
 - name: `runtime_bus_registers_and_resolves_manager` — arrange: `RuntimeBus`
-  + fake manager for `pg`; act: `register_transaction_manager("pg", m)`,
-  then `resolve_transaction_manager(deps.transaction_registry, "pg")`;
+  + the test-only fake manager for `pg`; act:
+  `register_transaction_manager("pg", fake)`, then
+  `resolve_transaction_manager(deps.transaction_registry, "pg")`;
   assert: resolves to the same Arc; duplicate registration errors.
 - name: `unregistered_datasource_still_fails_closed` — arrange: registry
   without `audit`; act: resolve; assert: `ManagerMissing` naming `audit`.
-- name: `bundle_boot_registers_catalog_datasources` — arrange: bundle config
-  with datasources `pg` + `audit`; act: boot; assert: both resolvable via the
-  bus registry.
+- name: `bundle_boot_leaves_transaction_registry_empty` — arrange: bundle
+  config with datasources `pg` + `audit` (any datasources); act: boot;
+  assert: the transaction registry has NO KEYS (ruling 2 §C).
 - name: `managed_behaviour_untouched` — arrange: run the existing S1
-  `Managed` rejection and Auto-fallback warning suites unmodified
+  `Managed` rejection and Auto-fallback suites unmodified
   (`SqlEndpointConfig::validate_transaction_mode` still rejects `Managed` at
-  URI-surface endpoint creation; producer/consumer Auto-fallback branches
-  unchanged); act: full camel-component-sql run; assert: zero failures, zero
-  test edits.
+  URI-surface endpoint creation) PLUS new direct assertions: producer call
+  with `transaction_mode = Managed` executes the Auto path on the test
+  connection (succeeds, no transaction semantics) and consumer poll with
+  `Managed` proceeds as Auto (probe R2-4: direct behavior assertions at
+  producer.rs:251 / consumer.rs:611, not just a green rerun); act: full
+  camel-component-sql run; assert: zero failures, zero test edits.
 
-**Acceptance**: `- [x] 2.3` when all four tests pass and bundle boot
-registers every catalog datasource before routes load.
+**Acceptance**: `- [x] 2.3` when all four tests pass, boot leaves the
+registry key-empty, and no production path registers a manager.
 
 ### 2.4 DEFERRED_VARIANTS move (vocabulary decision)
 

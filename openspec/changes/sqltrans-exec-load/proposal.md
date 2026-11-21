@@ -31,9 +31,13 @@ subset: `openspec/specs/sql-transactions/spec.md`.
 - **rc-c3mjp closed**: the S1 structural walk extended to `BuilderStep` trees
   at BOTH fan-ins (the `compile_step` `Transacted` arm — the shared point for
   ALL authoring paths — and the canonical arm in `commands.rs`).
-- **Registry + registration**: the `RuntimeBus` registration entry point;
-  camel-bundles registers a `SqlTransactionManager` per catalog datasource at
-  boot; camel-cli's assembly path registers through the same entry point.
+- **Registry + registration entry point** (ruling 2 §C — S2a registers
+  NOTHING): the `RuntimeBus::register_transaction_manager` entry point,
+  exercised by tests only (a test-only fake manager in camel-core); bundle
+  and CLI boot leave the registry EMPTY (`bundle_boot_leaves_transaction_
+  registry_empty` asserts NO KEYS); `CommandDeps.transaction_registry`
+  threading (exists from S1) wired end to end, still resolving zero
+  managers — blocks stay dark via `ManagerMissing`.
 - **`DEFERRED_VARIANTS` move**: `CamelError::Transaction` becomes a supported
   in-pipeline kind; the vocabulary-guard test asserts the moved bucket.
 - **Excluded** (S2b, `sqltrans-exec-verify`): manager/session implementation,
@@ -50,8 +54,9 @@ subset: `openspec/specs/sql-transactions/spec.md`.
   (declarative and canonical/BuilderStep).
 - Phase A refactor changes plumbing only: `cargo test -p camel-component-sql`
   green unmodified; `plan_binds` signature unchanged.
-- Managers register at bundle boot; a transacted block on an unregistered
-  datasource still fails at load with typed `ManagerMissing`.
+- Managers do NOT register anywhere in S2a (ruling 2 §C); the entry point
+  is test-exercised, boot leaves the registry empty, and a transacted block
+  on any datasource fails at load with typed `ManagerMissing`.
 - The vocabulary guard classifies `Transaction` in its new bucket.
 - `openspec validate sqltrans-exec-load --type change --json` clean.
 

@@ -31,10 +31,19 @@ obligations S1 recorded as blocking.
   cannot represent distinct IN expansions (bless round 1, probe Q3).
   `plan_batch_binds` internally performs exactly today's sequence
   (`group_rows_by_sql` → `scan_bind_targets` → `probe_batch_shapes` on the
-  caller's in-flight batch transaction → `plan_batch_items`); `execute_batch`
-  shrinks to resolve → plan → execute. The `sql-binds` whole-batch
-  no-loosening rules and the single-shape `plan_binds` signature stay
-  unchanged.
+  caller's in-flight batch transaction → `plan_batch_items`), THEN the
+  named read-back agreement loop that today lives after `plan_batch_items`
+  (probe R2-2, round 2: producer.rs:781–813 — per item in order, look up
+  the shape's probe kinds, `readback_kinds` on the same transaction, and
+  the first missing/unusable/disagreeing read-back flips the WHOLE batch to
+  aliases before item 0). The entry point returns the FINAL decision so
+  `execute_batch` shrinks to resolve → plan → execute:
+  `enum BatchPlan { Aliased { targets: Vec<Option<BindTarget>> },
+  Named { per_item_targets: Vec<Vec<Option<BindTarget>>> } }` — `Aliased`
+  carries the message-wide scan targets applied on the uncached alias text
+  (today's whole-batch fallback), `Named` carries the per-item
+  read-back-agreed targets. The `sql-binds` whole-batch no-loosening rules
+  and the single-shape `plan_binds` signature stay unchanged.
 
 ## Structural walk at the fan-ins (closes rc-c3mjp)
 
@@ -53,17 +62,28 @@ camel-core `transacted_walk.rs`, wired at FOUR sites:
    `CanonicalStepSpec::Transacted`) — the second DSL fan-in, same seam
    pattern;
 3. the canonical lowering fan-in in camel-core (`commands.rs`
-   `canonical_step_to_builder_step`) — early gate before child lowering, with
-   the LIVE registry (param, threaded in S1) and the datasource catalog
-   threaded through `CommandDeps`;
-4. the SHARED `BuilderStep` point — the `BuilderStep::Transacted` arm of
-   `StepCompilerRegistry::compile_step`, where every authoring path lands;
-   it replaces the blanket `ManagerMissing` backstop (which stays as the
-   fail-closed outcome when no registry is in context).
-
-camel-cli drives `camel_bundles::boot` at every entry (run/job/run_tests), so
-the bundle-boot registration covers the CLI path transitively — no separate
-CLI site.
+   `canonical_step_to_builder_step`) — the CANONICAL REJECTION BOUNDARY
+   (probe R2-1, round 2): this arm runs the walk, then manager resolution,
+   then the DARK GATE itself, and in S2a has NO success path — it never
+   emits `BuilderStep::Transacted`. It runs inside `handle_register` BEFORE
+   `execution.register_route`, so every canonical-path rejection lands in
+   the `?` propagation zone (aggregate persisted but unregistered —
+   obligation 4's documented constraint — NO compensation, no Failed
+   marking, the runtime port never sees the route). Verified boundary
+   today: `handle_register` → (aggregate persist, `?` zone) →
+   `canonical_to_route_definition(...)?` → `execution.register_route` →
+   `controller.add_route` → `build_managed_route` → step compilation, where
+   a compile-time error WOULD enter the `runtime_err` compensation branch
+   and mark the aggregate Failed. The early gate keeps rejections out of
+   that branch;
+4. the SHARED `BuilderStep` backstop — the `BuilderStep::Transacted` arm of
+   `StepCompilerRegistry::compile_step`, where programmatic and DSL-lowered
+   paths land: the same walk → resolution → dark gate sequence. For
+   canonical routes this site is unreachable in S2a (the early gate errors
+   first); for programmatic/DSL-lowered BuilderSteps it is the boundary, and
+   its fires-inside-compensation property is documented and acceptable
+   there. It replaces the blanket `ManagerMissing` backstop (which remains
+   the fail-closed outcome when no registry is in context).
 
 Rejection precedence (total order, every site — bless round 1, probe Q2):
 
@@ -81,45 +101,71 @@ Rejection precedence (total order, every site — bless round 1, probe Q2):
    (fail-closed; with the DSL seams' always-absent resolver every DSL-loaded
    block fails here — the S1 contract);
 5. dialect identity — reachable only once a manager resolved: the block
-   datasource's URL comes from `resolve_url` (production: the
-   `DatasourceCatalog` threaded like the registry; the DSL parse seams build
-   it from `config.datasources` `db_url`s); unrecognized scheme →
+   datasource's URL comes from `resolve_url` (probe R2-3, round 2: with
+   ruling 2 §C NOTHING registers in S2a, so production registries are empty
+   and NO production path reaches this stage — `ManagerMissing` at (4) fails
+   every block first. `resolve_url` is a seam contract: the camel-core sites
+   build it from the `DatasourceCatalog` threaded via `CommandDeps`/
+   `CompilationContext`; the DSL parse seams stay resolver-parameterized
+   test seams — verified, they receive raw text and no `CamelConfig`
+   (yaml.rs:110/218/286, json.rs:29)). Unrecognized scheme →
    `DialectUnprovable` naming the scheme; resolved MySQL/SQLite →
-   `UnsupportedJoinDialect`; standalone steps outside blocks still load;
-6. the DARK terminal gate — compile_step's arm ONLY: a walk-clean block with
-   a resolved manager STILL fails closed with
-   `TransactionError::JoinSessionMissing { datasource }` because the runtime
-   block executor does not exist in S2a (S2b owns everything after load; the
-   variant is unused today and joins the ruling's admission-error family at
-   runtime in S2b). NO transacted block compiles or runs in this slice; the
-   registered-manager fixture proves it.
+   `UnsupportedJoinDialect`; standalone steps outside blocks still load. A
+   datasource whose URL cannot be resolved while its manager resolved is
+   fail-closed `DialectUnprovable` with the DATASOURCE NAME in the `scheme`
+   field (no scheme exists to name; documented on the usage — reachable
+   only from misconfigured test fakes in S2a);
+6. the DARK terminal gate — the canonical boundary (site 3) and the shared
+   backstop (site 4): a walk-clean block with a resolved manager STILL fails
+   closed with `TransactionError::JoinSessionMissing { datasource }` because
+   the runtime block executor does not exist in S2a (S2b owns everything
+   after load; the variant is unused today and joins the ruling's
+   admission-error family at runtime in S2b). In production nothing
+   registers, so every block fails earlier at (4); the gate is proven by
+   the test-registered-fake-manager fixtures. NO transacted block compiles
+   or runs in this slice.
 
 `CompilationContext` gains optional registry/catalog access (absent ⇒
 always-absent closures ⇒ `ManagerMissing`, byte-identical outcomes to
 today's backstop for every existing compile_step caller). `CommandDeps`
 gains the optional datasource catalog exactly the way S1 threaded
-`transaction_registry`. Each rejection keeps its named unit-tier fixture
-asserting the exact variant and offender fields on BOTH authoring paths
-(declarative and canonical/BuilderStep).
+`transaction_registry`.
 
-## Registry threading and registration (moved verbatim + round-1 fixes)
+Fixture matrix (probe R2-4, round 2 — class × seam, `N/A` where a seam
+cannot express the class; `CanonicalStepSpec` has NO dynamic-target
+variants, `BuilderStep` HAS the dynamic-router/routing-slip/recipient-list
+family, so the canonical-lowering seam is `N/A` for class 2):
+
+| rejection class | declarative DSL walk | canonical lowering (`commands.rs` / `CanonicalStepSpec`) | BuilderStep / `compile_step` |
+|---|---|---|---|
+| S1 structural set (parallel/multicast/wiretap/async/seda, StreamList, foreign/unnamed datasource, nested block) | S1 fixtures stay green; canonical twins added where expressible (`Split` expressible; multicast/wiretap via their canonical variants) | twins for expressible classes | full twin set (every class) |
+| dynamic targets (`DynamicTargetUnprovable`) | fixture (`RecipientList`/`RoutingSlip`) | **N/A** — `CanonicalStepSpec` cannot author one | fixture (`BuilderStep` dynamic-target variants) |
+| `RuntimeSqlInJoinedStep` (header/body + `file:`) | fixtures (both sources) | fixture (header source) | fixtures (both sources) |
+| `TransactionControlSql` | fixture (`COMMIT` text) | fixture | fixture |
+| `DialectUnprovable` / `UnsupportedJoinDialect` | fixtures (fake resolvers; standalone-outside-block still loads) | fixture (fake resolvers) | fixtures (fake resolvers) |
+| `ManagerMissing` (unregistered) | S1 fixture stays green | fixture | fixture |
+| DARK gate (`JoinSessionMissing`, fake manager registered) | N/A — DSL seams keep the always-absent resolver (S1 contract) | fixture asserting the boundary: error propagates from the early gate, `execution.register_route` never invoked, aggregate NOT marked Failed | fixture (compiles to the gate) |
+| `Managed` untouched | direct assertions: `validate_transaction_mode` URI rejection suite stays green; producer/consumer with `transaction_mode = Managed` execute the Auto path unchanged (new direct behavior assertions at producer.rs:251 / consumer.rs:611) | | |
+
+Every fixture asserts the exact variant and offender/datasource fields.
+
+## Registry threading and registration (ruling 2 §C: S2a registers NOTHING)
 
 - **Registry threading (obligation 2)**: `CommandDeps.transaction_registry`
-  already reaches the loader; this slice adds the registration entry point on
-  `RuntimeBus` (`register_transaction_manager(name, Arc<dyn
-  TransactionManager>) -> Result<(), RegistryError>`, duplicate-rejecting via
-  the `NamedRegistry`) and camel-bundles registers a `SqlTransactionManager`
-  per catalog datasource at boot, before routes load (fail-closed
-  `ManagerMissing` otherwise). camel-cli's run/job/test entries all drive
-  `camel_bundles::boot`, so boot-site registration covers the CLI path
-  transitively.
-- **`SqlTransactionManager` (camel-sql, new)**: constructed per catalog
-  datasource from the datasource name with lazy pool resolution through the
-  existing `DatasourceCatalog`/`OnceCell` path — no eager connect. In S2a its
-  `open_session`/`acquire_deadline` are dark stubs (the session machinery is
-  S2b); registration + resolution are the deliverable, not session opening.
-  Registered-manager blocks die at the compile_step dark gate
-  (`JoinSessionMissing`), never at a session call.
+  already reaches the loader (S1). This slice adds ONLY the registration
+  entry point on `RuntimeBus`: `register_transaction_manager(name, Arc<dyn
+  TransactionManager>) -> Result<(), RegistryError>` (duplicate-rejecting,
+  delegating to the `NamedRegistry`). Per ruling 2 §C, **camel-bundles and
+  camel-cli register NOTHING in S2a**: no `SqlTransactionManager` is built
+  (the manager type is S2b), boot leaves the registry empty, and
+  `bundle_boot_leaves_transaction_registry_empty` asserts the registry has NO
+  KEYS after boot. Production resolves zero managers at every site, so every
+  transacted block fails `ManagerMissing` at precedence (4) — blocks stay
+  dark without depending on the dark gate. The dark gate stays reachable
+  through TEST-registered fake managers only, proving S2b's base.
+- **Test-only fake manager (camel-core)**: a `#[cfg(test)]`-visible fake
+  `TransactionManager` lives beside the bus/walk tests; it exercises the
+  entry point and the dark gate without touching camel-sql.
 - **Obligation 4 (documented constraint)**: `handle_register` persists the
   aggregate first (`repo.save`), then propagates lowering errors — including
   typed `ManagerMissing` from `canonical_to_route_definition` — via `?`
@@ -132,9 +178,11 @@ asserting the exact variant and offender fields on BOTH authoring paths
 1. **rc-c3mjp**: covered by the new `BuilderStep`-tree structural walk at both
    fan-ins (above); canonical/BuilderStep-authored blocks get exactly the DSL
    path's rejections. Named unit-tier fixtures assert each rejection.
-2. **Registry threading**: bundle-boot registration via the new `RuntimeBus`
-   entry point; resolution at the canonical lowering seam already lands in
-   `commands.rs`.
+2. **Registry threading**: the `RuntimeBus::register_transaction_manager`
+   entry point lands in S2a; per ruling 2 §C bundle/CLI boot registers
+   NOTHING in this slice (registry stays key-empty; S2b wires boot
+   registration). Resolution at the canonical lowering seam already lands
+   in `commands.rs`.
 3. **`DEFERRED_VARIANTS` decision**: `CamelError::Transaction` becomes a
    supported in-pipeline kind — `"Transaction"` enters
    `supported_exception_kinds()` with a match arm over `TransactionError`
@@ -153,11 +201,11 @@ asserting the exact variant and offender fields on BOTH authoring paths
 
 ## Affected crates
 
-camel-sql (executor plumbing), camel-api (additive
+camel-sql (executor + batch planner plumbing), camel-api (additive
 `TransactionError::DynamicTargetUnprovable` variant only), camel-core
-(BuilderStep walk + registration seam), camel-dsl (vocabulary guard +
-canonical-fan-in walk), camel-bundles (registration; camel-cli's run/job/test
-entries register transitively through `camel_bundles::boot`).
+(walk + canonical boundary + registration entry point + test fake),
+camel-dsl (vocabulary guard + DSL fan-in walks), camel-bundles (registry-
+empty boot test only; camel-cli untouched in S2a — nothing registers).
 
 ## Architecture boundaries
 
@@ -167,10 +215,11 @@ belongs to S2b). One ADDITIVE camel-api change is in scope:
 `#[non_exhaustive]` family (its doc comment invites slice-2 growth without a
 breaking change) — the 604c ruling's req-5 rejection set names it, no shipped
 variant carries the semantics, and the fixtures assert it. No runtime
-behaviour change: no manager executes
-transactions here; the block still fails at load unless a manager is
-registered, and S2b owns everything after load. `plan_binds` remains the only
-bind path. No new dependencies.
+behaviour change: NOTHING registers a manager in S2a, so no manager exists
+to execute transactions; every transacted block fails at load
+(`ManagerMissing` in production, `JoinSessionMissing` under a
+test-registered fake), and S2b owns everything after load. `plan_binds`
+remains the only single-shape bind path. No new dependencies.
 
 ## Phases
 
@@ -186,18 +235,20 @@ bind path. No new dependencies.
   `cargo test -p camel-test --features integration-tests --no-run` compiles;
   `plan_binds` signature unchanged.
 
-### Phase B: load rejections + walk + registration
-- **Goal**: the BuilderStep walk at both fan-ins with every rejection named
-  and fixture-covered; `RuntimeBus` registration entry point; bundle/CLI
-  registration; `DEFERRED_VARIANTS` move.
+### Phase B: load rejections + walk + registration entry point
+- **Goal**: the walk at all four sites with every rejection named and
+  fixture-covered per the class × seam matrix; the `RuntimeBus` registration
+  entry point (test-exercised only, per ruling 2 §C); `DEFERRED_VARIANTS`
+  move.
 - **Dependencies**: Phase A.
 - **Deliverable**: named unit-tier fixtures for every rejection (S1
-  structural set + req-5 SQL guards + dynamic targets), passing on both
-  authoring paths; managers register at boot.
+  structural set + req-5 SQL guards + dynamic targets) per the fixture
+  matrix; entry point + test-only fake manager + registry-empty boot test.
 - **Exit-criteria**: every fixture asserts the exact variant and
-  offender/datasource fields on BOTH authoring paths (declarative and
-  canonical/BuilderStep); unregistered datasource still fails at load with
-  `ManagerMissing`; a registered-manager block fails the DARK gate
-  (`JoinSessionMissing`) — no block compiles or runs; `Managed`
-  endpoint-creation rejection and Auto-fallback warnings proven untouched;
-  vocabulary guard green; openspec validate clean.
+  offender/datasource fields per the matrix; unregistered datasource fails
+  at load with `ManagerMissing`; a test-registered fake manager block fails
+  the DARK gate (`JoinSessionMissing`) at the canonical boundary (`?` zone,
+  no compensation) and at `compile_step` — no block compiles or runs;
+  bundle boot leaves the registry with NO KEYS; `Managed`
+  endpoint-creation rejection and Auto-fallback warnings proven untouched
+  with direct assertions; vocabulary guard green; openspec validate clean.
