@@ -17,6 +17,9 @@
 #   GATES_SKIP="" bash scripts/gates-local.sh   # also run the skipped ones
 #   GATES_LANES=0 bash scripts/gates-local.sh   # skip the component-lane phase
 #   GATES_LANES=all bash scripts/gates-local.sh # also run infra (docker) lanes
+#   Lane rows may embed a default suite list overridable by an env var
+#   (camel-test's CAMEL_TEST_WORKSPACE_SUITES, rc-4xka4); the parser needs
+#   no change — it splits on the first two `|` and runs the rest verbatim.
 #
 # The summary reports `passed:`, `failed:`, `skipped:` and `ran: X of Y`, so a
 # sweep always states how much of the registry it covered. A partial sweep

@@ -103,6 +103,7 @@ if [[ "${1:-}" == "metadata" ]]; then
     exit 0
 fi
 printf '%s\n' "$*" >>"${STUB_ARGV_LOG:?stub cargo: STUB_ARGV_LOG is unset}"
+if [[ -n "${STUB_TEST_FAIL_AT:-}" ]] && [[ "$(wc -l <"$STUB_ARGV_LOG")" -eq "$STUB_TEST_FAIL_AT" ]]; then exit 1; fi
 exit 0
 SH
     chmod +x "$STUB_BIN/cargo"
@@ -2083,6 +2084,221 @@ case_48() {
     assert_out_line 'ran:     0 of 3'
 }
 
+# 49. the workspace-unification lane (camel-test's suite row) is exercised from
+#     the PRODUCTION declaration in AGENTS.md: default list, allowlist override,
+#     blank/wildcard guards, failure aggregation, GATES_SKIP, malformed twin.
+PROD_AGENTS="$(cd "$SCRIPT_DIR/.." && pwd)/AGENTS.md"
+prod_row="$(sed -n 's/^camel-test | local | suites=/suites=/p' "$PROD_AGENTS")"
+
+case_49() {
+    # 49a — the production default list dispatches in table order.
+    fixture_new 49a-default-list || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    unset CAMEL_TEST_WORKSPACE_SUITES
+    run_sweep GATES_ONLY=lanes
+    assert_rc 0 || return 1
+    assert_out_has 'PASS lane camel-test' || return 1
+    assert_out_lacks 'NO LANE for camel-test' || return 1
+    assert_argv_exact 'test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_script_test'$'\n''test --workspace --test dev_watch_proto_test' || return 1
+
+    # 49b — an allowlisted subset override replaces the default list.
+    fixture_new 49b-allowlisted-subset || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    run_sweep GATES_ONLY=lanes CAMEL_TEST_WORKSPACE_SUITES='dev_watch_proto_test'
+    assert_rc 0 || return 1
+    assert_argv_exact 'test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_proto_test' || return 1
+
+    # 49c — an empty list is a named error and dispatches no workspace call
+    #       while the compile-only row still runs.
+    fixture_new 49c-empty-list || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    run_sweep GATES_ONLY=lanes CAMEL_TEST_WORKSPACE_SUITES=
+    assert_rc_nonzero || return 1
+    assert_argv_line 'test -p camel-test --features integration-tests --no-run' || return 1
+    if grep -q -- '--workspace' "$ARGV"; then
+        FAIL_DETAIL="empty override dispatched a workspace cargo call"
+        return 1
+    fi
+    assert_out_has 'FAIL lane camel-test :: suites=' || return 1
+    assert_err_has 'empty CAMEL_TEST_WORKSPACE_SUITES suite list' || return 1
+
+    # 49d — a whitespace-only list is the same empty list.
+    fixture_new 49d-whitespace-list || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    run_sweep GATES_ONLY=lanes 'CAMEL_TEST_WORKSPACE_SUITES=   '
+    assert_rc_nonzero || return 1
+    assert_argv_line 'test -p camel-test --features integration-tests --no-run' || return 1
+    if grep -q -- '--workspace' "$ARGV"; then
+        FAIL_DETAIL="empty override dispatched a workspace cargo call"
+        return 1
+    fi
+    assert_out_has 'FAIL lane camel-test :: suites=' || return 1
+    assert_err_has 'empty CAMEL_TEST_WORKSPACE_SUITES suite list' || return 1
+
+    # 49e — a wildcard entry is rejected literally, never expanded against the
+    #       worktree (the row's set -f guard).
+    fixture_new 49e-wildcard-entry || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    printf 'x\n' >"$REPO/matching_test" || return 1
+    run_sweep GATES_ONLY=lanes 'CAMEL_TEST_WORKSPACE_SUITES=dev_watch_script_test *_test'
+    assert_rc_nonzero || return 1
+    assert_argv_line 'test -p camel-test --features integration-tests --no-run' || return 1
+    if grep -q -- '--workspace' "$ARGV"; then
+        FAIL_DETAIL="wildcard override dispatched a workspace cargo call"
+        return 1
+    fi
+    assert_out_has 'FAIL lane camel-test :: suites=' || return 1
+    assert_err_has 'literal suite names' || return 1
+
+    # 49f — a failing first suite still runs the second (aggregation).
+    fixture_new 49f-first-suite-failure || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    unset CAMEL_TEST_WORKSPACE_SUITES
+    run_sweep GATES_ONLY=lanes STUB_TEST_FAIL_AT=2
+    assert_rc_nonzero || return 1
+    assert_argv_exact 'test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_script_test'$'\n''test --workspace --test dev_watch_proto_test' || return 1
+    assert_out_has 'FAIL lane camel-test :: suites=' || return 1
+
+    # 49g — GATES_SKIP=lanes disables the row entirely.
+    fixture_new 49g-skip-lanes || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    run_sweep GATES_ONLY=lanes GATES_SKIP=lanes
+    assert_rc 0 || return 1
+    assert_argv_empty || return 1
+    assert_out_has 'component lanes: DISABLED (GATES_SKIP=lanes)' || return 1
+
+    # 49h — a malformed twin row (bad mode) is still a named parse error.
+    if [[ "$(printf '%s\n' "$prod_row" | wc -l)" -eq 1 && -n "$prod_row" ]]; then
+        :
+    else
+        FAIL_DETAIL="production lane declaration missing or duplicated"
+        return 1
+    fi
+    fixture_new 49h-malformed-twin || return 1
+    fixture_init_repo || return 1
+    fixture_agents "camel-test | locall | $prod_row" || return 1
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    run_sweep GATES_ONLY=lanes
+    assert_rc 2 || return 1
+    assert_err_names_row 'AGENTS.md' || return 1
+    assert_argv_empty || return 1
+
+    # 49i — a Docker-classified suite is not an allowlisted local suite.
+    fixture_new 49i-docker-override || return 1
+    fixture_init_repo || return 1
+    cp "$PROD_AGENTS" "$REPO/AGENTS.md" || return 1
+    if [[ "$(grep -c '^camel-test | local | suites=' "$REPO/AGENTS.md")" -lt 1 ]]; then
+        FAIL_DETAIL="production lane declaration absent from the COMPONENT LANES fence"
+        return 1
+    fi
+    crate_seed crates/test camel-test || return 1
+    mkdir -p "$REPO/crates/test/tests" || return 1
+    printf '#[test]\nfn basic() {}\n' >"$REPO/crates/test/tests/basic.rs" || return 1
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/test/src/lib.rs" || return 1
+    commit_work "touch camel-test" || return 1
+    fixture_meta 'camel-test:crates/test:lib,test' || return 1
+    run_sweep GATES_ONLY=lanes CAMEL_TEST_WORKSPACE_SUITES='redis_state_test'
+    assert_rc_nonzero || return 1
+    assert_argv_line 'test -p camel-test --features integration-tests --no-run' || return 1
+    if grep -q -- '--workspace' "$ARGV"; then
+        FAIL_DETAIL="rejected override dispatched a workspace cargo call"
+        return 1
+    fi
+    assert_err_has 'not an allowlisted local suite' || return 1
+    assert_err_has 'redis_state_test' || return 1
+}
+
 # ── driver ──────────────────────────────────────────────────────────────────
 CASES=(
     "touched crate with lane + tests/ executes the lane"
@@ -2133,6 +2349,7 @@ CASES=(
     "registry: scratch allocation failure is a named exit 2"
     "registry and lanes: same hostile input, both parsers win"
     "registry: summary counts on pass/fail/skip"
+    "workspace-unification lane: production declaration, allowlist override, blank/wildcard guard, failure aggregation, skip, malformed row"
 )
 
 main() {

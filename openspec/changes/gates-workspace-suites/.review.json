@@ -1,0 +1,37 @@
+{
+  "kind": "holistic-review",
+  "change": "gates-workspace-suites",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "impl_hash": "f9b1e80fe38b33a961c63143939231cb165be772",
+  "date": "2026-11-22",
+  "findings": [
+    {
+      "severity": "minor-legitimate",
+      "finding": "case_49 last assertion (49i) lacked '|| return 1', breaking file convention",
+      "resolution": "fixed in 5647759df"
+    },
+    {
+      "severity": "minor-legitimate",
+      "finding": "stale FAIL_DETAIL text in 49e/49i ('empty override...' copied from 49c)",
+      "resolution": "fixed in 5647759df ('wildcard override dispatched...' / 'rejected override dispatched...')"
+    },
+    {
+      "severity": "minor-legitimate",
+      "finding": "Task 1.3 evidence wrapper lacked the prescribed 'env -u CAMEL_TEST_WORKSPACE_SUITES'",
+      "resolution": "run-lane.sh rewritten with env -u; lane-direct.out regenerated (LANE_DIRECT_RC=0, 2 test-result-ok lines)"
+    },
+    {
+      "severity": "minor-absurd-residual",
+      "finding": "8x repeated fixture-seed block in case_49 (~80 lines)",
+      "resolution": "left as-is: matches file's per-case inlining convention and the blessed plan forbids new fixture machinery; recorded as residual, not debt"
+    }
+  ],
+  "positives_verified": [
+    "LANE_ROW command field sha256-identical across tasks.md/design.md/live AGENTS.md; case_49 copies the production AGENTS.md (no copied row literal)",
+    "all 5 spec scenarios own evidence (49a/49c/49d/49e/49f/49g/49h/49i + Task 1.3 artifacts)",
+    "scope exact: AGENTS.md +4, gates-local.sh +3, gates-lanes-test.sh +217, change dir only; zero crates/**; zero CI; owner-dirty fleet files untouched",
+    "parser suite 49/49 green after fixes; direct lane run rc=0 (2+3 tests passed) under workspace unification; empty guard rc=2"
+  ],
+  "note": "Registry sweep + cargo build --workspace run AFTER this review and the final commit, so the swept tree equals the parked/merge-candidate tree (order's no-post-sweep-commit invariant preserved by reordering; stated in the park report)."
+}

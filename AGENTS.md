@@ -239,6 +239,10 @@ camel-component-wasm | docker | cargo test -p camel-integration-test --features 
 #     itself must still compile its whole integration surface locally
 #     (rc-2co7z: --lib never compiles tests/), and runs it under GATES_LANES=all
 camel-test | local | cargo test -p camel-test --features integration-tests --no-run
+# --- camel-test workspace-unification suites (rc-4xka4): under `--workspace`, feature
+#     unification enables camel-core/lang-rhai (rc-lhd0y), a class invisible to `-p` lanes;
+#     default list in-row (rc-lhd0y's fix set), `CAMEL_TEST_WORKSPACE_SUITES` overrides; NOT full `cargo test --workspace` (Docker/bridges stay CI).
+camel-test | local | suites="${CAMEL_TEST_WORKSPACE_SUITES-dev_watch_script_test dev_watch_proto_test}"; allowed="dev_watch_script_test dev_watch_proto_test"; [[ -n "${suites//[[:space:]]/}" ]] || { echo "camel-test workspace lane: empty CAMEL_TEST_WORKSPACE_SUITES suite list" >&2; exit 2; }; set -f; for s in $suites; do case "$s" in *[\*\?\[]*) echo "camel-test workspace lane: CAMEL_TEST_WORKSPACE_SUITES must list literal suite names, got '$s'" >&2; exit 2;; esac; ok=0; for a in $allowed; do if [[ "$s" == "$a" ]]; then ok=1; break; fi; done; if [[ "$ok" != 1 ]]; then echo "camel-test workspace lane: CAMEL_TEST_WORKSPACE_SUITES entry '$s' is not an allowlisted local suite (allowed: $allowed)" >&2; exit 2; fi; done; rc=0; for s in $suites; do cargo test --workspace --test "$s" || rc=1; done; exit "$rc"
 camel-test | docker | cargo test -p camel-test --features integration-tests
 ```
 

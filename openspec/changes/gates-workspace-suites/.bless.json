@@ -1,0 +1,13 @@
+{
+  "kind": "plan",
+  "change": "gates-workspace-suites",
+  "verdict": "BLESSED via round-3 override (cap exhausted)",
+  "hash": "sha256:b8371f114ac01a7e41958220d187765dfccdf0699a9af5f6a557f697978a11d9",
+  "expert": "experts/e_gpt",
+  "dispatches": {
+    "spec": 1,
+    "plan": 3
+  },
+  "override": "Master override recorded on rc-4xka4 (605 precedent): the round-3 expert answer blessed the spec allowlist clarify outright and named ONE plan item (Task 1.1 row-byte-shape grep -c line-vs-occurrence), which was applied verbatim in commit 1f72af31c; the plan therefore stands as BLESSED BY MASTER OVERRIDE. No round 4, no further expert dispatches on this change.",
+  "date": "2026-11-22"
+}
