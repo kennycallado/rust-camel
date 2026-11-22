@@ -39,7 +39,7 @@
 //!
 //! The boot partition ([`super::runtime`]
 //! `prepare_embedded_assets`) splits the collected classes in two.
-//! [`is_in_memory_class`] names the `proto file`, `xslt stylesheet`,
+//! `is_in_memory_class` names the `proto file`, `xslt stylesheet`,
 //! `xsd schema`, and `sql file` classes: their bytes register into the
 //! process-global embedded-asset registries and their sites rewrite to
 //! `camel-embedded:` references, so they never touch the filesystem.

@@ -12,7 +12,7 @@
 //! artifact carrying only those classes never writes to temp.
 //! Materialization writes exactly the disk-class substitution-targeted
 //! asset bytes into a random per-boot directory under the first WRITABLE
-//! candidate from [`standard_materialization_candidates`] — the system
+//! candidate from `standard_materialization_candidates` — the system
 //! temp directory, falling back to a writable directory next to the
 //! artifact:
 //!
@@ -135,7 +135,7 @@ pub(crate) fn standard_materialization_candidates() -> Vec<PathBuf> {
 
 impl Materialization {
     /// Creates the per-boot directory under the standard candidate chain
-    /// ([`standard_materialization_candidates`]) with a random name,
+    /// (`standard_materialization_candidates`) with a random name,
     /// exclusively, at mode 0700.
     pub fn create() -> std::io::Result<Self> {
         Self::create_with_candidates(&standard_materialization_candidates())
