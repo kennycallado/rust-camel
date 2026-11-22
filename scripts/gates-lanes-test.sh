@@ -2299,6 +2299,48 @@ case_49() {
     assert_err_has 'redis_state_test' || return 1
 }
 
+# 50. the lane phase cannot read/decode AGENTS.md (a registry gate rewrote it
+#     with invalid UTF-8 after the registry parse): a named exit 2, no traceback,
+#     and no lane command dispatched.
+case_50() {
+    fixture_new 50-lanes-read-guard || return 1
+    fixture_init_repo || return 1
+    crate_seed crates/ok camel-ok || return 1
+    # Written by hand: fixture_agents_preamble's registry gate is `noop`, and
+    # this fixture needs a gate that corrupts AGENTS.md at RUN time (the octal
+    # escapes produce the invalid bytes, so the committed file stays valid).
+    cat >"$REPO/AGENTS.md" <<'EOF' || return 1
+# gates-lanes-test fixture
+
+## QUALITY GATES
+
+```
+- name: corrupt
+  run: printf '\377\376' >> AGENTS.md
+```
+
+## COMPONENT LANES
+
+```
+camel-ok | local | cargo test -p camel-ok
+```
+EOF
+    fixture_base_commit || return 1
+    printf '// touched\n' >>"$REPO/crates/ok/src/lib.rs" || return 1
+    commit_work "touch ok" || return 1
+    fixture_meta 'camel-ok:crates/ok:lib' || return 1
+    run_sweep "GATES_ONLY=corrupt lanes"
+    local repo_root
+    if ! repo_root="$(git -C "$REPO" rev-parse --show-toplevel)"; then
+        FAIL_DETAIL="fixture is wrong: cannot resolve the fixture repo root"
+        return 1
+    fi
+    assert_rc 2 || return 1
+    assert_err_has "gates-local: lanes: cannot read $repo_root/AGENTS.md: 'utf-8' codec can't decode" || return 1
+    assert_err_lacks 'Traceback' || return 1
+    assert_argv_empty
+}
+
 # ── driver ──────────────────────────────────────────────────────────────────
 CASES=(
     "touched crate with lane + tests/ executes the lane"
@@ -2350,6 +2392,7 @@ CASES=(
     "registry and lanes: same hostile input, both parsers win"
     "registry: summary counts on pass/fail/skip"
     "workspace-unification lane: production declaration, allowlist override, blank/wildcard guard, failure aggregation, skip, malformed row"
+    "lanes: unreadable lane table is a named exit 2 (read/decode guard)"
 )
 
 main() {

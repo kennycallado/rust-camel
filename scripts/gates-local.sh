@@ -479,7 +479,12 @@ path = sys.argv[1]
 name = os.path.basename(path)
 marker = "## COMPONENT LANES"
 
-lines = physical_lines(path)
+try:
+    lines = physical_lines(path)
+except (OSError, UnicodeDecodeError, ValueError) as error:
+    # Input read and UTF-8 decode failures are NAMED, never a raw traceback.
+    sys.stderr.write("gates-local: lanes: cannot read %s: %s\n" % (path, error))
+    sys.exit(2)
 content, table_lineno = fenced_section(lines, marker, "lanes")
 
 rows = []
