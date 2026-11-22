@@ -97,7 +97,7 @@ a clean boolean. The lexical gates match
 [Typed values](#typed-values). Any other text is not a candidate, and the
 document keeps its first-pass parse error.
 
-```yaml
+```yaml route-sweep-skip
 rest:
   - host: 0.0.0.0
     port: ${env:ORDERS_PORT:-8080}

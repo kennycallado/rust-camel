@@ -627,6 +627,13 @@ mod sweep_io {
     }
 
     fn doc_kind_from_info(info: &str) -> Option<DocKind> {
+        // A fence that documents a loader-only feature (the env probe) cannot
+        // parse in this sweep: the sweep uses `parse_yaml_to_declarative`,
+        // which runs without an env source. The tag keeps the exclusion
+        // visible at the fence instead of hiding it in the baseline.
+        if info.to_ascii_lowercase().contains("route-sweep-skip") {
+            return None;
+        }
         let token = info.split_whitespace().next()?.to_ascii_lowercase();
         match token.as_str() {
             "yaml" | "yml" => Some(DocKind::Yaml),
