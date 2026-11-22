@@ -316,6 +316,10 @@ pub async fn boot(
             .with_health_registry(ctx.health_registry());
         Arc::new(catalog)
     };
+    // URL resolution for canonical `transacted` blocks: the same catalog the
+    // Sql/SurrealDb bundles receive. Without this install the dialect stage
+    // stays fail-closed with `DialectUnprovable` naming the datasource.
+    ctx.install_datasource_catalog(Arc::clone(&datasource_catalog))?;
 
     // The cascade registers each bundle through the `register_bundle` seam
     // (config-key lookup with empty-table fallback, serde defaults).
@@ -455,6 +459,25 @@ pub async fn boot(
                 // log-policy: system-broken
                 tracing::error!("failed to initialize SQL bundle: {}", e);
             }
+        }
+        // One transaction manager per catalog datasource (sqltrans-exec step
+        // 9). Pool resolution is lazy through the installed catalog, so boot
+        // never connects. Load validation now resolves these managers; route
+        // addition still stops at the `JoinSessionMissing` backstop until the
+        // executor slice creates a block session.
+        for datasource in config.datasources.keys() {
+            let manager: Arc<dyn camel_api::TransactionManager> =
+                Arc::new(camel_component_sql::SqlTransactionManager::new(
+                    datasource.clone(),
+                    Arc::clone(&datasource_catalog),
+                ));
+            ctx.register_transaction_manager(datasource.clone(), manager)
+                .map_err(|error| {
+                    CamelError::Config(format!(
+                        "failed to register transaction manager for datasource \
+                         '{datasource}': {error}"
+                    ))
+                })?;
         }
     }
     #[cfg(feature = "surrealdb")]
@@ -903,6 +926,85 @@ mod tests {
             appdb.db_url,
             "sqlite:file:memdb_bundles_catalog_probe?mode=memory&cache=shared"
         );
+    }
+
+    /// Step 9 guard: bundle boot registers exactly ONE
+    /// [`camel_component_sql::SqlTransactionManager`] per catalog datasource.
+    /// Registration is lazy — no pool is created here — so the unreachable
+    /// `pg` URL is fine.
+    #[cfg(feature = "sql")]
+    #[tokio::test]
+    async fn bundle_boot_registers_catalog_datasources() {
+        use camel_api::datasource::DatasourceConfig;
+        use camel_api::transaction::TransactionManager as _;
+        use std::any::Any;
+        use std::collections::HashMap;
+
+        let mut datasources = HashMap::new();
+        datasources.insert(
+            "pg".to_string(),
+            DatasourceConfig {
+                db_url: "postgres://camel:camel@127.0.0.1:5432/camel".to_string(),
+                provider: Some("sqlx".to_string()),
+                max_connections: None,
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+                extra: HashMap::new(),
+            },
+        );
+        datasources.insert(
+            "audit".to_string(),
+            DatasourceConfig {
+                db_url: "sqlite:file:memdb_bundles_tx_probe?mode=memory&cache=shared".to_string(),
+                provider: Some("sqlx".to_string()),
+                max_connections: None,
+                min_connections: None,
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+                extra: HashMap::new(),
+            },
+        );
+        let config = CamelConfig {
+            datasources,
+            ..CamelConfig::default()
+        };
+        let mut ctx = CamelConfig::configure_context_with_beans(&config, None)
+            .await
+            .expect("configure_context_with_beans must succeed");
+        let _handle = boot(&mut ctx, &config, Path::new(env!("CARGO_MANIFEST_DIR")))
+            .await
+            .expect("boot must register the cascade");
+
+        let registry = ctx.transaction_registry();
+        assert_eq!(
+            registry.len(),
+            2,
+            "boot must register exactly the catalog datasources"
+        );
+
+        for datasource in ["pg", "audit"] {
+            let manager = registry
+                .get(datasource)
+                .unwrap_or_else(|| panic!("boot must register datasource '{datasource}'"));
+            assert_eq!(manager.datasource(), datasource);
+            // Concrete-type proof: the manager trait object upcasts to `Any`
+            // and downcasts to the sql component's manager.
+            let erased: Arc<dyn Any + Send + Sync> = manager;
+            let concrete = Arc::downcast::<camel_component_sql::SqlTransactionManager>(erased)
+                .unwrap_or_else(|_| {
+                    panic!("datasource '{datasource}' must resolve to SqlTransactionManager")
+                });
+            assert_eq!(concrete.datasource(), datasource);
+        }
     }
 
     #[tokio::test]

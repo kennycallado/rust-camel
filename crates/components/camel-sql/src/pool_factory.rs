@@ -30,6 +30,11 @@ const IN_FLIGHT_DRAIN_POLL: Duration = Duration::from_millis(5);
 
 pub struct SqlPoolFactory;
 
+/// Max connections configured on `pool`, for typed `PoolExhausted` naming.
+pub(crate) fn pool_max_connections(pool: &AnyPool) -> u32 {
+    pool.options().get_max_connections()
+}
+
 impl PoolFactory for SqlPoolFactory {
     fn create<'a>(&'a self, config: &'a DatasourceConfig) -> CreatePoolFuture<'a> {
         Box::pin(async move {

@@ -440,9 +440,15 @@ pub enum BuilderStep {
     /// A transacted route block: the nested steps run inside one
     /// block-owned transaction on `datasource`.
     ///
-    /// Dark in slice 1 — the DSL load path does not build this variant yet and
-    /// lowering fails closed, so no route can execute it (camel-sql wires the
-    /// block in slice 2, rc-qv2iz.6).
+    /// Both DSL load fan-ins build this variant today (sqltrans-exec step 3):
+    /// the declarative and canonical lowering arms emit it after the ONE load
+    /// walk (`crate::transacted_walk`) passes the block, so the variant
+    /// carries a walk-checked subtree. No route can EXECUTE the block yet —
+    /// step compilation still fails closed at the
+    /// `StepCompilerRegistry::compile_step` backstop
+    /// (`TransactionError::JoinSessionMissing`) until the executor wiring
+    /// creates a block session — even though boot now registers one
+    /// transaction manager per catalog datasource.
     Transacted {
         /// Datasource name, resolved against the
         /// [`crate::TransactionManagerRegistry`] at load time.

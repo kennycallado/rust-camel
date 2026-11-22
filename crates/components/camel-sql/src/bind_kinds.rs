@@ -907,6 +907,171 @@ pub(crate) fn plan_batch_items(
         .collect()
 }
 
+/// The FINAL bind decision for one whole batch (bd rc-7e681, rc-0eiqm).
+///
+/// The decision covers every item before item 0 executes, so a mismatch
+/// discovered on a later shape still sends the whole batch to the aliases.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum BatchPlan {
+    /// The whole batch runs on its uncached alias texts
+    /// (`/* batch-bind-kinds-fallback */`, `persistent(false)`), each item
+    /// with its own precomputed targets: the shape's described numeric
+    /// targets where the shape had a usable description, the message-wide
+    /// scan otherwise. The per-item distinction is the no-loosening rule —
+    /// one shared scan would turn a typed 2^53 rejection into a silent
+    /// server-side round.
+    Aliased {
+        /// Alias targets per item, indexed like the batch items.
+        targets: Vec<Vec<Option<BindTarget>>>,
+    },
+    /// The whole batch runs on its named texts, each item with the targets
+    /// its read-back agreed on.
+    Named {
+        /// Read-back-agreed targets per item, indexed like the batch items.
+        per_item_targets: Vec<Vec<Option<BindTarget>>>,
+    },
+}
+
+/// The named targets for one batch item, or `None` when the item may not run
+/// named.
+///
+/// `None` means the item's shape was not described, the read-back was
+/// missing/unusable, or the read-back kinds disagree with the probe kinds —
+/// the caller then flips the WHOLE batch to the aliases (the safe direction:
+/// never probe-derived bytes on the named statement).
+fn named_targets_for_item(
+    shape_probes: &[(String, ProbeOutcome)],
+    sql: &str,
+    readback: Option<&[AnyTypeInfoKind]>,
+) -> Option<Vec<Option<BindTarget>>> {
+    let Some((_, ProbeOutcome::Described(kinds))) =
+        shape_probes.iter().find(|(shape, _)| shape == sql)
+    else {
+        return None;
+    };
+    let readback = readback?;
+    if !named_kinds_agree(kinds, Some(readback)) {
+        return None;
+    }
+    Some(
+        readback
+            .iter()
+            .map(|kind| bind_target_from_any_kind(*kind))
+            .collect(),
+    )
+}
+
+/// The final batch decision from the per-item plans and the read-back kinds
+/// observed in item order.
+///
+/// `readbacks` is short-circuit-truncated: a batch that already failed on the
+/// last observed item stops issuing read-backs, so a missing entry is a
+/// failure, never an `Ok`.
+fn decide_batch_plan(
+    plans: &[BatchItemPlan],
+    shape_probes: &[(String, ProbeOutcome)],
+    items: &[(String, Vec<serde_json::Value>)],
+    readbacks: &[Option<Vec<AnyTypeInfoKind>>],
+) -> BatchPlan {
+    let alias_plan = || BatchPlan::Aliased {
+        targets: plans
+            .iter()
+            .map(|plan| plan.alias_targets.clone())
+            .collect(),
+    };
+
+    // Whole-batch rule: one `AliasPlan` item (an ineligible row or a shape
+    // with no usable description) sends every item to its precomputed alias
+    // targets.
+    if plans
+        .iter()
+        .any(|plan| plan.source == ItemBindSource::AliasPlan)
+    {
+        return alias_plan();
+    }
+
+    let mut per_item_targets = Vec::with_capacity(items.len());
+    for (batch_idx, (sql, _)) in items.iter().enumerate() {
+        let Some(targets) = readbacks
+            .get(batch_idx)
+            .and_then(|readback| named_targets_for_item(shape_probes, sql, readback.as_deref()))
+        else {
+            return alias_plan();
+        };
+        per_item_targets.push(targets);
+    }
+
+    BatchPlan::Named { per_item_targets }
+}
+
+/// Plans every batch item's binds on the batch's in-flight transaction and
+/// returns the FINAL whole-batch decision.
+///
+/// `items` carries each item's OWN resolved SQL text plus bindings: IN-clause
+/// expansion rewrites `in (:list)` into one placeholder per element, so one
+/// batch can resolve to distinct texts and every later parameter position
+/// shifts with the list length. Metadata is therefore tracked per distinct
+/// shape, never per batch: the texts are grouped by shape, every shape is
+/// probed once, and the no-loosening bind scan runs over ALL binding rows.
+///
+/// The named read-back agreement loop follows: per item in order, the
+/// read-back kinds on this same transaction must agree with the item shape's
+/// probe kinds. The FIRST missing, unusable or disagreeing read-back flips
+/// the WHOLE batch to the aliases before item 0 executes.
+pub(crate) async fn plan_batch_binds(
+    tx: &mut AnyConnection,
+    items: &[(String, Vec<serde_json::Value>)],
+) -> Result<BatchPlan, CamelError> {
+    let sqls: Vec<String> = items.iter().map(|(sql, _)| sql.clone()).collect();
+    let groups = group_rows_by_sql(&sqls);
+    let binding_rows: Vec<&[serde_json::Value]> = items
+        .iter()
+        .map(|(_, bindings)| bindings.as_slice())
+        .collect();
+    // Scan fallback targets: one bind kind per position across the WHOLE
+    // batch, float wins. The message-wide scan (never a per-shape scan) is
+    // the no-loosening rule: a per-shape scan could turn a typed 2^53
+    // rejection into a silent server-side round.
+    let message_scan = scan_bind_targets(&binding_rows);
+
+    // Probe every distinct shape once on the caller's in-flight batch
+    // transaction. Each probe runs on its own alias text: preparing with
+    // empty parameter types seeds a statement-cache entry under the probed
+    // text, and for unmapped types (e.g. NUMERIC) that entry is one no
+    // payload can satisfy.
+    let probes = probe_batch_shapes(&mut *tx, &groups).await?;
+    let shape_probes: Vec<(String, ProbeOutcome)> = groups
+        .iter()
+        .map(|group| group.sql.clone())
+        .zip(probes)
+        .collect();
+    let plans = plan_batch_items(&shape_probes, items, &message_scan);
+
+    // An aliased batch issues no named prepares at all: the whole-batch
+    // decision already holds, so there is nothing to read back.
+    if plans
+        .iter()
+        .any(|plan| plan.source == ItemBindSource::AliasPlan)
+    {
+        return Ok(decide_batch_plan(&plans, &shape_probes, items, &[]));
+    }
+
+    // Named read-back agreement, short-circuiting on the first item that
+    // cannot agree: once the batch flips to the aliases no further read-back
+    // is useful, so none is issued.
+    let mut readbacks = Vec::with_capacity(items.len());
+    for (batch_idx, (sql, _)) in items.iter().enumerate() {
+        let readback = readback_kinds(&mut *tx, sql, BindMode::Batch, Some(batch_idx)).await?;
+        let agrees = named_targets_for_item(&shape_probes, sql, readback.as_deref()).is_some();
+        readbacks.push(readback);
+        if !agrees {
+            break;
+        }
+    }
+
+    Ok(decide_batch_plan(&plans, &shape_probes, items, &readbacks))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1703,6 +1868,192 @@ mod tests {
                 )
                 .is_ok(),
                 "scan-only I64 selection would silently accept the value"
+            );
+        }
+
+        // ── planner contract: one decision for the whole batch ───────────
+
+        #[test]
+        fn batch_planner_accepts_distinct_expansions_together() {
+            // IN-clause expansion resolves each item to its OWN text: two
+            // `in (:list)` items with different list lengths plus a third
+            // item of a different bind shape. Planning must carry the
+            // metadata of each distinct text, not the batch's first text.
+            let probes = probe_entries(vec![
+                (
+                    "select id from t where id in ($1, $2)",
+                    ProbeOutcome::Described(vec![
+                        AnyTypeInfoKind::Integer,
+                        AnyTypeInfoKind::Integer,
+                    ]),
+                ),
+                (
+                    "select id from t where id in ($1, $2, $3)",
+                    ProbeOutcome::Described(vec![
+                        AnyTypeInfoKind::Integer,
+                        AnyTypeInfoKind::Integer,
+                        AnyTypeInfoKind::BigInt,
+                    ]),
+                ),
+                (
+                    "update t set n = $1 where id = $2",
+                    ProbeOutcome::Described(vec![AnyTypeInfoKind::Text, AnyTypeInfoKind::BigInt]),
+                ),
+            ]);
+            let items = item_entries(vec![
+                (
+                    "select id from t where id in ($1, $2)",
+                    vec![json!(1), json!(2)],
+                ),
+                (
+                    "select id from t where id in ($1, $2, $3)",
+                    vec![json!(1), json!(2), json!(9007199254740993i64)],
+                ),
+                (
+                    "update t set n = $1 where id = $2",
+                    vec![json!("x"), json!(2)],
+                ),
+            ]);
+            let rows: Vec<&[serde_json::Value]> =
+                items.iter().map(|(_, values)| values.as_slice()).collect();
+            let message_scan = scan_bind_targets(&rows);
+
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(plans.len(), items.len(), "one plan per item");
+            assert!(
+                plans
+                    .iter()
+                    .all(|plan| plan.source == ItemBindSource::NamedReadBack),
+                "every distinct text described an eligible bind shape"
+            );
+            // Per-shape metadata follows the item's own text: the IN-clause
+            // placeholder count is preserved and the described kinds (not
+            // the batch-wide scan) drive each position.
+            assert_eq!(plans[0].alias_targets.len(), 2);
+            assert_eq!(plans[1].alias_targets.len(), 3);
+            assert_eq!(plans[2].alias_targets.len(), 2);
+            assert_eq!(
+                plans[1].alias_targets,
+                vec![
+                    Some(BindTarget::I32),
+                    Some(BindTarget::I32),
+                    Some(BindTarget::I64)
+                ]
+            );
+            assert_eq!(
+                plans[2].alias_targets,
+                vec![Some(BindTarget::I64), Some(BindTarget::I64)],
+                "a described TEXT position maps to no numeric target, so the scan supplies it"
+            );
+
+            // The whole-batch decision is ONE value computed before item 0:
+            // the item-ordered read-backs agree, so the batch stays named
+            // with per-item targets.
+            let readbacks = vec![
+                Some(vec![AnyTypeInfoKind::Integer, AnyTypeInfoKind::Integer]),
+                Some(vec![
+                    AnyTypeInfoKind::Integer,
+                    AnyTypeInfoKind::Integer,
+                    AnyTypeInfoKind::BigInt,
+                ]),
+                Some(vec![AnyTypeInfoKind::Text, AnyTypeInfoKind::BigInt]),
+            ];
+            match decide_batch_plan(&plans, &probes, &items, &readbacks) {
+                BatchPlan::Named { per_item_targets } => {
+                    assert_eq!(
+                        per_item_targets.len(),
+                        items.len(),
+                        "the plan covers every item"
+                    );
+                    assert_eq!(
+                        per_item_targets[0],
+                        vec![Some(BindTarget::I32), Some(BindTarget::I32)]
+                    );
+                    assert_eq!(
+                        per_item_targets[1],
+                        vec![
+                            Some(BindTarget::I32),
+                            Some(BindTarget::I32),
+                            Some(BindTarget::I64)
+                        ],
+                        "the three-placeholder expansion keeps its own position count"
+                    );
+                    assert_eq!(per_item_targets[2], vec![None, Some(BindTarget::I64)]);
+                }
+                BatchPlan::Aliased { .. } => {
+                    panic!("agreeing read-backs must keep the whole batch named")
+                }
+            }
+        }
+
+        #[test]
+        fn unusable_later_probe_still_sends_whole_batch_to_aliases() {
+            // The usable shape is FIRST, the unusable shape later. One
+            // `AliasPlan` item flips the WHOLE batch, and the later shape
+            // contributes the message-wide scan targets.
+            let probes = probe_entries(vec![
+                ("A", ProbeOutcome::Described(vec![AnyTypeInfoKind::Text])),
+                ("B", ProbeOutcome::Unusable),
+            ]);
+            let items = item_entries(vec![
+                ("A", vec![json!("x")]),
+                ("B", vec![json!(1.5), json!(2)]),
+            ]);
+            let rows: Vec<&[serde_json::Value]> =
+                items.iter().map(|(_, values)| values.as_slice()).collect();
+            let message_scan = scan_bind_targets(&rows);
+            assert_eq!(
+                message_scan,
+                vec![Some(BindTarget::F64), Some(BindTarget::I64)],
+                "float wins message-wide"
+            );
+
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(plans[0].source, ItemBindSource::NamedReadBack);
+            assert_eq!(plans[1].source, ItemBindSource::AliasPlan);
+
+            // No read-back is attempted at all: the alias decision already
+            // holds for item 0.
+            match decide_batch_plan(&plans, &probes, &items, &[]) {
+                BatchPlan::Aliased { targets } => {
+                    assert_eq!(targets.len(), items.len(), "the whole batch aliases");
+                    assert_eq!(
+                        targets[1], message_scan,
+                        "the unusable shape runs on the message-wide scan"
+                    );
+                    assert_eq!(
+                        targets[0],
+                        vec![message_scan[0]],
+                        "the usable shape keeps its scan-derived guard"
+                    );
+                }
+                BatchPlan::Named { .. } => {
+                    panic!("an unusable later shape must send the whole batch to aliases")
+                }
+            }
+        }
+
+        #[test]
+        fn readback_disagreement_flips_whole_batch() {
+            // Extends `decide_path_aliases_on_disagreement` (bd rc-0eiqm)
+            // through the planner contract: the cached entry was seeded by
+            // bind-derived OIDs, so its read-back disagrees with the probe.
+            let probes = probe_entries(vec![(
+                "S",
+                ProbeOutcome::Described(vec![AnyTypeInfoKind::Double, AnyTypeInfoKind::Integer]),
+            )]);
+            let items = item_entries(vec![("S", vec![json!(1.5), json!(1)])]);
+            let message_scan = scan_bind_targets(&[items[0].1.as_slice()]);
+            let plans = plan_batch_items(&probes, &items, &message_scan);
+            assert_eq!(plans[0].source, ItemBindSource::NamedReadBack);
+
+            let readbacks = vec![Some(vec![AnyTypeInfoKind::Text, AnyTypeInfoKind::Integer])];
+            assert_eq!(
+                decide_batch_plan(&plans, &probes, &items, &readbacks),
+                BatchPlan::Aliased {
+                    targets: vec![vec![Some(BindTarget::F64), Some(BindTarget::I32)]],
+                },
+                "a disagreeing read-back must flip the whole batch to the aliases"
             );
         }
     }

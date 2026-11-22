@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Error returned by [`NamedRegistry::register`].
+/// Error returned by `NamedRegistry::register`.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     /// A value with this name is already registered.
@@ -88,6 +88,19 @@ impl<T: ?Sized + Send + Sync + 'static> NamedRegistry<T> {
             .get(name)
             .cloned()
     }
+
+    /// Number of registered values.
+    pub fn len(&self) -> usize {
+        self.map
+            .lock()
+            .expect("registry mutex poisoned: another thread panicked while holding this lock") // allow-unwrap
+            .len()
+    }
+
+    /// Whether the registry holds no values.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<T: ?Sized + Send + Sync + 'static> Default for NamedRegistry<T> {
@@ -129,14 +142,12 @@ pub(crate) type SharedCacheRegistry = Arc<CacheRegistry>;
 
 /// Registry of [`camel_api::TransactionManager`] ports, keyed by datasource name.
 ///
-/// Dark in slice 1 — nothing registers a manager; camel-sql registers per
-/// datasource in slice 2 (rc-qv2iz.6).
+/// Bundle boot registers one manager per catalog datasource (sqltrans-exec
+/// step 9); absent catalog (tests, embedded callers) resolves empty and load
+/// validation fails closed with `ManagerMissing`.
 pub type TransactionManagerRegistry = NamedRegistry<dyn camel_api::TransactionManager>;
 
 /// Resolve the [`camel_api::TransactionManager`] registered for `datasource`.
-///
-/// Dark in slice 1 — nothing registers a manager; camel-sql registers per
-/// datasource in slice 2 (rc-qv2iz.6).
 ///
 /// Fails closed with [`camel_api::TransactionError::ManagerMissing`] naming the
 /// datasource when no manager is registered. There is no fallback to another
@@ -150,6 +161,44 @@ pub fn resolve_transaction_manager(
         .ok_or_else(|| camel_api::TransactionError::ManagerMissing {
             datasource: datasource.to_owned(),
         })
+}
+
+/// Shared test-only doubles.
+///
+/// `FakeTransactionManager` is used by both the registry and `RuntimeBus`
+/// suites. Opening a session is deliberately unimplemented in slice 1: the
+/// dark slice exercises registry resolution only, never session lifecycle.
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// Minimal `TransactionManager` test double shared by the registry and
+    /// `RuntimeBus` suites. Opening a session is deliberately unimplemented:
+    /// the dark slice exercises registry resolution only, never session
+    /// lifecycle.
+    pub(crate) struct FakeTransactionManager {
+        datasource: String,
+    }
+
+    impl FakeTransactionManager {
+        pub(crate) fn new(datasource: impl Into<String>) -> Self {
+            Self {
+                datasource: datasource.into(),
+            }
+        }
+    }
+
+    impl camel_api::TransactionManager for FakeTransactionManager {
+        fn datasource(&self) -> &str {
+            &self.datasource
+        }
+
+        fn open_session(&self) -> camel_api::transaction::OpenSessionFuture<'_> {
+            panic!("the registry slice must never open a transaction session")
+        }
+
+        fn acquire_deadline(&self) -> std::time::Duration {
+            std::time::Duration::from_secs(5)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -210,26 +259,7 @@ mod tests {
         assert_eq!(*registry.get("key1").unwrap(), *"third");
     }
 
-    /// Minimal `TransactionManager` test double. Opening a session is
-    /// deliberately unimplemented in slice 1: the dark slice exercises registry
-    /// resolution only, never session lifecycle.
-    struct FakeManager {
-        datasource: String,
-    }
-
-    impl camel_api::TransactionManager for FakeManager {
-        fn datasource(&self) -> &str {
-            &self.datasource
-        }
-
-        fn open_session(&self) -> camel_api::transaction::OpenSessionFuture<'_> {
-            panic!("not implemented in slice 1")
-        }
-
-        fn acquire_deadline(&self) -> std::time::Duration {
-            std::time::Duration::from_secs(5)
-        }
-    }
+    use super::test_support::FakeTransactionManager;
 
     #[test]
     fn registry_missing_manager_fails_closed() {
@@ -249,9 +279,8 @@ mod tests {
     #[test]
     fn registry_round_trip_with_fake_manager() {
         let registry = TransactionManagerRegistry::new();
-        let manager: Arc<dyn camel_api::TransactionManager> = Arc::new(FakeManager {
-            datasource: "pg".into(),
-        });
+        let manager: Arc<dyn camel_api::TransactionManager> =
+            Arc::new(FakeTransactionManager::new("pg"));
         registry.register("pg", manager).expect("register manager");
 
         let resolved =

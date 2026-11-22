@@ -736,6 +736,43 @@ impl CamelContext {
         self.runtime.clone()
     }
 
+    /// Transaction-manager registry used by canonical route lowering.
+    ///
+    /// Read-only handle: boot registers one manager per catalog datasource
+    /// (sqltrans-exec step 9), so a canonical `transacted` block on a
+    /// registered datasource passes the load walk and fails at the route-add
+    /// backstop with `JoinSessionMissing` — the executor wiring that creates
+    /// a block session is the next slice.
+    pub fn transaction_registry(&self) -> Arc<crate::TransactionManagerRegistry> {
+        self.runtime.transaction_registry()
+    }
+
+    /// Register the [`camel_api::TransactionManager`] for `datasource`.
+    ///
+    /// Duplicate-rejecting: the existing manager is preserved and
+    /// [`crate::RegistryError::AlreadyRegistered`] is returned. Bundle boot
+    /// calls this once per catalog datasource.
+    pub fn register_transaction_manager(
+        &self,
+        datasource: impl Into<String>,
+        manager: Arc<dyn camel_api::TransactionManager>,
+    ) -> Result<(), crate::RegistryError> {
+        self.runtime
+            .register_transaction_manager(datasource, manager)
+    }
+
+    /// Install the boot's datasource catalog for transaction URL resolution.
+    ///
+    /// Canonical lowering resolves a `transacted` block's datasource URL
+    /// through this catalog; without it the dialect stage stays fail-closed
+    /// with `DialectUnprovable` naming the datasource.
+    pub fn install_datasource_catalog(
+        &self,
+        catalog: Arc<dyn camel_api::datasource::DatasourceCatalog>,
+    ) -> Result<(), CamelError> {
+        self.runtime.install_datasource_catalog(catalog)
+    }
+
     /// Build a producer context wired to this runtime.
     pub fn producer_context(&self) -> camel_api::ProducerContext {
         camel_api::ProducerContext::new().with_runtime(self.runtime())

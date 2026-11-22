@@ -290,14 +290,16 @@ impl StepCompilerRegistry {
         step_index: usize,
         ctx: &CompilationContext,
     ) -> Result<Option<CompiledStep>, CamelError> {
-        // Dark slice: a `transacted` block never reaches lowering through the
-        // DSL load path — validation rejects it first. A programmatic caller
-        // can still construct `BuilderStep::Transacted` directly, and that
-        // must fail closed with a typed error naming the block datasource:
-        // never silently skip the block, never panic.
+        // Dark slice: route ADDITION is still gated here. A `transacted` block
+        // can now pass load validation (boot registers one manager per catalog
+        // datasource), but the executor wiring that lowers the block into a
+        // running `TransactedSegment` is the family's NEXT slice: there is no
+        // block session to join yet, so a block that reaches lowering fails
+        // closed with the frozen typed join error naming the block datasource.
+        // Never silently skip the block, never panic.
         if let BuilderStep::Transacted { datasource, .. } = &step {
             return Err(CamelError::Transaction(
-                camel_api::TransactionError::ManagerMissing {
+                camel_api::TransactionError::JoinSessionMissing {
                     datasource: datasource.clone(),
                 },
             ));
@@ -1631,13 +1633,13 @@ mod transacted_lowering_tests {
         }
     }
 
-    /// Dark slice: the DSL load path is validated before lowering, so a
-    /// `Transacted` block can only arrive here when a programmatic caller
-    /// builds the variant directly. That path must fail closed with the typed
-    /// `ManagerMissing` error naming the block datasource — never skip the
-    /// block and never panic.
+    /// Dark slice: a `Transacted` block with a REGISTERED manager still has no
+    /// block session at lowering, so the route-add backstop fails closed with
+    /// the frozen typed join error naming the block datasource — never skip
+    /// the block and never panic. (The load walk resolves the manager; the
+    /// session is the executor slice's job.)
     #[test]
-    fn programmatic_transacted_fails_closed() {
+    fn registered_manager_dark_gate_no_block_compiles() {
         let producer_ctx = ProducerContext::default();
         let languages: SharedLanguageRegistry = Arc::new(Mutex::new(HashMap::new()));
         let beans = Arc::new(Mutex::new(BeanRegistry::new()));
@@ -1664,13 +1666,15 @@ mod transacted_lowering_tests {
                 0,
                 &ctx,
             )
-            .expect_err("a transacted block must not lower in slice 1");
+            .expect_err("a transacted block must not compile without a block session");
 
         match err {
-            CamelError::Transaction(camel_api::TransactionError::ManagerMissing { datasource }) => {
+            CamelError::Transaction(camel_api::TransactionError::JoinSessionMissing {
+                datasource,
+            }) => {
                 assert_eq!(datasource, "pg");
             }
-            other => panic!("expected Transaction::ManagerMissing, got {other:?}"),
+            other => panic!("expected Transaction::JoinSessionMissing, got {other:?}"),
         }
     }
 }

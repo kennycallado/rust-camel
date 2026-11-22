@@ -439,6 +439,7 @@ fn build_test_deps_no_execution() -> CommandDeps {
         execution: None,
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     }
 }
 
@@ -455,7 +456,7 @@ fn empty_transaction_registry() -> Arc<crate::TransactionManagerRegistry> {
 /// path for blocks is exercised end to end through `handle_register` by
 /// `canonical_runtime_registration_rejects_block`.
 fn convert_step(step: camel_api::runtime::CanonicalStepSpec) -> Result<BuilderStep, CamelError> {
-    canonical_step_to_builder_step(step, &crate::TransactionManagerRegistry::new())
+    canonical_step_to_builder_step_at(step, &crate::TransactionManagerRegistry::new(), None, 0)
 }
 
 fn build_test_deps_with_execution(execution: Arc<dyn RuntimeExecutionPort>) -> CommandDeps {
@@ -467,6 +468,7 @@ fn build_test_deps_with_execution(execution: Arc<dyn RuntimeExecutionPort>) -> C
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     }
 }
 
@@ -484,6 +486,7 @@ fn build_test_deps_with_failing_repo(execution: Arc<TrackingExecutionPort>) -> C
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     }
 }
 
@@ -580,6 +583,7 @@ async fn recovered_route_is_adopted_on_declarative_reregister() {
         execution: None,
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     // Declarative boot re-registers the same route_id from the same config.
@@ -980,7 +984,8 @@ fn canonical_route_conversion_with_circuit_breaker() {
     };
 
     let route =
-        canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new()).unwrap();
+        canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new(), None)
+            .unwrap();
     assert_eq!(route.route_id(), "route-x");
     assert_eq!(route.from_uri(), "timer:tick");
 }
@@ -1007,7 +1012,8 @@ fn canonical_route_conversion_threads_circuit_breaker_fallback() {
     };
 
     let route =
-        canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new()).unwrap();
+        canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new(), None)
+            .unwrap();
     assert!(route.circuit_breaker_config().is_some());
     assert_eq!(route.circuit_breaker_fallback.len(), 1);
     assert!(matches!(
@@ -1042,13 +1048,283 @@ fn canonical_route_conversion_rejects_invalid_fallback_step_config() {
         version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
     };
 
-    let err = match canonical_to_route_definition(spec, &crate::TransactionManagerRegistry::new()) {
+    let err = match canonical_to_route_definition(
+        spec,
+        &crate::TransactionManagerRegistry::new(),
+        None,
+    ) {
         Ok(_) => panic!("invalid fallback step config must fail"),
         Err(e) => e,
     };
     let msg = err.to_string();
     assert!(msg.contains("circuit_breaker fallback"), "got: {msg}");
     assert!(msg.contains("cache_peek_stale"), "got: {msg}");
+}
+
+#[test]
+fn cb_fallback_preserves_typed_transaction_error() {
+    use camel_api::runtime::CanonicalTransactedSpec;
+    use camel_api::runtime::{CanonicalCircuitBreakerSpec, CanonicalRouteSpec, CanonicalStepSpec};
+    use camel_api::transaction::TransactionError;
+
+    // A transacted block inside a circuit_breaker fallback must surface the
+    // typed ManagerMissing error — the fallback lowering site must not erase
+    // the variant into `Config`.
+    let spec = CanonicalRouteSpec {
+        route_id: "route-fb-tx".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Stop],
+        circuit_breaker: Some(CanonicalCircuitBreakerSpec {
+            failure_threshold: 3,
+            open_duration_ms: 500,
+            fallback: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+                datasource: "pg".into(),
+                steps: vec![CanonicalStepSpec::To {
+                    uri: "sql:select 1?datasource=pg".into(),
+                }],
+            })],
+        }),
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let err = match canonical_to_route_definition(
+        spec,
+        &crate::TransactionManagerRegistry::new(),
+        None,
+    ) {
+        Ok(_) => panic!("fallback transacted block with no manager must fail"),
+        Err(e) => e,
+    };
+
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::ManagerMissing { datasource })
+                if datasource == "pg"
+        ),
+        "expected typed ManagerMissing('pg'), got {err:?}"
+    );
+}
+
+/// Test-only manager for the canonical fan-in fixtures (sqltrans-exec step 3).
+/// The walk never opens a session; only registry resolution observes it.
+struct WalkSeamManager {
+    datasource: &'static str,
+}
+
+impl camel_api::transaction::TransactionManager for WalkSeamManager {
+    fn datasource(&self) -> &str {
+        self.datasource
+    }
+
+    fn open_session(&self) -> camel_api::transaction::OpenSessionFuture<'_> {
+        panic!("the load walk must never open a transaction session");
+    }
+
+    fn acquire_deadline(&self) -> Duration {
+        Duration::from_secs(1)
+    }
+}
+
+/// Registry resolving only `pg`, mirroring a future populated
+/// `CommandDeps.transaction_registry` (step 4 adds the registration entry
+/// point; the walk contract is exercised here through the same lookup).
+fn registry_with_pg() -> Arc<crate::TransactionManagerRegistry> {
+    let registry = crate::TransactionManagerRegistry::new();
+    let manager: Arc<dyn camel_api::transaction::TransactionManager> =
+        Arc::new(WalkSeamManager { datasource: "pg" });
+    registry.register("pg", manager).expect("fresh registry");
+    Arc::new(registry)
+}
+
+#[test]
+fn canonical_fan_in_rejects_transaction_control_sql() {
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, CanonicalTransactedSpec};
+    use camel_api::transaction::TransactionError;
+
+    // The canonical lowering arm runs the ONE load walk with the
+    // registry-backed resolver: a joined sql step issuing COMMIT is rejected
+    // with TransactionControlSql even though the manager resolves.
+    let spec = CanonicalRouteSpec {
+        route_id: "route-tx-control".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+            datasource: "pg".into(),
+            steps: vec![CanonicalStepSpec::To {
+                uri: "sql:update t set a=1; COMMIT?datasource=pg".into(),
+            }],
+        })],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let err = match canonical_to_route_definition(spec, &registry_with_pg(), None) {
+        Ok(_) => panic!("control SQL in a joined step must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::TransactionControlSql { step, statement })
+                if step == "sql:update t set a=1; COMMIT?datasource=pg" && statement == "COMMIT"
+        ),
+        "expected TransactionControlSql naming step + statement, got {err:?}"
+    );
+}
+
+#[test]
+fn canonical_fan_in_nested_block_reports_nested_not_manager_missing() {
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, CanonicalTransactedSpec};
+    use camel_api::transaction::TransactionError;
+
+    // R3-2 precedence proof: with the OUTER datasource's manager registered,
+    // a nested canonical block must surface as `NestedBlock` at the outermost
+    // walk — never as an inner `ManagerMissing` fired before the structural
+    // check.
+    let spec = CanonicalRouteSpec {
+        route_id: "route-tx-nested".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+            datasource: "pg".into(),
+            steps: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+                datasource: "audit".into(),
+                steps: vec![CanonicalStepSpec::To {
+                    uri: "sql:select 1?datasource=audit".into(),
+                }],
+            })],
+        })],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let err = match canonical_to_route_definition(spec, &registry_with_pg(), None) {
+        Ok(_) => panic!("a nested transacted block must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::NestedBlock { inner })
+                if inner == "audit"
+        ),
+        "expected NestedBlock naming the inner datasource, got {err:?}"
+    );
+}
+
+#[test]
+fn registered_manager_and_catalog_url_pass_the_walk() {
+    use camel_api::datasource::{DatasourceCatalog, DatasourceConfig, GetPoolFuture};
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, CanonicalTransactedSpec};
+
+    // The URL seam went live at the canonical boundary: a registered manager
+    // plus a catalog-supplied postgres URL passes the walk, so the block is
+    // lowered (and the route-add backstop is the only remaining gate).
+    struct UrlSeamCatalog {
+        db_url: &'static str,
+    }
+    impl DatasourceCatalog for UrlSeamCatalog {
+        fn get_config(&self, _name: &str) -> Option<DatasourceConfig> {
+            Some(DatasourceConfig {
+                db_url: self.db_url.to_string(),
+                provider: Some("sqlx".to_string()),
+                max_connections: Some(5),
+                min_connections: Some(1),
+                idle_timeout_secs: None,
+                max_lifetime_secs: None,
+                ssl_mode: None,
+                ssl_root_cert: None,
+                ssl_cert: None,
+                ssl_key: None,
+                extra: std::collections::HashMap::new(),
+            })
+        }
+        fn get_pool<'a>(&'a self, _name: &'a str) -> GetPoolFuture<'a> {
+            Box::pin(async { Err(CamelError::Config("test catalog serves no pool".into())) })
+        }
+        fn register_factory(
+            &self,
+            _kind: &str,
+            _factory: Arc<dyn camel_api::datasource::PoolFactory>,
+        ) -> Result<(), CamelError> {
+            Ok(())
+        }
+    }
+
+    let catalog = UrlSeamCatalog {
+        db_url: "postgres://camel:camel@127.0.0.1:5432/camel",
+    };
+    let spec = CanonicalRouteSpec {
+        route_id: "route-tx-url".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+            datasource: "pg".into(),
+            steps: vec![CanonicalStepSpec::To {
+                uri: "sql:select 1?datasource=pg".into(),
+            }],
+        })],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let definition = canonical_to_route_definition(spec, &registry_with_pg(), Some(&catalog))
+        .expect("a registered manager with a postgres URL must pass the walk");
+    assert!(
+        matches!(
+            definition.steps(),
+            [BuilderStep::Transacted { datasource, .. }] if datasource == "pg"
+        ),
+        "the block must lower to the dark BuilderStep::Transacted"
+    );
+}
+
+#[test]
+fn registered_manager_without_catalog_names_datasource_in_dialect_error() {
+    use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec, CanonicalTransactedSpec};
+    use camel_api::transaction::TransactionError;
+
+    // Probe R2-3 fallback: a resolved manager whose URL cannot be resolved
+    // (no catalog installed) fails closed with `DialectUnprovable` naming the
+    // DATASOURCE in the scheme field (no scheme exists to name).
+    let spec = CanonicalRouteSpec {
+        route_id: "route-tx-no-url".into(),
+        from: "timer:tick".into(),
+        steps: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+            datasource: "pg".into(),
+            steps: vec![CanonicalStepSpec::To {
+                uri: "sql:select 1?datasource=pg".into(),
+            }],
+        })],
+        circuit_breaker: None,
+        auto_startup: None,
+        startup_order: None,
+        concurrency: None,
+        version: camel_api::runtime::CANONICAL_CONTRACT_VERSION,
+    };
+
+    let err = match canonical_to_route_definition(spec, &registry_with_pg(), None) {
+        Ok(_) => panic!("an absent URL source must fail the dialect stage"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::DialectUnprovable { scheme })
+                if scheme == "pg"
+        ),
+        "expected DialectUnprovable naming the datasource, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -1206,6 +1482,7 @@ async fn projection_error_on_start_phase1_is_not_swallowed() {
         execution: None,
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
     let def = RouteDefinition::new("timer:test", vec![]).with_route_id("route-proj-fail-p1");
     handle_register_internal(&working_deps, def).await.unwrap();
@@ -1222,6 +1499,7 @@ async fn projection_error_on_start_phase1_is_not_swallowed() {
         execution: None,
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     // Start the route — projection error should propagate, not be swallowed
@@ -1258,6 +1536,7 @@ async fn two_phase_start_happy_path() {
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     // Register a route
@@ -1301,6 +1580,7 @@ async fn two_phase_start_compensation_on_runtime_failure() {
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     // Register a route
@@ -1340,6 +1620,7 @@ async fn two_phase_start_idempotent_re_start() {
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     // Register a route
@@ -1394,6 +1675,7 @@ async fn handle_register_compensates_to_failed_on_runtime_failure() {
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
@@ -1444,6 +1726,7 @@ async fn registration_failure_has_no_duplicated_prefix() {
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
@@ -1502,6 +1785,7 @@ async fn registration_error_keeps_the_original_cause() {
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
 
     use camel_api::runtime::{CanonicalRouteSpec, CanonicalStepSpec};
@@ -1781,6 +2065,7 @@ async fn build_phase2a_deps(
         execution: Some(execution),
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
     let def = RouteDefinition::new("timer:test", vec![]).with_route_id(route_id);
     handle_register_internal(&deps, def).await.unwrap();
@@ -1913,6 +2198,7 @@ async fn build_phase2_resume_deps(
         execution: None,
         health_registry: None,
         transaction_registry: empty_transaction_registry(),
+        datasource_catalog: None,
     };
     let def = RouteDefinition::new("timer:test", vec![]).with_route_id(route_id);
     handle_register_internal(&deps, def).await.unwrap();

@@ -23,9 +23,14 @@
 //!    unnamed rule is unconditional, not `db_url`-specific: a bare
 //!    `sql:select 1`, an inline `db_url` step and a mangled query whose
 //!    parameters cannot be recovered all fail closed rather than fall through
-//!    to an implicit datasource;
-//! 5. manager resolution — the caller-supplied resolver decides whether the
-//!    block datasource has a `TransactionManager` (`ManagerMissing` otherwise).
+//!    to an implicit datasource.
+//!
+//! Manager resolution is NOT a gate check: it runs as the tail of the ONE
+//! lowering walk (`camel_core::transacted_walk::walk_transacted_block_deferred`,
+//! which takes the resolver), after the per-arm SQL checks — the frozen walk
+//! precedence (per-arm BEFORE manager). Keeping resolution in this AST gate
+//! instead would let `ManagerMissing` (always-absent resolver in production)
+//! mask a per-arm rejection of the same block.
 //!
 //! Scope of the walk: [`validate_transacted_blocks`] inspects the whole
 //! declarative route, not only `route.steps`. Every
@@ -49,10 +54,8 @@
 //! `&`/`=` scan so a malformed query can never hide a sql step from a
 //! fail-closed check.
 
-use std::sync::Arc;
-
 use camel_api::CamelError;
-use camel_api::transaction::{TransactionError, TransactionManager};
+use camel_api::transaction::TransactionError;
 
 use crate::model::{DeclarativeRoute, DeclarativeStep, TransactedStepDef};
 
@@ -128,45 +131,36 @@ pub fn sql_step_facts(uri: &str) -> Option<SqlStepFacts> {
 /// not just the first. The walk covers the route body, every
 /// `error_handler.on_exceptions[].steps` clause and the
 /// `circuit_breaker.fallback` body, so a block cannot hide in a child pipeline
-/// of the handler machinery. `resolve_manager` is the slice-2 seam: it answers
-/// "is a [`TransactionManager`] registered for this datasource name?" and is
-/// consulted only after all structural checks of a block have passed.
-pub fn validate_transacted_blocks(
-    route: &DeclarativeRoute,
-    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn TransactionManager>>,
-) -> Result<(), CamelError> {
-    validate_transacted_steps(&route.steps, resolve_manager)?;
+/// of the handler machinery. Manager resolution is not part of this gate: it
+/// runs as the lowering walk's tail (per-arm BEFORE manager — the frozen
+/// precedence).
+pub fn validate_transacted_blocks(route: &DeclarativeRoute) -> Result<(), CamelError> {
+    validate_transacted_steps(&route.steps)?;
     if let Some(error_handler) = &route.error_handler {
         for clause in error_handler.on_exceptions.iter().flatten() {
-            validate_transacted_steps(&clause.steps, resolve_manager)?;
+            validate_transacted_steps(&clause.steps)?;
         }
     }
     if let Some(circuit_breaker) = &route.circuit_breaker {
-        validate_transacted_steps(&circuit_breaker.fallback, resolve_manager)?;
+        validate_transacted_steps(&circuit_breaker.fallback)?;
     }
     Ok(())
 }
 
 /// Validate every `transacted:` block reachable from one step sequence.
-fn validate_transacted_steps(
-    steps: &[DeclarativeStep],
-    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn TransactionManager>>,
-) -> Result<(), CamelError> {
+fn validate_transacted_steps(steps: &[DeclarativeStep]) -> Result<(), CamelError> {
     for step in steps {
         if let DeclarativeStep::Transacted(block) = step {
-            validate_block(block, resolve_manager)?;
+            validate_block(block)?;
         }
         for child in child_steps(step) {
-            validate_transacted_steps(child, resolve_manager)?;
+            validate_transacted_steps(child)?;
         }
     }
     Ok(())
 }
 
-fn validate_block(
-    block: &TransactedStepDef,
-    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn TransactionManager>>,
-) -> Result<(), CamelError> {
+fn validate_block(block: &TransactedStepDef) -> Result<(), CamelError> {
     let datasource = block.datasource.as_str();
 
     // 1. Nesting: a block inside a block is rejected first, at the innermost
@@ -225,15 +219,7 @@ fn validate_block(
             )),
         },
         None => Ok(()),
-    })?;
-
-    // 5. Manager resolution — the slice-2 seam, consulted last.
-    match resolve_manager(datasource) {
-        Some(_) => Ok(()),
-        None => Err(CamelError::Transaction(TransactionError::ManagerMissing {
-            datasource: datasource.to_string(),
-        })),
-    }
+    })
 }
 
 /// Structural checks for one step, using syntactic joined-sql presence.
@@ -421,33 +407,6 @@ mod tests {
         SplitStepDef, ToStepDef, WireTapStepDef,
     };
 
-    use camel_api::transaction::OpenSessionFuture;
-    use std::time::Duration;
-
-    struct FakeManager {
-        datasource: String,
-    }
-
-    impl TransactionManager for FakeManager {
-        fn datasource(&self) -> &str {
-            &self.datasource
-        }
-
-        fn open_session(&self) -> OpenSessionFuture<'_> {
-            panic!("validation must never open a transaction session");
-        }
-
-        fn acquire_deadline(&self) -> Duration {
-            Duration::from_secs(1)
-        }
-    }
-
-    fn fake_manager(datasource: &str) -> Arc<dyn TransactionManager> {
-        Arc::new(FakeManager {
-            datasource: datasource.to_string(),
-        })
-    }
-
     fn sql(uri: &str) -> DeclarativeStep {
         DeclarativeStep::To(ToStepDef::new(uri))
     }
@@ -498,21 +457,14 @@ mod tests {
         }
     }
 
-    fn validate_with_manager(steps: &[DeclarativeStep]) -> Result<(), CamelError> {
-        let manager = fake_manager("pg");
-        validate_transacted_blocks(&route_with_steps(steps.to_vec()), &|_| {
-            Some(manager.clone())
-        })
-    }
-
-    fn validate_without_manager(steps: &[DeclarativeStep]) -> Result<(), CamelError> {
-        validate_transacted_blocks(&route_with_steps(steps.to_vec()), &|_| None)
+    fn validate(steps: &[DeclarativeStep]) -> Result<(), CamelError> {
+        validate_transacted_blocks(&route_with_steps(steps.to_vec()))
     }
 
     /// Unwraps the typed transaction error so tests can assert the exact
     /// variant instead of a rendered message.
     fn transaction_error(steps: &[DeclarativeStep]) -> TransactionError {
-        match validate_with_manager(steps) {
+        match validate(steps) {
             Ok(()) => panic!("expected a typed transaction error"),
             Err(CamelError::Transaction(error)) => error,
             Err(other) => panic!("expected CamelError::Transaction, got {other:?}"),
@@ -521,11 +473,8 @@ mod tests {
 
     /// Same as [`transaction_error`], for route-level tests that attach a block
     /// outside `route.steps`.
-    fn route_transaction_error(
-        route: &DeclarativeRoute,
-        manager: Option<Arc<dyn TransactionManager>>,
-    ) -> TransactionError {
-        match validate_transacted_blocks(route, &|_| manager.clone()) {
+    fn route_transaction_error(route: &DeclarativeRoute) -> TransactionError {
+        match validate_transacted_blocks(route) {
             Ok(()) => panic!("expected a typed transaction error"),
             Err(CamelError::Transaction(error)) => error,
             Err(other) => panic!("expected CamelError::Transaction, got {other:?}"),
@@ -554,7 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn validation_passes_clean_block_then_manager_missing() {
+    fn validation_passes_clean_block_regardless_of_manager_presence() {
+        // Manager resolution is NOT a gate check: a structurally clean block
+        // passes the gate with or without a registered manager — the
+        // lowering walk's tail owns `ManagerMissing` (per-arm BEFORE
+        // manager, one visitor).
         let steps = vec![block(
             "pg",
             vec![
@@ -563,19 +516,10 @@ mod tests {
             ],
         )];
 
-        match validate_without_manager(&steps) {
-            Err(CamelError::Transaction(TransactionError::ManagerMissing { datasource })) => {
-                assert_eq!(datasource, "pg");
-            }
-            other => panic!("expected ManagerMissing, got {other:?}"),
-        }
-
-        let manager = fake_manager("pg");
         assert!(
-            validate_with_manager(&steps).is_ok(),
-            "a registered manager must let the clean block pass"
+            validate(&steps).is_ok(),
+            "the gate judges structure only; manager resolution happens at the walk tail"
         );
-        assert_eq!(manager.datasource(), "pg");
     }
 
     #[test]
@@ -645,7 +589,7 @@ mod tests {
         )];
 
         assert!(
-            validate_with_manager(&steps).is_ok(),
+            validate(&steps).is_ok(),
             "a sequential split keeps the joined sql step in the block transaction"
         );
     }
@@ -727,7 +671,7 @@ mod tests {
         let steps = vec![block("pg", vec![sql("kafka:orders")])];
 
         assert!(
-            validate_with_manager(&steps).is_ok(),
+            validate(&steps).is_ok(),
             "no joined sql step means the async handoff cannot escape a transaction"
         );
     }
@@ -805,7 +749,7 @@ mod tests {
         });
 
         assert_eq!(
-            route_transaction_error(&route, Some(fake_manager("pg"))),
+            route_transaction_error(&route),
             TransactionError::StreamListInBlock {
                 step: "sql:select 1?datasource=pg&outputType=StreamList".to_string(),
                 datasource: "pg".to_string(),
@@ -823,7 +767,7 @@ mod tests {
         });
 
         assert_eq!(
-            route_transaction_error(&route, Some(fake_manager("pg"))),
+            route_transaction_error(&route),
             TransactionError::ForeignDatasource {
                 step: "sql:select 1?datasource=audit".to_string(),
                 block_datasource: "pg".to_string(),

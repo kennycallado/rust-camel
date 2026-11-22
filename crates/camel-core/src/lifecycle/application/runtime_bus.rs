@@ -45,10 +45,18 @@ pub struct RuntimeBus {
     metrics: Option<Arc<dyn MetricsCollector>>,
     /// Transaction-manager registry handed to canonical route lowering.
     ///
-    /// Dark in slice 1 — stays empty, so canonical `transacted` blocks fail
-    /// closed at registration. Slice 2 populates it from the datasource
-    /// components (rc-qv2iz.6).
+    /// Bundle boot registers one manager per catalog datasource (sqltrans-exec
+    /// step 9). Tests and embedded callers that register nothing keep the
+    /// canonical `transacted` block failing closed at load with
+    /// `ManagerMissing`.
     transaction_registry: Arc<crate::TransactionManagerRegistry>,
+    /// Boot's single datasource catalog, installed by the bundle cascade.
+    ///
+    /// Canonical lowering resolves a block datasource's URL through this
+    /// catalog so the dialect stage can run. Before boot installs it, the
+    /// lowering seam keeps the always-absent URL resolver and fails closed
+    /// with `DialectUnprovable` naming the datasource.
+    datasource_catalog: OnceCell<Arc<dyn camel_api::datasource::DatasourceCatalog>>,
     journal_recovered_once: OnceCell<u64>,
 }
 
@@ -69,6 +77,7 @@ impl RuntimeBus {
             health_registry: None,
             metrics: None,
             transaction_registry: Arc::new(crate::TransactionManagerRegistry::new()),
+            datasource_catalog: OnceCell::new(),
             journal_recovered_once: OnceCell::new(),
         }
     }
@@ -97,6 +106,40 @@ impl RuntimeBus {
     pub fn with_metrics(mut self, metrics: Arc<dyn MetricsCollector>) -> Self {
         self.metrics = Some(metrics);
         self
+    }
+
+    /// Register the [`camel_api::TransactionManager`] for `datasource`.
+    ///
+    /// Duplicate-rejecting: the existing manager is preserved and
+    /// [`crate::RegistryError::AlreadyRegistered`] is returned. Bundle boot
+    /// calls this once per catalog datasource; a datasource without a manager
+    /// still fails load validation closed with `ManagerMissing`.
+    pub fn register_transaction_manager(
+        &self,
+        datasource: impl Into<String>,
+        manager: Arc<dyn camel_api::TransactionManager>,
+    ) -> Result<(), crate::RegistryError> {
+        self.transaction_registry.register(datasource, manager)
+    }
+
+    /// Read-only handle to the transaction-manager registry the canonical
+    /// route lowering resolves against.
+    pub(crate) fn transaction_registry(&self) -> Arc<crate::TransactionManagerRegistry> {
+        Arc::clone(&self.transaction_registry)
+    }
+
+    /// Install the boot's datasource catalog for URL resolution.
+    ///
+    /// The bundle cascade installs its single catalog after creating it, so a
+    /// canonical `transacted` block can resolve its datasource URL by load
+    /// time. Installing twice is rejected: one boot owns one catalog.
+    pub(crate) fn install_datasource_catalog(
+        &self,
+        catalog: Arc<dyn camel_api::datasource::DatasourceCatalog>,
+    ) -> Result<(), CamelError> {
+        self.datasource_catalog.set(catalog).map_err(|_| {
+            CamelError::Config("datasource catalog already installed on this runtime".into())
+        })
     }
 
     pub fn repo(&self) -> &Arc<dyn RouteRepositoryPort> {
@@ -158,6 +201,7 @@ impl RuntimeBus {
             execution: self.execution.clone(),
             health_registry: self.health_registry.clone(),
             transaction_registry: Arc::clone(&self.transaction_registry),
+            datasource_catalog: self.datasource_catalog.get().cloned(),
         }
     }
 
@@ -865,5 +909,65 @@ mod tests {
             RuntimeQueryResult::RouteStatus { status, .. } => assert_eq!(status, "Failed"),
             other => panic!("unexpected query result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn runtime_bus_registers_and_resolves_manager() {
+        use crate::resolve_transaction_manager;
+        use crate::test_support::FakeTransactionManager;
+
+        let bus = build_test_runtime_bus();
+        let manager: Arc<dyn camel_api::TransactionManager> =
+            Arc::new(FakeTransactionManager::new("pg"));
+
+        bus.register_transaction_manager("pg", Arc::clone(&manager))
+            .expect("a fresh bus must accept the first registration");
+
+        let registry = bus.transaction_registry();
+        let resolved =
+            resolve_transaction_manager(&registry, "pg").expect("registered manager must resolve");
+        assert!(
+            Arc::ptr_eq(&manager, &resolved),
+            "resolution must hand back the SAME Arc that was registered"
+        );
+
+        // Duplicate registration is rejected and preserves the original.
+        let duplicate: Arc<dyn camel_api::TransactionManager> =
+            Arc::new(FakeTransactionManager::new("pg"));
+        let err = bus
+            .register_transaction_manager("pg", duplicate)
+            .expect_err("duplicate registration must be rejected");
+        assert!(
+            matches!(&err, crate::RegistryError::AlreadyRegistered(name) if name == "pg"),
+            "expected AlreadyRegistered('pg'), got {err:?}"
+        );
+        let still = resolve_transaction_manager(&registry, "pg").expect("original must survive");
+        assert!(
+            Arc::ptr_eq(&manager, &still),
+            "a rejected duplicate must not replace the registered manager"
+        );
+    }
+
+    #[test]
+    fn unregistered_datasource_still_fails_closed() {
+        use crate::resolve_transaction_manager;
+
+        let bus = build_test_runtime_bus();
+        let registry = bus.transaction_registry();
+        assert!(
+            registry.is_empty(),
+            "a fresh bus must start with no transaction managers"
+        );
+
+        let err = resolve_transaction_manager(&registry, "audit")
+            .err()
+            .expect("an empty registry must not resolve a manager");
+        assert!(
+            matches!(
+                &err,
+                camel_api::TransactionError::ManagerMissing { datasource } if datasource == "audit"
+            ),
+            "expected ManagerMissing('audit'), got {err:?}"
+        );
     }
 }

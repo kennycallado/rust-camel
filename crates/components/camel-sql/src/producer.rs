@@ -8,7 +8,9 @@ use std::time::Duration;
 use bytes::Bytes;
 use camel_api::datasource::DatasourceCatalog;
 use serde_json::json;
+use sqlx::Acquire;
 use sqlx::Any;
+use sqlx::AnyConnection;
 use sqlx::AnyPool;
 use sqlx::any::AnyRow;
 use sqlx::pool::PoolConnection;
@@ -18,9 +20,7 @@ use tower::Service;
 use tracing::{debug, error, info, warn};
 
 use crate::bind_kinds::{
-    BindMode, BindPlan, BindTarget, ItemBindSource, ProbeOutcome, bind_batch_item,
-    bind_single_item, bind_target_from_any_kind, group_rows_by_sql, named_kinds_agree,
-    plan_batch_items, plan_binds, probe_batch_shapes, readback_kinds, scan_bind_targets,
+    BatchPlan, BindMode, BindPlan, bind_batch_item, bind_single_item, plan_batch_binds, plan_binds,
 };
 use crate::config::{SqlEndpointConfig, SqlOutputType, enrich_db_url_with_ssl, redact_db_url};
 use crate::headers;
@@ -260,7 +260,7 @@ impl Service<Exchange> for SqlProducer {
             // Execute based on mode
             if config.batch {
                 // Batch mode: execute_batch handles its own template parsing per item
-                execute_batch(pool.as_ref(), &config, &mut exchange).await?;
+                run_batch(pool.as_ref(), &config, &mut exchange).await?;
             } else if config.use_placeholder {
                 // Placeholder processing enabled (default): parse template, resolve params, apply header override
                 let template = parse_query_template(&query_str, config.placeholder)?;
@@ -299,9 +299,9 @@ impl Service<Exchange> for SqlProducer {
                 );
 
                 if is_select_query(&prepared.sql) {
-                    execute_select(pool.as_ref(), &prepared, &config, &mut exchange).await?;
+                    run_select(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 } else {
-                    execute_modify(pool.as_ref(), &prepared, &config, &mut exchange).await?;
+                    run_modify(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 }
             } else {
                 // use_placeholder=false: execute query as-is without template parsing
@@ -312,9 +312,9 @@ impl Service<Exchange> for SqlProducer {
                 };
 
                 if is_select_query(&prepared.sql) {
-                    execute_select(pool.as_ref(), &prepared, &config, &mut exchange).await?;
+                    run_select(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 } else {
-                    execute_modify(pool.as_ref(), &prepared, &config, &mut exchange).await?;
+                    run_modify(pool.as_ref(), &prepared, &config, &mut exchange).await?;
                 }
             }
 
@@ -419,44 +419,71 @@ pub(crate) async fn release_after_error(
     original
 }
 
-/// Executes one single-mode SELECT on a pooled connection, planning the
-/// binds first (bd rc-mn139). Statements without bindings plan to the
-/// default persistent path with no probe and no binds.
-async fn fetch_single_rows(
-    pool: &AnyPool,
-    prepared: &PreparedQuery,
-) -> Result<Vec<AnyRow>, CamelError> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+/// Borrowed connection surface for one statement run.
+///
+/// The producer acquires a pooled connection for the statement and lends it
+/// through this handle; a joined step lends its session's guarded connection
+/// the same way. The execute fns never acquire or release: the caller owns
+/// the connection and keeps `release_after_error` on its error path, so a
+/// failed statement still rolls back before the connection is re-pooled or
+/// discarded.
+pub(crate) struct DbHandle<'a> {
+    conn: &'a mut AnyConnection,
+}
 
-    let fetched = async {
-        let plan = plan_binds(
-            &mut conn,
-            &prepared.sql,
-            &[prepared.bindings.as_slice()],
-            BindMode::Single,
-        )
-        .await?;
-        let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
-        let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
-        query
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| fetch_error("SQL query failed", e))
+impl<'a> DbHandle<'a> {
+    /// Wraps a borrowed connection for one statement run.
+    pub(crate) fn new(conn: &'a mut AnyConnection) -> Self {
+        Self { conn }
     }
-    .await;
 
-    match fetched {
-        Ok(rows) => Ok(rows),
-        Err(original) => Err(release_after_error(conn, original).await),
+    /// Borrows the connection for one planner or execute call.
+    ///
+    /// Each lend is a reborrow of `&mut self`, so two sequential lends are
+    /// fine and two concurrent ones are a compile error: one statement holds
+    /// the connection at a time.
+    pub(crate) fn lend(&mut self) -> &mut AnyConnection {
+        self.conn
     }
 }
 
-/// Executes a SELECT query and populates the exchange body with results.
-async fn execute_select(
-    pool: &AnyPool,
+/// Acquires one pooled connection for a statement run.
+async fn acquire_connection(pool: &AnyPool) -> Result<PoolConnection<Any>, CamelError> {
+    pool.acquire()
+        .await
+        .map_err(|e| fetch_error("Failed to acquire database connection", e))
+}
+
+/// Executes one single-mode SELECT on the borrowed connection, planning the
+/// binds first (bd rc-mn139). Statements without bindings plan to the
+/// default persistent path with no probe and no binds.
+async fn fetch_single_rows(
+    db: &mut DbHandle<'_>,
+    prepared: &PreparedQuery,
+) -> Result<Vec<AnyRow>, CamelError> {
+    let plan = plan_binds(
+        db.lend(),
+        &prepared.sql,
+        &[prepared.bindings.as_slice()],
+        BindMode::Single,
+    )
+    .await?;
+    let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+    let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+    query
+        .fetch_all(db.lend())
+        .await
+        .map_err(|e| fetch_error("SQL query failed", e))
+}
+
+/// Executes a SELECT query on the borrowed connection and populates the
+/// exchange body with results (SelectOne / SelectList).
+///
+/// StreamList never runs on a borrowed connection: it keeps deferred pooled
+/// acquisition (`execute_stream_list`), and StreamList production inside a
+/// block is rejected at load.
+async fn execute_select_borrowed(
+    db: &mut DbHandle<'_>,
     prepared: &PreparedQuery,
     config: &SqlEndpointConfig,
     exchange: &mut Exchange,
@@ -464,7 +491,7 @@ async fn execute_select(
     match config.output_type {
         SqlOutputType::SelectOne => {
             // fetch_all and take first row
-            let rows = fetch_single_rows(pool, prepared).await?;
+            let rows = fetch_single_rows(db, prepared).await?;
 
             let count = rows.len();
             debug!(rows = count, "SQL query completed");
@@ -485,7 +512,7 @@ async fn execute_select(
         }
         SqlOutputType::SelectList => {
             // fetch_all for list output
-            let rows = fetch_single_rows(pool, prepared).await?;
+            let rows = fetch_single_rows(db, prepared).await?;
 
             let count = rows.len();
             debug!(rows = count, "SQL query completed");
@@ -501,138 +528,142 @@ async fn execute_select(
                 .set_header(headers::ROW_COUNT, serde_json::json!(count));
         }
         SqlOutputType::StreamList => {
-            // Use fetch() for true streaming - avoids loading all rows into memory
-            use futures::TryStreamExt;
-
-            let pool_clone = pool.clone();
-            let sql_str = prepared.sql.clone();
-            let bindings = prepared.bindings.clone();
-
-            // Build the stream that reads rows on demand and serializes to NDJSON bytes
-            let byte_stream = async_stream::try_stream! {
-                let mut conn = pool_clone
-                    .acquire()
-                    .await
-                    .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
-
-                // Plan and execute against the SAME pooled connection so
-                // normalization targets the OIDs of the statement that
-                // actually runs (bd rc-mn139).
-                let plan = match plan_binds(
-                    &mut conn,
-                    &sql_str,
-                    &[bindings.as_slice()],
-                    BindMode::Single,
-                )
-                .await
-                {
-                    Ok(plan) => plan,
-                    Err(original) => {
-                        // `try_stream!` turns `?` into "yield the error and
-                        // return", but the compiler still sees the `Ok` arm
-                        // as reachable; that arm must diverge for the
-                        // connection move to be accepted.
-                        Err::<BindPlan, CamelError>(release_after_error(conn, original).await)?;
-                        unreachable!("`release_after_error` always propagates the error")
-                    }
-                };
-                let q = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str()))
-                    .persistent(plan.persistent);
-                let q = match bind_single_item(q, &bindings, &plan.targets) {
-                    Ok(q) => q,
-                    Err(original) => {
-                        Err::<_, CamelError>(release_after_error(conn, original).await)?;
-                        unreachable!("`release_after_error` always propagates the error")
-                    }
-                };
-                let mut rows = q.fetch(&mut *conn);
-                let mut failure: Option<CamelError> = None;
-                loop {
-                    let row = match rows.try_next().await {
-                        Ok(Some(row)) => row,
-                        Ok(None) => break,
-                        Err(e) => {
-                            failure = Some(fetch_error("Query execution failed", e));
-                            break;
-                        }
-                    };
-                    let json_val = match row_to_json(&row) {
-                        Ok(json_val) => json_val,
-                        Err(original) => {
-                            failure = Some(original);
-                            break;
-                        }
-                    };
-                    let mut bytes = match serde_json::to_vec(&json_val) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            failure = Some(CamelError::ProcessorError(format!(
-                                "JSON serialization failed: {}",
-                                e
-                            )));
-                            break;
-                        }
-                    };
-                    bytes.push(b'\n');
-                    yield Bytes::from(bytes);
-                }
-                // `rows` borrows the connection: end the borrow before
-                // handing the connection to the rollback.
-                drop(rows);
-                if let Some(original) = failure {
-                    Err::<(), CamelError>(release_after_error(conn, original).await)?;
-                }
-            };
-
-            exchange.input.body = Body::Stream(StreamBody {
-                stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(byte_stream)))),
-                metadata: StreamMetadata {
-                    content_type: Some("application/x-ndjson".to_string()),
-                    size_hint: None,
-                    origin: None,
-                },
-            });
-            debug!("StreamList: created lazy stream (rows fetched on demand)");
-            // Note: ROW_COUNT not set for StreamList since row count is unknown until exhausted
+            return Err(CamelError::ProcessorError(
+                "internal: StreamList keeps deferred pooled acquisition and never runs on a borrowed connection"
+                    .to_string(),
+            ));
         }
     }
 
     Ok(())
 }
 
-/// Executes a modification query (INSERT/UPDATE/DELETE).
-async fn execute_modify(
+/// Executes a StreamList SELECT: the stream acquires its pooled connection
+/// lazily when the exchange body is drained, so no connection is borrowed for
+/// the duration of the route step.
+async fn execute_stream_list(
     pool: &AnyPool,
+    prepared: &PreparedQuery,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    use futures::TryStreamExt;
+
+    let pool_clone = pool.clone();
+    let sql_str = prepared.sql.clone();
+    let bindings = prepared.bindings.clone();
+
+    // Build the stream that reads rows on demand and serializes to NDJSON bytes
+    let byte_stream = async_stream::try_stream! {
+        let mut conn = pool_clone
+            .acquire()
+            .await
+            .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
+
+        // Plan and execute against the SAME pooled connection so
+        // normalization targets the OIDs of the statement that
+        // actually runs (bd rc-mn139).
+        let plan = match plan_binds(
+            &mut conn,
+            &sql_str,
+            &[bindings.as_slice()],
+            BindMode::Single,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(original) => {
+                // `try_stream!` turns `?` into "yield the error and
+                // return", but the compiler still sees the `Ok` arm
+                // as reachable; that arm must diverge for the
+                // connection move to be accepted.
+                Err::<BindPlan, CamelError>(release_after_error(conn, original).await)?;
+                unreachable!("`release_after_error` always propagates the error")
+            }
+        };
+        let q = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str()))
+            .persistent(plan.persistent);
+        let q = match bind_single_item(q, &bindings, &plan.targets) {
+            Ok(q) => q,
+            Err(original) => {
+                Err::<_, CamelError>(release_after_error(conn, original).await)?;
+                unreachable!("`release_after_error` always propagates the error")
+            }
+        };
+        let mut rows = q.fetch(&mut *conn);
+        let mut failure: Option<CamelError> = None;
+        loop {
+            let row = match rows.try_next().await {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(e) => {
+                    failure = Some(fetch_error("Query execution failed", e));
+                    break;
+                }
+            };
+            let json_val = match row_to_json(&row) {
+                Ok(json_val) => json_val,
+                Err(original) => {
+                    failure = Some(original);
+                    break;
+                }
+            };
+            let mut bytes = match serde_json::to_vec(&json_val) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    failure = Some(CamelError::ProcessorError(format!(
+                        "JSON serialization failed: {}",
+                        e
+                    )));
+                    break;
+                }
+            };
+            bytes.push(b'\n');
+            yield Bytes::from(bytes);
+        }
+        // `rows` borrows the connection: end the borrow before
+        // handing the connection to the rollback.
+        drop(rows);
+        if let Some(original) = failure {
+            Err::<(), CamelError>(release_after_error(conn, original).await)?;
+        }
+    };
+
+    exchange.input.body = Body::Stream(StreamBody {
+        stream: Arc::new(tokio::sync::Mutex::new(Some(Box::pin(byte_stream)))),
+        metadata: StreamMetadata {
+            content_type: Some("application/x-ndjson".to_string()),
+            size_hint: None,
+            origin: None,
+        },
+    });
+    debug!("StreamList: created lazy stream (rows fetched on demand)");
+    // Note: ROW_COUNT not set for StreamList since row count is unknown until exhausted
+
+    Ok(())
+}
+
+/// Executes a modification query (INSERT/UPDATE/DELETE) on the borrowed
+/// connection. The caller releases the connection (and rolls back) on every
+/// error returned here.
+async fn execute_modify_borrowed(
+    db: &mut DbHandle<'_>,
     prepared: &PreparedQuery,
     config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
-    let mut conn = pool
-        .acquire()
-        .await
-        .map_err(|e| fetch_error("Failed to acquire database connection", e))?;
-
-    let executed = async {
-        let plan = plan_binds(
-            &mut conn,
-            &prepared.sql,
-            &[prepared.bindings.as_slice()],
-            BindMode::Single,
-        )
-        .await?;
-        let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
-        let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
-        query.execute(&mut *conn).await.map_err(|e| {
-            warn!(error = %e, "SQL query failed");
-            CamelError::ProcessorError(format!("Query execution failed: {}", e))
-        })
-    }
-    .await;
-
-    let result = match executed {
-        Ok(result) => result,
-        Err(original) => return Err(release_after_error(conn, original).await),
-    };
+    let plan = plan_binds(
+        db.lend(),
+        &prepared.sql,
+        &[prepared.bindings.as_slice()],
+        BindMode::Single,
+    )
+    .await?;
+    let query = sqlx::query(sqlx::AssertSqlSafe(plan.sql.as_str())).persistent(plan.persistent);
+    let query = bind_single_item(query, &prepared.bindings, &plan.targets)?;
+    let result = query.execute(db.lend()).await.map_err(|e| {
+        warn!(error = %e, "SQL query failed");
+        CamelError::ProcessorError(format!("Query execution failed: {}", e))
+    })?;
 
     let rows_affected = result.rows_affected();
 
@@ -641,11 +672,10 @@ async fn execute_modify(
         && rows_affected as i64 != expected
     {
         warn!(expected, actual = rows_affected, "Row count mismatch");
-        let err = CamelError::ProcessorError(format!(
+        return Err(CamelError::ProcessorError(format!(
             "Expected {} rows affected, got {}",
             expected, rows_affected
-        ));
-        return Err(release_after_error(conn, err).await);
+        )));
     }
 
     exchange
@@ -663,18 +693,18 @@ async fn execute_modify(
     Ok(())
 }
 
-/// Executes a batch of queries from a JSON array body.
+/// Executes a batch of queries from a JSON array body on the borrowed
+/// connection, inside the batch's own transaction.
 ///
 /// Bind-kind safety (bd rc-fef4z, rc-7e681, rc-0eiqm): sqlx keys its
 /// statement cache by SQL text alone and fixes parameter OIDs at the first
 /// `Parse`, so a position that carries different Rust bind kinds across
-/// items silently reinterprets bits. Every distinct resolved SQL shape is
-/// described once, and every position binds exactly one wire encoding per
-/// statement: the read-back encoding on the named path, otherwise the
-/// shape's described targets over the message-wide scan (float wins) on an
-/// unnamed alias. One ineligible item sends the whole batch to the aliases.
-async fn execute_batch(
-    pool: &AnyPool,
+/// items silently reinterprets bits. Every item is resolved up front, all
+/// planning and the whole-batch/read-back decision go through the shared
+/// `plan_batch_binds` entry point on this in-flight transaction, and
+/// execution follows the returned `BatchPlan`.
+async fn execute_batch_borrowed(
+    db: &mut DbHandle<'_>,
     config: &SqlEndpointConfig,
     exchange: &mut Exchange,
 ) -> Result<(), CamelError> {
@@ -698,7 +728,9 @@ async fn execute_batch(
     // Parse template from config query
     let template = parse_query_template(&config.query, config.placeholder)?;
 
-    // Resolve every item up front so the fallback bind-kind scan sees the
+    // Resolve every item up front: IN-clause expansion rewrites
+    // `in (:list)` into one placeholder per element, so items of one batch
+    // can resolve to different texts and the bind-kind scan must see the
     // whole batch.
     let mut prepared_items = Vec::with_capacity(batch_data.len());
     for (batch_idx, params_array) in batch_data.iter().enumerate() {
@@ -721,108 +753,31 @@ async fn execute_batch(
         )?);
     }
 
-    // Group the resolved SQL texts by shape. IN-clause expansion rewrites
-    // `in (:list)` into one placeholder per element, so items of one batch
-    // can resolve to different texts and every later parameter position
-    // shifts with the list length: metadata is tracked per shape, never per
-    // batch.
-    let sqls: Vec<String> = prepared_items
-        .iter()
-        .map(|prepared| prepared.sql.clone())
-        .collect();
-    let groups = group_rows_by_sql(&sqls);
     let items: Vec<(String, Vec<serde_json::Value>)> = prepared_items
         .iter()
         .map(|prepared| (prepared.sql.clone(), prepared.bindings.clone()))
         .collect();
-    let binding_rows: Vec<&[serde_json::Value]> = prepared_items
-        .iter()
-        .map(|prepared| prepared.bindings.as_slice())
-        .collect();
-    // Scan fallback targets: one bind kind per position across the WHOLE
-    // batch, float wins. The message-wide scan (never a per-shape scan) is
-    // the no-loosening rule: a per-shape scan could turn a typed 2^53
-    // rejection into a silent server-side round.
-    let message_scan = scan_bind_targets(&binding_rows);
 
-    // Fix 2: Batch operations must be wrapped in a transaction
-    let mut tx = pool.begin().await.map_err(|e| {
+    // Fix 2: Batch operations must be wrapped in a transaction. The
+    // transaction lives on the borrowed connection: standalone execution
+    // keeps its own batch transaction, and a joined step will borrow the
+    // session's transaction instead.
+    let mut tx = db.lend().begin().await.map_err(|e| {
         // log-policy: handler-owned
         // (category a: tx begin failure inside producer pipeline)
         warn!(error = %e, "Failed to begin transaction");
         CamelError::ProcessorError(format!("Failed to begin transaction: {}", e))
     })?;
 
-    // Probe every distinct shape once. The FIRST shape's probe selects the
-    // batch mode (today's semantics: the batch loop probed item 0): an
-    // unusable first probe keeps the legacy message-wide scan for the whole
-    // batch, while a usable first probe enters described mode where later
-    // unusable shapes only make their own items ineligible. Each probe runs
-    // on its own alias text: preparing with empty parameter types seeds a
-    // statement-cache entry under the probed text, and for unmapped types
-    // (e.g. NUMERIC) that entry is one no payload can satisfy.
-    let probes = probe_batch_shapes(&mut tx, &groups).await?;
-    let shape_probes: Vec<(String, ProbeOutcome)> = groups
-        .iter()
-        .map(|group| group.sql.clone())
-        .zip(probes)
-        .collect();
-    let plans = plan_batch_items(&shape_probes, &items, &message_scan);
-
-    // Whole-batch rule: every plan, including the named read-backs, is
-    // decided BEFORE item 0 executes, so a mismatch discovered on a later
-    // shape still sends the whole batch to the aliases. One `AliasPlan` item
-    // collapses the batch to alias execution on the precomputed targets;
-    // otherwise every item is `NamedReadBack` and the read-back decides the
-    // named targets, provided it agrees with the shape's probe kinds (a
-    // disagreement means the cached entry was seeded by bind-derived OIDs,
-    // bd rc-0eiqm).
-    let mut alias_whole_batch = plans
-        .iter()
-        .any(|plan| plan.source == ItemBindSource::AliasPlan);
-    let mut named_targets: Vec<Option<Vec<Option<BindTarget>>>> = vec![None; prepared_items.len()];
-    if !alias_whole_batch {
-        for (batch_idx, prepared) in prepared_items.iter().enumerate() {
-            let kinds = shape_probes.iter().find_map(|(sql, probe)| {
-                if sql != &prepared.sql {
-                    return None;
-                }
-                match probe {
-                    ProbeOutcome::Described(kinds) => Some(kinds),
-                    ProbeOutcome::Unusable => None,
-                }
-            });
-            // Unreachable: a `NamedReadBack` plan implies a described probe.
-            let Some(kinds) = kinds else {
-                alias_whole_batch = true;
-                break;
-            };
-            let readback =
-                readback_kinds(&mut tx, &prepared.sql, BindMode::Batch, Some(batch_idx)).await?;
-            let Some(readback) = readback else {
-                // Unusable read-back cannot agree with the probe: the
-                // whole-batch rule sends every item to its precomputed
-                // alias targets (the safe direction - never probe-derived
-                // bytes on the named statement).
-                alias_whole_batch = true;
-                break;
-            };
-            if !named_kinds_agree(kinds, Some(&readback)) {
-                alias_whole_batch = true;
-                break;
-            }
-            let targets = readback
-                .iter()
-                .map(|kind| bind_target_from_any_kind(*kind))
-                .collect();
-            named_targets[batch_idx] = Some(targets);
-        }
-    }
+    // Every plan, including the named read-backs, is decided BEFORE item 0
+    // executes: a mismatch discovered on a later shape still sends the whole
+    // batch to the aliases.
+    let plan = plan_batch_binds(&mut tx, &items).await?;
 
     let mut total_rows_affected: u64 = 0;
 
     for (batch_idx, prepared) in prepared_items.iter().enumerate() {
-        let (mut query, targets) = if alias_whole_batch {
+        let (query, targets) = match &plan {
             // Uncached fallback: execute a semantically identical alias text
             // in its own cache namespace with persistent(false), so every
             // item prepares an unnamed statement whose parameter types
@@ -830,25 +785,20 @@ async fn execute_batch(
             // nothing else uses this namespace, so no incompatible cached
             // entry can be reused. Every item uses its precomputed targets:
             // the whole-batch rule already decided them.
-            let fallback_sql = format!("{} /* batch-bind-kinds-fallback */", prepared.sql);
-            let query = sqlx::query(sqlx::AssertSqlSafe(fallback_sql)).persistent(false);
-            (query, plans[batch_idx].alias_targets.clone())
-        } else {
+            BatchPlan::Aliased { targets } => {
+                let fallback_sql = format!("{} /* batch-bind-kinds-fallback */", prepared.sql);
+                let query = sqlx::query(sqlx::AssertSqlSafe(fallback_sql)).persistent(false);
+                (query, targets[batch_idx].clone())
+            }
             // Named: the read-back agreed with the shape's probe kinds, so
             // the item binds against the statement that actually executes.
-            let query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.clone()));
-            // Unreachable without `alias_whole_batch`: the decision loop
-            // fills every slot for named items. Fail loudly rather than
-            // degrade to raw JSON binds on the named statement.
-            let Some(targets) = named_targets[batch_idx].clone() else {
-                return Err(CamelError::ProcessorError(
-                    "internal: named batch item without an agreed read-back".to_string(),
-                ));
-            };
-            (query, targets)
+            BatchPlan::Named { per_item_targets } => {
+                let query = sqlx::query(sqlx::AssertSqlSafe(prepared.sql.clone()));
+                (query, per_item_targets[batch_idx].clone())
+            }
         };
 
-        query = bind_batch_item(query, &prepared.bindings, &targets, batch_idx)?;
+        let query = bind_batch_item(query, &prepared.bindings, &targets, batch_idx)?;
 
         let result = query.execute(&mut *tx).await.map_err(|e| {
             // log-policy: handler-owned
@@ -901,9 +851,105 @@ async fn execute_batch(
     Ok(())
 }
 
+/// Runs one single-mode SELECT from the pool: StreamList keeps deferred
+/// pooled acquisition, every other output type runs on a connection borrowed
+/// for the statement run. The connection is released through
+/// `release_after_error` on failure.
+async fn run_select(
+    pool: &AnyPool,
+    prepared: &PreparedQuery,
+    config: &SqlEndpointConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    if config.output_type == SqlOutputType::StreamList {
+        return execute_stream_list(pool, prepared, exchange).await;
+    }
+
+    let mut conn = acquire_connection(pool).await?;
+    let executed = {
+        let mut db = DbHandle::new(&mut conn);
+        execute_select_borrowed(&mut db, prepared, config, exchange).await
+    };
+    match executed {
+        Ok(()) => Ok(()),
+        Err(original) => Err(release_after_error(conn, original).await),
+    }
+}
+
+/// Runs one single-mode modification from the pool, lending the acquired
+/// connection for the statement run.
+async fn run_modify(
+    pool: &AnyPool,
+    prepared: &PreparedQuery,
+    config: &SqlEndpointConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let mut conn = acquire_connection(pool).await?;
+    let executed = {
+        let mut db = DbHandle::new(&mut conn);
+        execute_modify_borrowed(&mut db, prepared, config, exchange).await
+    };
+    match executed {
+        Ok(()) => Ok(()),
+        Err(original) => Err(release_after_error(conn, original).await),
+    }
+}
+
+/// Runs a batch from the pool, lending the acquired connection for the batch
+/// and its own transaction.
+async fn run_batch(
+    pool: &AnyPool,
+    config: &SqlEndpointConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    let mut conn = acquire_connection(pool).await?;
+    let executed = {
+        let mut db = DbHandle::new(&mut conn);
+        execute_batch_borrowed(&mut db, config, exchange).await
+    };
+    match executed {
+        Ok(()) => Ok(()),
+        Err(original) => Err(release_after_error(conn, original).await),
+    }
+}
+
+// Pool-facing adapters for the existing producer suite: the tests drive the
+// executor by pool, so each adapter acquires one connection exactly like
+// `Service::call` does and hands it to the borrowed path. Production routes
+// through `run_select`/`run_modify`/`run_batch` directly.
+#[cfg(test)]
+async fn execute_select(
+    pool: &AnyPool,
+    prepared: &PreparedQuery,
+    config: &SqlEndpointConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    run_select(pool, prepared, config, exchange).await
+}
+
+#[cfg(test)]
+async fn execute_modify(
+    pool: &AnyPool,
+    prepared: &PreparedQuery,
+    config: &SqlEndpointConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    run_modify(pool, prepared, config, exchange).await
+}
+
+#[cfg(test)]
+async fn execute_batch(
+    pool: &AnyPool,
+    config: &SqlEndpointConfig,
+    exchange: &mut Exchange,
+) -> Result<(), CamelError> {
+    run_batch(pool, config, exchange).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bind_kinds::BindTarget;
     use crate::bind_kinds::bind_json_values;
     use camel_api::MetricsCollector;
     use camel_component_api::HealthCheckRegistry;
@@ -1972,5 +2018,121 @@ mod tests {
         let config =
             SqlEndpointConfig::from_uri("sql:query?datasource=mydb&query=SELECT+1").unwrap();
         assert!(!config.allow_dynamic_query);
+    }
+
+    // ── Borrowed-connection executor + shared batch planner ─────────────
+
+    /// One `DbHandle` lends the connection one mutable borrow at a time: two
+    /// sequential lends both run, and the second only compiles because the
+    /// first borrow ended. Two concurrent lends are a compile error by
+    /// construction.
+    #[tokio::test]
+    async fn dbhandle_lends_one_mutable_borrow() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut conn = acquire_connection(&pool)
+            .await
+            .expect("acquire one pooled connection");
+        let mut db = DbHandle::new(&mut conn);
+
+        let rows = sqlx::query("select id from items order by id")
+            .fetch_all(db.lend())
+            .await
+            .expect("first lend executes on the connection");
+        let total = sqlx::query("select count(*) from items")
+            .fetch_one(db.lend())
+            .await
+            .expect("second lend executes on the same connection");
+
+        assert_eq!(rows.len(), 2, "the lent connection sees the seeded rows");
+        let count: i64 = sqlx::Row::try_get(&total, 0).expect("count column");
+        assert_eq!(count, 2);
+    }
+
+    /// The req-12 planner clause: one batch whose items resolve to DISTINCT
+    /// texts (two `in (:list)` expansions with different placeholder counts
+    /// plus a third, different bind shape) is planned together, with one
+    /// whole-batch decision before item 0 executes.
+    ///
+    /// SQLite reports parameter COUNTS, not kinds, so this connection has no
+    /// usable description and the planner returns the alias decision; the
+    /// described per-shape path is covered by the `bind_kinds` decision-layer
+    /// tests (and the PostgreSQL sql-binds lane).
+    #[tokio::test]
+    async fn plan_batch_binds_plans_whole_batch_on_one_transaction() {
+        let pool = sqlite_pool().await;
+        seed_items_table(&pool).await;
+
+        let mut conn = acquire_connection(&pool)
+            .await
+            .expect("acquire one pooled connection");
+        let mut tx = conn.begin().await.expect("begin the batch transaction");
+
+        let items = vec![
+            (
+                "select id from items where id in ($1, $2)".to_string(),
+                vec![json!(1), json!(2)],
+            ),
+            (
+                "select id from items where id in ($1, $2, $3)".to_string(),
+                vec![json!(1), json!(2), json!(3)],
+            ),
+            (
+                "update items set done = $1 where id = $2".to_string(),
+                vec![json!(1.5), json!(1)],
+            ),
+        ];
+
+        let plan = plan_batch_binds(&mut tx, &items)
+            .await
+            .expect("one plan covers the whole batch");
+
+        let targets = match plan {
+            BatchPlan::Aliased { targets } => targets,
+            BatchPlan::Named { .. } => {
+                panic!("SQLite has no described parameter kinds, expected the alias decision")
+            }
+        };
+        assert_eq!(
+            targets.len(),
+            items.len(),
+            "the single decision covers every item"
+        );
+
+        // One message-wide scan: a per-shape scan could loosen the
+        // float-wins rule at a shared position.
+        let rows: Vec<&[serde_json::Value]> = items
+            .iter()
+            .map(|(_, bindings)| bindings.as_slice())
+            .collect();
+        let message_scan = crate::bind_kinds::scan_bind_targets(&rows);
+        assert_eq!(
+            message_scan,
+            vec![
+                Some(BindTarget::F64),
+                Some(BindTarget::I64),
+                Some(BindTarget::I64),
+            ],
+            "the widest expansion and the float position drive the scan"
+        );
+        for item_targets in &targets {
+            assert_eq!(
+                item_targets, &message_scan,
+                "the unusable shapes all run on the message-wide scan"
+            );
+        }
+
+        // The whole-batch decision was computed before item 0 executed:
+        // planning wrote nothing, so the transaction still holds exactly the
+        // seeded rows.
+        let count: i64 = sqlx::query_scalar("select count(*) from items")
+            .fetch_one(&mut *tx)
+            .await
+            .expect("count on the batch transaction");
+        assert_eq!(count, 2, "planning must not execute any statement");
+        tx.rollback()
+            .await
+            .expect("roll back the planning transaction");
     }
 }

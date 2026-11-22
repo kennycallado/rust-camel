@@ -13,7 +13,14 @@
 //! all present here, so adding execution and registry wiring needs no signature
 //! change. Sessions are `'static` trait objects so the implementing crate can
 //! downcast to its concrete session for statement execution.
+//!
+//! The [`join`] submodule carries the runtime join channels (a `task_local!`
+//! block-session cell and the baked join scope) that bind a joined sql step to
+//! the block session it must run inside.
 
+pub mod join;
+
+use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -381,6 +388,22 @@ pub enum TransactionError {
         /// Datasource of the offending block.
         datasource: String,
     },
+
+    /// An in-block dynamic routing target was rejected at load.
+    ///
+    /// Serves the requirement "Join semantics for sql steps on the block
+    /// datasource": a step whose destination is computed from the exchange
+    /// (recipient list, routing slip, dynamic router) cannot prove block
+    /// membership statically, so a transacted block containing one is
+    /// rejected at load.
+    #[error(
+        "dynamic routing target at step '{step}' inside a transacted block \
+         cannot prove transaction membership"
+    )]
+    DynamicTargetUnprovable {
+        /// The dynamic-routing step inside the block.
+        step: String,
+    },
 }
 
 /// Boxed future resolving to a new [`TransactionSession`].
@@ -410,8 +433,11 @@ pub type FinalizeFuture<'a> =
 ///
 /// `Send + Sync + 'static` lets the registry hold the manager in an `Arc` and
 /// share it across workers. [`TransactionManager::open_session`] returns a
-/// boxed future so the trait object is object safe.
-pub trait TransactionManager: Send + Sync + 'static {
+/// boxed future so the trait object is object safe. The [`Any`] supertrait
+/// lets boot-time registration tests recover the concrete manager from the
+/// registry by trait-object upcast, exactly like [`TransactionSession`]; it is
+/// auto-implemented, so implementors carry no extra burden.
+pub trait TransactionManager: Any + Send + Sync + 'static {
     /// Datasource name this manager serves.
     ///
     /// The registry keys managers by this name, and load validation reports it
@@ -443,7 +469,12 @@ pub trait TransactionManager: Send + Sync + 'static {
 /// session is `'static` so the implementing crate can downcast the trait object
 /// to its concrete type for statement execution without `camel-api` gaining a
 /// SQL value model.
-pub trait TransactionSession: Send + Sync + 'static {
+///
+/// The [`Any`] supertrait makes that downcast a trait-object upcast: an
+/// `Arc<dyn TransactionSession>` coerces to `Arc<dyn Any + Send + Sync>` and
+/// [`Arc::downcast`](std::sync::Arc::downcast) recovers the concrete session
+/// type. `Any` is auto-implemented, so implementors carry no extra burden.
+pub trait TransactionSession: Any + Send + Sync + 'static {
     /// Datasource this session runs on.
     fn datasource(&self) -> &str;
 
@@ -455,10 +486,14 @@ pub trait TransactionSession: Send + Sync + 'static {
 
     /// Send the lazy `BEGIN`.
     ///
-    /// Called at the first joined sql step, not when the session opens. A second
-    /// `begin` on the same session is an error, and admission hygiene must have
-    /// been acknowledged before the first `BEGIN` (requirement "Lazy begin and
-    /// block-owned commit/rollback").
+    /// Called at the first joined sql step, not when the session opens.
+    /// Precondition `Clean`; `Ok(())` if already `Open` (idempotent);
+    /// `Err(SessionAborted)` otherwise. A begin that arrives while the
+    /// session's execution slot is held is rejected with the typed `Busy`
+    /// error. The owner SHALL call `begin` only
+    /// from the `Clean` state or to observe an already-open session, and
+    /// admission hygiene must have been acknowledged before the first
+    /// `BEGIN` (requirement "Lazy begin and block-owned commit/rollback").
     fn begin(&self) -> BeginFuture<'_>;
 
     /// Mark the session rollback-only.
@@ -477,24 +512,168 @@ pub trait TransactionSession: Send + Sync + 'static {
     /// outcome (not just `Ok`) to distinguish an acknowledged commit from a
     /// detached connection (requirement "Cancellation cutoff", "Uncertain
     /// finalization detaches the connection").
+    ///
+    /// Precondition `Active`. Otherwise no SQL is sent and the call returns
+    /// `Err(SessionAborted)`. The owner SHALL call `commit` only when
+    /// `state() == Active`.
     fn commit(&self) -> FinalizeFuture<'_>;
 
-    /// Roll back the block's transaction.
-    ///
-    /// Returns the observed [`TransactionOutcome`]; a rollback that cannot be
-    /// acknowledged is reported as [`TransactionError::RollbackUncertain`] and
-    /// the connection is detached instead of returned to the pool.
+    /// End the block without committing. Total over every lifecycle state; the
+    /// implementation selects the action from its private phase:
+    /// - nothing begun (`Fresh`, BEGIN never sent): no SQL, connection returned
+    ///   clean, `Ok(RolledBack)` (nothing was begun, so nothing is durable);
+    /// - BEGIN sent but unacknowledged (`Fresh`): no SQL, detach,
+    ///   `Err(RollbackUncertain)`;
+    /// - `Active`: ROLLBACK within the finalize grace; acknowledged →
+    ///   `Ok(RolledBack)`, else detach + `Err(RollbackUncertain)`;
+    /// - `Detached`, or a defensive `Finalizing`/`Done` entry: no SQL,
+    ///   `Err(RollbackUncertain)` (`error!` log for the defensive entry).
     fn rollback(&self) -> FinalizeFuture<'_>;
 }
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
+
+    /// Minimal concrete port implementation used by the port tests.
+    ///
+    /// Every method resolves without I/O: the tests exercise the trait-object
+    /// surface (upcast/downcast) and the doc contract, not execution.
+    pub(super) struct StubSession {
+        datasource: String,
+        state: TransactionState,
+        rollback_only: AtomicBool,
+    }
+
+    impl StubSession {
+        pub(super) fn new(datasource: &str) -> Self {
+            Self {
+                datasource: datasource.to_owned(),
+                state: TransactionState::Active,
+                rollback_only: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl TransactionSession for StubSession {
+        fn datasource(&self) -> &str {
+            &self.datasource
+        }
+
+        fn state(&self) -> TransactionState {
+            self.state
+        }
+
+        fn begin(&self) -> BeginFuture<'_> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn set_rollback_only(&self) {
+            self.rollback_only.store(true, Ordering::Relaxed);
+        }
+
+        fn is_rollback_only(&self) -> bool {
+            self.rollback_only.load(Ordering::Relaxed)
+        }
+
+        fn commit(&self) -> FinalizeFuture<'_> {
+            Box::pin(std::future::ready(Ok(TransactionOutcome::Committed)))
+        }
+
+        fn rollback(&self) -> FinalizeFuture<'_> {
+            Box::pin(std::future::ready(Ok(TransactionOutcome::RolledBack)))
+        }
+    }
 
     // Compile-time proof that both port traits are usable as trait objects.
     #[test]
     fn port_traits_are_object_safe() {
         fn _assert(_m: &dyn TransactionManager, _s: &dyn TransactionSession) {}
+    }
+
+    #[test]
+    fn session_port_upcasts_to_any_and_downcasts() {
+        let concrete = Arc::new(StubSession::new("pg"));
+        let port: Arc<dyn TransactionSession> = concrete.clone();
+
+        // The `Any` supertrait makes the erase explicit: a trait-object upcast
+        // to `dyn Any`, no wrapper and no per-implementor method.
+        let erased: Arc<dyn Any + Send + Sync> = port;
+
+        let restored = Arc::downcast::<StubSession>(erased)
+            .expect("the session trait object must downcast to its concrete type");
+        assert_eq!(restored.datasource(), "pg");
+        assert!(
+            Arc::ptr_eq(&concrete, &restored),
+            "downcast must recover the same allocation, not a copy"
+        );
+    }
+
+    #[test]
+    fn rollback_doc_carries_total_contract() {
+        // Source-text assertion: the 604d contract is docs-only, so the review
+        // gate is the doc text itself. Only the production half of the file is
+        // searched: the phrases below also appear as literals in this test's
+        // own arrays, so a whole-file read would pass with every `///` doc
+        // stripped. `///` / `//!` markers are removed line-wise and whitespace
+        // is normalised so the test tracks prose, not the exact doc wrapping.
+        let source =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/transaction.rs"))
+                .expect("camel-api source tree is present at test time");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or("")
+            .lines()
+            .map(|line| {
+                let line = line.trim();
+                line.strip_prefix("///")
+                    .or_else(|| line.strip_prefix("//!"))
+                    .unwrap_or(line)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let production = production.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            !production.is_empty(),
+            "the production half of transaction.rs must be non-empty"
+        );
+
+        for phrase in [
+            "Total over every lifecycle state",
+            "nothing begun (`Fresh`, BEGIN never sent)",
+            "BEGIN sent but unacknowledged",
+            "`Active`: ROLLBACK within the finalize grace",
+            "`Detached`, or a defensive `Finalizing`/`Done` entry",
+            "`error!` log for the defensive entry",
+        ] {
+            assert!(
+                production.contains(phrase),
+                "rollback doc must carry the total-rollback contract phrase: {phrase}"
+            );
+        }
+
+        for phrase in [
+            "Precondition `Active`. Otherwise no SQL is sent and the call returns `Err(SessionAborted)`.",
+            "The owner SHALL call `commit` only when `state() == Active`.",
+        ] {
+            assert!(
+                production.contains(phrase),
+                "commit doc must carry the precondition phrase: {phrase}"
+            );
+        }
+
+        // The 604d contract replaces the pre-604d prose; a retained copy would
+        // mean the replacement was an append and the port would carry two
+        // contradictory rollback contracts.
+        assert!(
+            !production.contains("Roll back the block's transaction."),
+            "the pre-604d rollback doc must be replaced, not kept alongside the new contract"
+        );
     }
 
     #[test]

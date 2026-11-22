@@ -49,6 +49,13 @@ use crate::model::{
     ThrowStepDef, ToStepDef, ValueSourceDef, WireTapStepDef,
 };
 
+/// The manager-resolution seam threaded from the load entry to the lowering
+/// fan-in: answers "is a [`camel_api::TransactionManager`] registered for
+/// this datasource?". Production loads pass the always-absent resolver, so
+/// `ManagerMissing` comes from the walk tail AFTER the per-arm checks (the
+/// frozen walk precedence, one visitor).
+type ResolveManager<'a> = &'a dyn Fn(&str) -> Option<Arc<dyn camel_api::TransactionManager>>;
+
 fn require_authenticator(
     ctx: &SecurityCompileContext,
     mode: &str,
@@ -247,9 +254,11 @@ pub fn compile_declarative_route(route: DeclarativeRoute) -> Result<RouteDefinit
 /// Compile a declarative route after validating its `transacted:` blocks.
 ///
 /// Task 3.1 seam (sqltrans, slice 1): [`validate_transacted_blocks`] runs
-/// FIRST, against the declarative model and the caller-supplied manager
-/// resolver; a clean route then takes the plain compile path. This entry is
-/// the resolver-parameterized test seam — production loads go through
+/// FIRST, against the declarative model (structural checks; the manager
+/// resolver is NOT consulted here); the resolver then threads into the
+/// lowering fan-in, where the ONE walk resolves the manager AFTER the
+/// per-arm checks (frozen walk precedence). This entry is the
+/// resolver-parameterized test seam — production loads go through
 /// [`compile_declarative_route_with_stream_cache_threshold`], which supplies
 /// the always-absent resolver.
 ///
@@ -266,8 +275,9 @@ pub fn compile_declarative_route_with(
     )
 }
 
-/// Shared lowering path: validate the `transacted:` blocks against
-/// `resolve_manager` strictly before any step is lowered, then compile.
+/// Shared lowering path: validate the `transacted:` blocks (structural)
+/// strictly before any step is lowered, then compile with `resolve_manager`
+/// threaded to the lowering fan-in's walk tail.
 ///
 /// The threshold/security knobs exist only because the production YAML/JSON/
 /// template choke point carries them; the resolver seam above uses their
@@ -278,8 +288,8 @@ fn compile_declarative_route_with_resolver(
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
 ) -> Result<RouteDefinition, CamelError> {
-    crate::transacted_validation::validate_transacted_blocks(&route, resolve_manager)?;
-    compile_declarative_route_body(route, stream_cache_threshold, security_ctx)
+    crate::transacted_validation::validate_transacted_blocks(&route)?;
+    compile_declarative_route_body(route, stream_cache_threshold, security_ctx, resolve_manager)
 }
 
 /// Compile a declarative route with a custom stream-cache threshold.
@@ -290,10 +300,12 @@ fn compile_declarative_route_with_resolver(
 /// the resolver seam with an always-absent resolver.
 ///
 /// Dark contract (sqltrans, slice 1): no transaction manager is registered in
-/// production, so every `transacted:` block fails here with the typed
-/// [`camel_api::TransactionError::ManagerMissing`] after the structural checks
-/// pass, before any lowering runs. Slice 2 registers managers; this entry then
-/// starts accepting blocks without changing the load graph.
+/// production, so every structurally clean `transacted:` block fails here
+/// with the typed [`camel_api::TransactionError::ManagerMissing`] — from the
+/// lowering walk's tail, AFTER the per-arm checks (a per-arm rejection such
+/// as transaction-control text is never masked by `ManagerMissing`). Slice 2
+/// registers managers; this entry then starts accepting blocks without
+/// changing the load graph.
 pub fn compile_declarative_route_with_stream_cache_threshold(
     route: DeclarativeRoute,
     stream_cache_threshold: usize,
@@ -306,9 +318,10 @@ fn compile_declarative_route_body(
     route: DeclarativeRoute,
     stream_cache_threshold: usize,
     security_ctx: SecurityCompileContext,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<RouteDefinition, CamelError> {
     validate_route(&route)?;
-    let steps = compile_declarative_steps(route.steps, stream_cache_threshold)?;
+    let steps = compile_declarative_steps(route.steps, stream_cache_threshold, resolve_manager)?;
 
     let mut definition = RouteDefinition::new(route.from, steps)
         .with_route_id(route.route_id)
@@ -327,7 +340,8 @@ fn compile_declarative_route_body(
     }
 
     if let Some(error_handler) = route.error_handler {
-        definition = definition.with_error_handler(compile_error_handler(error_handler)?);
+        definition = definition
+            .with_error_handler(compile_error_handler_with(error_handler, resolve_manager)?);
     }
 
     // Business-error-model Task 2.2: the rest-lowering seam carriage rides
@@ -343,6 +357,7 @@ fn compile_declarative_route_body(
         let fallback_steps = compile_declarative_steps(
             std::mem::take(&mut circuit_breaker.fallback),
             stream_cache_threshold,
+            resolve_manager,
         )?;
         definition = definition
             .with_circuit_breaker_fallback(fallback_steps)
@@ -549,6 +564,19 @@ pub fn compile_canonical_step(
     step: CanonicalStepSpec,
     stream_cache_threshold: usize,
 ) -> Result<BuilderStep, CamelError> {
+    compile_canonical_step_at(step, stream_cache_threshold, 0)
+}
+
+/// `block_depth` counts enclosing transacted blocks. The
+/// `CanonicalStepSpec::Transacted` arm runs the ONE load walk
+/// (`camel_core::transacted_walk`) only at depth 0, so a nested block surfaces
+/// as the outer walk's `NestedBlock` structural rejection instead of being
+/// validated as its own unit first (R3-2 precedence).
+fn compile_canonical_step_at(
+    step: CanonicalStepSpec,
+    stream_cache_threshold: usize,
+    block_depth: usize,
+) -> Result<BuilderStep, CamelError> {
     match step {
         CanonicalStepSpec::To { uri } => Ok(BuilderStep::To(uri)),
         CanonicalStepSpec::Log { message } => Ok(BuilderStep::Log {
@@ -572,18 +600,26 @@ pub fn compile_canonical_step(
         }),
         CanonicalStepSpec::Filter { predicate, steps } => Ok(BuilderStep::DeclarativeFilter {
             predicate,
-            steps: compile_canonical_steps(steps, stream_cache_threshold)?,
+            steps: compile_canonical_steps_at(steps, stream_cache_threshold, block_depth)?,
         }),
         CanonicalStepSpec::Choice { whens, otherwise } => {
             let mut compiled_whens = Vec::with_capacity(whens.len());
             for when in whens {
                 compiled_whens.push(DeclarativeWhenStep {
                     predicate: when.predicate,
-                    steps: compile_canonical_steps(when.steps, stream_cache_threshold)?,
+                    steps: compile_canonical_steps_at(
+                        when.steps,
+                        stream_cache_threshold,
+                        block_depth,
+                    )?,
                 });
             }
             let compiled_otherwise = match otherwise {
-                Some(steps) => Some(compile_canonical_steps(steps, stream_cache_threshold)?),
+                Some(steps) => Some(compile_canonical_steps_at(
+                    steps,
+                    stream_cache_threshold,
+                    block_depth,
+                )?),
                 None => None,
             };
             Ok(BuilderStep::DeclarativeChoice {
@@ -599,7 +635,7 @@ pub fn compile_canonical_step(
             trace_item_threshold,
             stop_on_exception,
             steps,
-        } => compile_canonical_split(
+        } => compile_canonical_split_at(
             expression,
             aggregation,
             parallel,
@@ -608,12 +644,31 @@ pub fn compile_canonical_step(
             stop_on_exception,
             steps,
             stream_cache_threshold,
+            block_depth,
         ),
         CanonicalStepSpec::Aggregate(config) => compile_canonical_aggregate(config),
-        CanonicalStepSpec::Transacted(block) => Ok(BuilderStep::Transacted {
-            datasource: block.datasource,
-            steps: compile_canonical_steps(block.steps, stream_cache_threshold)?,
-        }),
+        CanonicalStepSpec::Transacted(block) => {
+            // Parse-seam fan-in (sqltrans-exec step 3): parse seams receive
+            // raw text — no registry, no datasource catalog — so the ONE load
+            // walk runs UNRESOLVED (structural + per-arm checks only;
+            // ManagerMissing for canonical loads stays at the camel-core
+            // route-add backstop, which resolves per-arm-first too, and the
+            // dialect stage at the camel-core boundary, probe R2-3).
+            // Depth-0 only: nested blocks are the outer walk's structural
+            // rejection.
+            let built = BuilderStep::Transacted {
+                datasource: block.datasource,
+                steps: compile_canonical_steps_at(
+                    block.steps,
+                    stream_cache_threshold,
+                    block_depth + 1,
+                )?,
+            };
+            if block_depth == 0 {
+                camel_core::transacted_walk::walk_transacted_block_deferred_unresolved(&built)?;
+            }
+            Ok(built)
+        }
         CanonicalStepSpec::Cache {
             repository,
             key,
@@ -622,7 +677,8 @@ pub fn compile_canonical_step(
             coalesce_misses,
             on_miss,
         } => {
-            let sub_steps = compile_canonical_steps(on_miss, stream_cache_threshold)?;
+            let sub_steps =
+                compile_canonical_steps_at(on_miss, stream_cache_threshold, block_depth)?;
             Ok(BuilderStep::Cache {
                 repository,
                 key: LanguageExpressionDef {
@@ -674,14 +730,22 @@ fn compile_canonical_steps(
     steps: Vec<CanonicalStepSpec>,
     stream_cache_threshold: usize,
 ) -> Result<Vec<BuilderStep>, CamelError> {
+    compile_canonical_steps_at(steps, stream_cache_threshold, 0)
+}
+
+fn compile_canonical_steps_at(
+    steps: Vec<CanonicalStepSpec>,
+    stream_cache_threshold: usize,
+    block_depth: usize,
+) -> Result<Vec<BuilderStep>, CamelError> {
     steps
         .into_iter()
-        .map(|step| compile_canonical_step(step, stream_cache_threshold))
+        .map(|step| compile_canonical_step_at(step, stream_cache_threshold, block_depth))
         .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compile_canonical_split(
+fn compile_canonical_split_at(
     expression: CanonicalSplitExpressionSpec,
     aggregation: CanonicalSplitAggregationSpec,
     parallel: bool,
@@ -690,6 +754,7 @@ fn compile_canonical_split(
     stop_on_exception: bool,
     steps: Vec<CanonicalStepSpec>,
     stream_cache_threshold: usize,
+    block_depth: usize,
 ) -> Result<BuilderStep, CamelError> {
     let aggregation = match aggregation {
         CanonicalSplitAggregationSpec::LastWins => SplitAggregation::LastWins,
@@ -701,7 +766,7 @@ fn compile_canonical_split(
             ));
         }
     };
-    let compiled_steps = compile_canonical_steps(steps, stream_cache_threshold)?;
+    let compiled_steps = compile_canonical_steps_at(steps, stream_cache_threshold, block_depth)?;
     match expression {
         CanonicalSplitExpressionSpec::BodyLines => {
             let config = SplitterConfig::new(split_body_lines())
@@ -847,7 +912,21 @@ fn compile_canonical_aggregate(config: CanonicalAggregateSpec) -> Result<Builder
     Ok(BuilderStep::Aggregate { config: agg_config })
 }
 
+/// Test-only wrapper: the always-absent default of
+/// [`compile_error_handler_with`].
+#[cfg(test)]
 fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerConfig, CamelError> {
+    compile_error_handler_with(def, &|_| None)
+}
+
+/// [`compile_error_handler`] with the manager-resolution seam: the
+/// on_exceptions clause lowering reaches the same `BuilderStep::Transacted`
+/// arm and walk as the route body, so the route entry threads the resolver
+/// here too.
+fn compile_error_handler_with(
+    def: DeclarativeErrorHandler,
+    resolve_manager: ResolveManager<'_>,
+) -> Result<ErrorHandlerConfig, CamelError> {
     let mut config = if let Some(uri) = def.dead_letter_channel {
         ErrorHandlerConfig::dead_letter_channel(uri)
     } else {
@@ -910,7 +989,7 @@ fn compile_error_handler(def: DeclarativeErrorHandler) -> Result<ErrorHandlerCon
 
             let has_steps = !clause.steps.is_empty();
             if has_steps {
-                let compiled_steps = compile_declarative_steps(clause.steps, 0)?;
+                let compiled_steps = compile_declarative_steps(clause.steps, 0, resolve_manager)?;
                 let total = compiled_steps.len();
                 let processors: Vec<camel_api::BoxProcessor> = compiled_steps
                     .into_iter()
@@ -1010,6 +1089,10 @@ fn ensure_known_exception_kind(kind: &str) -> Result<(), CamelError> {
 /// Deferred (pending bd decision, rc-5u8co): `TemplateReload` is raised on
 /// the lifecycle-command path, which bypasses route error handlers; it is
 /// rejected until an in-pipeline raise path (if any) is decided on.
+/// `Transaction` was moved OUT of `DEFERRED_VARIANTS` by sqltrans-exec
+/// step 3: the kind value is decided (`CamelError::Transaction`, any
+/// `TransactionError` variant); its runtime raise path lands with the
+/// session runtime (S2b), which does not reopen the kind decision.
 fn supported_exception_kinds() -> Vec<&'static str> {
     vec![
         "ComponentNotFound",
@@ -1036,6 +1119,7 @@ fn supported_exception_kinds() -> Vec<&'static str> {
         "ValidationError",
         "ExpressionFailed",
         "Business",
+        "Transaction",
     ]
 }
 
@@ -1102,6 +1186,10 @@ fn exception_kind_matches(kind: &str, err: &CamelError) -> bool {
         // and classified components, so they are matchable under their own
         // kind value.
         "Business" => matches!(err, CamelError::Business { .. }),
+        // sqltrans-exec step 3: every `TransactionError` variant matches the
+        // "Transaction" kind — load rejections today, the session-runtime
+        // variants (S2b) later; the family is one handler-matchable kind.
+        "Transaction" => matches!(err, CamelError::Transaction(_)),
         _ => false,
     }
 }
@@ -1115,10 +1203,13 @@ fn compile_circuit_breaker(def: DeclarativeCircuitBreaker) -> CircuitBreakerConf
 fn compile_declarative_steps(
     steps: Vec<DeclarativeStep>,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<Vec<BuilderStep>, CamelError> {
     steps
         .into_iter()
-        .map(|step| compile_declarative_step_with_threshold(step, stream_cache_threshold))
+        .map(|step| {
+            compile_declarative_step_with_threshold(step, stream_cache_threshold, resolve_manager)
+        })
         .collect()
 }
 
@@ -1126,6 +1217,7 @@ pub fn compile_declarative_step(step: DeclarativeStep) -> Result<BuilderStep, Ca
     compile_declarative_step_with_threshold(
         step,
         camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD,
+        &|_| None,
     )
 }
 
@@ -1144,6 +1236,7 @@ fn reject_protobuf_config(config: &Option<serde_json::Value>) -> Result<(), Came
 fn compile_declarative_step_with_threshold(
     step: DeclarativeStep,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<BuilderStep, CamelError> {
     match step {
         DeclarativeStep::To(ToStepDef { uri }) => Ok(BuilderStep::To(uri)),
@@ -1216,9 +1309,12 @@ fn compile_declarative_step_with_threshold(
             )))
         }
         DeclarativeStep::Stop => Ok(BuilderStep::Stop),
-        DeclarativeStep::Filter(def) => {
-            compile_filter_step(def.predicate, def.steps, stream_cache_threshold)
-        }
+        DeclarativeStep::Filter(def) => compile_filter_step(
+            def.predicate,
+            def.steps,
+            stream_cache_threshold,
+            resolve_manager,
+        ),
         DeclarativeStep::Function(FunctionStepDef {
             runtime,
             source,
@@ -1239,12 +1335,17 @@ fn compile_declarative_step_with_threshold(
             let mut compiled_whens = Vec::with_capacity(whens.len());
             for when in whens {
                 let predicate = when.predicate;
-                let steps = compile_declarative_steps(when.steps, stream_cache_threshold)?;
+                let steps =
+                    compile_declarative_steps(when.steps, stream_cache_threshold, resolve_manager)?;
                 compiled_whens.push(DeclarativeWhenStep { predicate, steps });
             }
 
             let compiled_otherwise = match otherwise {
-                Some(steps) => Some(compile_declarative_steps(steps, stream_cache_threshold)?),
+                Some(steps) => Some(compile_declarative_steps(
+                    steps,
+                    stream_cache_threshold,
+                    resolve_manager,
+                )?),
                 None => None,
             };
 
@@ -1253,7 +1354,9 @@ fn compile_declarative_step_with_threshold(
                 otherwise: compiled_otherwise,
             })
         }
-        DeclarativeStep::Split(def) => compile_split_step(def, stream_cache_threshold),
+        DeclarativeStep::Split(def) => {
+            compile_split_step(def, stream_cache_threshold, resolve_manager)
+        }
         DeclarativeStep::Aggregate(def) => compile_aggregate_step(def),
         DeclarativeStep::Throttle(ThrottleStepDef {
             max_requests,
@@ -1268,14 +1371,16 @@ fn compile_declarative_step_with_threshold(
             };
             let config = ThrottlerConfig::new(max_requests, Duration::from_millis(period_ms))
                 .strategy(strategy);
-            let compiled_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
+            let compiled_steps =
+                compile_declarative_steps(steps, stream_cache_threshold, resolve_manager)?;
             Ok(BuilderStep::Throttle {
                 config,
                 steps: compiled_steps,
             })
         }
         DeclarativeStep::LoadBalance(LoadBalanceStepDef { strategy, steps }) => {
-            let compiled_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
+            let compiled_steps =
+                compile_declarative_steps(steps, stream_cache_threshold, resolve_manager)?;
             let strategy = match strategy {
                 LoadBalanceStrategyDef::RoundRobin => LoadBalanceStrategy::RoundRobin,
                 LoadBalanceStrategyDef::Random => LoadBalanceStrategy::Random,
@@ -1311,11 +1416,32 @@ fn compile_declarative_step_with_threshold(
                 steps: compiled_steps,
             })
         }
-        DeclarativeStep::Multicast(def) => compile_multicast_step(def, stream_cache_threshold),
-        DeclarativeStep::Transacted(def) => Ok(BuilderStep::Transacted {
-            datasource: def.datasource,
-            steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
-        }),
+        DeclarativeStep::Multicast(def) => {
+            compile_multicast_step(def, stream_cache_threshold, resolve_manager)
+        }
+        DeclarativeStep::Transacted(def) => {
+            // Parse-seam fan-in (sqltrans-exec step 3): the ONE load walk runs
+            // deferred on the lowered block with the resolver threaded from
+            // the load entry (production: always-absent) — structural →
+            // per-arm → manager IN ONE VISITOR, the frozen walk precedence.
+            // The S1 AST gate no longer resolves managers: a per-arm
+            // rejection (transaction-control text, runtime SQL source) must
+            // not be masked by `ManagerMissing`. Depth gating dependency:
+            // this arm walks at EVERY depth (no depth tracking here), which
+            // is sound only because the S1 gate rejects nested blocks first —
+            // a nested block can never reach the lowered walk on a route load
+            // today; that property is load-bearing, keep it when S1 changes.
+            let built = BuilderStep::Transacted {
+                datasource: def.datasource,
+                steps: compile_declarative_steps(
+                    def.steps,
+                    stream_cache_threshold,
+                    resolve_manager,
+                )?,
+            };
+            camel_core::transacted_walk::walk_transacted_block_deferred(&built, resolve_manager)?;
+            Ok(built)
+        }
         DeclarativeStep::DynamicRouter(DynamicRouterStepDef {
             expression,
             uri_delimiter,
@@ -1501,10 +1627,11 @@ fn compile_declarative_step_with_threshold(
             predicate: def.predicate,
         }),
         DeclarativeStep::IdempotentConsumer(def) => {
-            compile_idempotent_consumer_step(def, stream_cache_threshold)
+            compile_idempotent_consumer_step(def, stream_cache_threshold, resolve_manager)
         }
         DeclarativeStep::Cache(def) => {
-            let on_miss = compile_declarative_steps(def.on_miss, stream_cache_threshold)?;
+            let on_miss =
+                compile_declarative_steps(def.on_miss, stream_cache_threshold, resolve_manager)?;
             Ok(BuilderStep::Cache {
                 repository: def.repository,
                 key: def.key,
@@ -1579,7 +1706,9 @@ fn compile_declarative_step_with_threshold(
             expression,
             reverse,
         }),
-        DeclarativeStep::Loop(def) => compile_loop_step(def, stream_cache_threshold),
+        DeclarativeStep::Loop(def) => {
+            compile_loop_step(def, stream_cache_threshold, resolve_manager)
+        }
         DeclarativeStep::Enrich(def) => Ok(BuilderStep::Enrich {
             uri: def.uri,
             strategy: def.strategy,
@@ -1595,11 +1724,16 @@ fn compile_declarative_step_with_threshold(
             catch,
             finally,
         } => {
-            let try_steps = compile_declarative_steps(steps, stream_cache_threshold)?;
+            let try_steps =
+                compile_declarative_steps(steps, stream_cache_threshold, resolve_manager)?;
             let catch_clauses = catch
                 .into_iter()
                 .map(|c| {
-                    let clause_steps = compile_declarative_steps(c.steps, stream_cache_threshold)?;
+                    let clause_steps = compile_declarative_steps(
+                        c.steps,
+                        stream_cache_threshold,
+                        resolve_manager,
+                    )?;
                     Ok(DoTryCatchClauseBuilder {
                         exception: c.exception,
                         when: c.when,
@@ -1613,7 +1747,11 @@ fn compile_declarative_step_with_threshold(
                 .collect::<Result<Vec<_>, CamelError>>()?;
             let finally = match finally {
                 Some(f) => {
-                    let fsteps = compile_declarative_steps(f.steps, stream_cache_threshold)?;
+                    let fsteps = compile_declarative_steps(
+                        f.steps,
+                        stream_cache_threshold,
+                        resolve_manager,
+                    )?;
                     Some(DoTryFinallyBuilder {
                         on_when: f.on_when,
                         steps: fsteps,
@@ -1674,8 +1812,9 @@ fn stream_cache_config(
 fn compile_loop_step(
     def: LoopStepDef,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<BuilderStep, CamelError> {
-    let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold)?;
+    let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold, resolve_manager)?;
     Ok(BuilderStep::DeclarativeLoop {
         count: def.count,
         while_predicate: def.while_predicate,
@@ -1701,9 +1840,10 @@ fn resolve_remove_on_failure(eager: bool, explicit: Option<bool>) -> (bool, bool
 fn compile_idempotent_consumer_step(
     def: IdempotentConsumerStepDef,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<BuilderStep, CamelError> {
     let on_missing_key = camel_processor::OnMissingKey::parse(def.on_missing_key.as_deref())?;
-    let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold)?;
+    let sub_steps = compile_declarative_steps(def.steps, stream_cache_threshold, resolve_manager)?;
     let eager = def.eager.unwrap_or(false);
     let (remove_on_failure, warn_at_most_once) =
         resolve_remove_on_failure(eager, def.remove_on_failure);
@@ -2018,6 +2158,7 @@ fn declarative_step_name(step: &DeclarativeStep) -> &'static str {
 fn compile_split_step(
     def: SplitStepDef,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<BuilderStep, CamelError> {
     let aggregation = match def.aggregation {
         SplitAggregationDef::LastWins => SplitAggregation::LastWins,
@@ -2042,7 +2183,11 @@ fn compile_split_step(
             );
             Ok(BuilderStep::Split {
                 config,
-                steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+                steps: compile_declarative_steps(
+                    def.steps,
+                    stream_cache_threshold,
+                    resolve_manager,
+                )?,
             })
         }
         SplitExpressionDef::BodyJsonArray => {
@@ -2061,7 +2206,11 @@ fn compile_split_step(
             );
             Ok(BuilderStep::Split {
                 config,
-                steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+                steps: compile_declarative_steps(
+                    def.steps,
+                    stream_cache_threshold,
+                    resolve_manager,
+                )?,
             })
         }
         SplitExpressionDef::Language(expression) => Ok(BuilderStep::DeclarativeSplit {
@@ -2071,13 +2220,13 @@ fn compile_split_step(
             parallel_limit: def.parallel_limit,
             trace_item_threshold: def.trace_item_threshold,
             stop_on_exception: def.stop_on_exception,
-            steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+            steps: compile_declarative_steps(def.steps, stream_cache_threshold, resolve_manager)?,
         }),
         SplitExpressionDef::Stream(stream_config) => Ok(BuilderStep::DeclarativeStreamSplit {
             stream_config,
             aggregation,
             stop_on_exception: def.stop_on_exception,
-            steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+            steps: compile_declarative_steps(def.steps, stream_cache_threshold, resolve_manager)?,
         }),
     }
 }
@@ -2135,6 +2284,7 @@ fn compile_aggregate_step(def: AggregateStepDef) -> Result<BuilderStep, CamelErr
 fn compile_multicast_step(
     def: MulticastStepDef,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<BuilderStep, CamelError> {
     let aggregation = match def.aggregation {
         MulticastAggregationDef::LastWins => MulticastStrategy::LastWins,
@@ -2154,7 +2304,7 @@ fn compile_multicast_step(
     }
 
     Ok(BuilderStep::Multicast {
-        steps: compile_declarative_steps(def.steps, stream_cache_threshold)?,
+        steps: compile_declarative_steps(def.steps, stream_cache_threshold, resolve_manager)?,
         config,
     })
 }
@@ -2163,10 +2313,11 @@ fn compile_filter_step(
     predicate: LanguageExpressionDef,
     steps: Vec<DeclarativeStep>,
     stream_cache_threshold: usize,
+    resolve_manager: ResolveManager<'_>,
 ) -> Result<BuilderStep, CamelError> {
     Ok(BuilderStep::DeclarativeFilter {
         predicate,
-        steps: compile_declarative_steps(steps, stream_cache_threshold)?,
+        steps: compile_declarative_steps(steps, stream_cache_threshold, resolve_manager)?,
     })
 }
 
@@ -2845,6 +2996,7 @@ mod tests {
             "ValidationError",
             "ExpressionFailed",
             "Business",
+            "Transaction",
         ];
 
         assert_eq!(supported_exception_kinds(), expected);
@@ -2904,10 +3056,11 @@ mod tests {
 
     /// Variants deferred pending a bd decision (rc-5u8co): raised outside the
     /// data-plane pipeline, so rejected as unknown kinds until an in-pipeline
-    /// raise path is decided on. `Transaction` is load-time only in slice 1
-    /// (`sqltrans-portmodel`, dark); the runtime raise path lands in slice 2
-    /// (`sqltrans-runtime`), which owns the kind decision.
-    const DEFERRED_VARIANTS: &[&str] = &["TemplateReload", "Transaction"];
+    /// raise path is decided on. `Transaction` left this set in sqltrans-exec
+    /// step 3: the kind value is decided and the vocabulary carries a live
+    /// `exception_kind_matches` arm; only the RUNTIME raise path is still
+    /// ahead of it (S2b), which does not defer the kind.
+    const DEFERRED_VARIANTS: &[&str] = &["TemplateReload"];
 
     /// Variants grouped under an existing kind value (sedamatch dsl delta):
     /// the kind value matches the whole failure family via
@@ -3010,6 +3163,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transaction_kind_is_supported_and_matches() {
+        // sqltrans-exec step 3: the Transaction kind is decided — the
+        // vocabulary accepts it, every `TransactionError` variant matches it,
+        // and the deferral list no longer carries it. The runtime raise path
+        // lands with the session runtime (S2b) without reopening the decision.
+        let err = CamelError::Transaction(camel_api::transaction::TransactionError::CommitFailed {
+            datasource: "pg".into(),
+            reason: "deferred fk".into(),
+        });
+        assert!(
+            exception_kind_matches("Transaction", &err),
+            "Transaction kind must match its representative error"
+        );
+        assert!(supported_exception_kinds().contains(&"Transaction"));
+        assert!(!DEFERRED_VARIANTS.contains(&"Transaction"));
+        // ManagerMissing fires at load today; the same kind must match it too.
+        let load_err =
+            CamelError::Transaction(camel_api::transaction::TransactionError::ManagerMissing {
+                datasource: "pg".into(),
+            });
+        assert!(exception_kind_matches("Transaction", &load_err));
+    }
+
     /// Representative [`CamelError`] for one supported exception kind, built
     /// from the variant shape its `exception_kind_matches` arm expects.
     /// Panics on an unknown kind so a vocabulary entry added without a
@@ -3071,6 +3248,12 @@ mod tests {
                 message: "m".into(),
                 data: None,
             },
+            "Transaction" => {
+                CamelError::Transaction(camel_api::transaction::TransactionError::CommitFailed {
+                    datasource: "pg".into(),
+                    reason: "x".into(),
+                })
+            }
             _ => panic!("no sample error for supported kind '{kind}'"),
         }
     }

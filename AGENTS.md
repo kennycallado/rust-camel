@@ -244,6 +244,10 @@ camel-test | local | cargo test -p camel-test --features integration-tests --no-
 #     default list in-row (rc-lhd0y's fix set), `CAMEL_TEST_WORKSPACE_SUITES` overrides; NOT full `cargo test --workspace` (Docker/bridges stay CI).
 camel-test | local | suites="${CAMEL_TEST_WORKSPACE_SUITES-dev_watch_script_test dev_watch_proto_test}"; allowed="dev_watch_script_test dev_watch_proto_test"; [[ -n "${suites//[[:space:]]/}" ]] || { echo "camel-test workspace lane: empty CAMEL_TEST_WORKSPACE_SUITES suite list" >&2; exit 2; }; set -f; for s in $suites; do case "$s" in *[\*\?\[]*) echo "camel-test workspace lane: CAMEL_TEST_WORKSPACE_SUITES must list literal suite names, got '$s'" >&2; exit 2;; esac; ok=0; for a in $allowed; do if [[ "$s" == "$a" ]]; then ok=1; break; fi; done; if [[ "$ok" != 1 ]]; then echo "camel-test workspace lane: CAMEL_TEST_WORKSPACE_SUITES entry '$s' is not an allowlisted local suite (allowed: $allowed)" >&2; exit 2; fi; done; rc=0; for s in $suites; do cargo test --workspace --test "$s" || rc=1; done; exit "$rc"
 camel-test | docker | cargo test -p camel-test --features integration-tests
+# --- sqltrans-exec step 8: PG runtime fixtures P1-P6 (transacted-block
+#     probes). Docker/mapped-port lane is the acceptance authority; the local
+#     host-network path is opt-in via SQLTRANS_PG_URL.
+camel-test | docker | cargo test -p camel-test --features integration-tests --test sql_transacted_test
 ```
 
 ## NEW-CODE-ONLY STYLE NORMS (ADR-0091)

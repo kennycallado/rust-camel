@@ -75,12 +75,17 @@ pub(crate) use registry::{
 // Public transaction-manager registry surface. Dark in slice 1 — nothing
 // registers a manager; camel-sql registers per datasource in slice 2
 // (rc-qv2iz.6).
-pub use registry::{TransactionManagerRegistry, resolve_transaction_manager};
+pub use registry::{RegistryError, TransactionManagerRegistry, resolve_transaction_manager};
+// Test-only doubles shared between the registry and `RuntimeBus` suites.
+#[cfg(test)]
+pub(crate) use registry::test_support;
 pub mod intercept;
 pub(crate) mod shared;
 pub mod startup_validation;
 pub mod step;
 pub mod template;
+pub mod transacted_segment;
+pub mod transacted_walk;
 
 #[cfg(feature = "export-internal-adapters")]
 pub mod route {

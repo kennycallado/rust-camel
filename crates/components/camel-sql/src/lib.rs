@@ -5,9 +5,11 @@ pub mod consumer;
 pub mod endpoint;
 pub mod headers;
 pub mod health;
+pub mod manager;
 pub mod pool_factory;
 pub mod producer;
 pub mod query;
+pub mod session;
 pub(crate) mod utils;
 
 use std::sync::Arc;
@@ -26,6 +28,8 @@ pub use config::{
     TransactionMode,
 };
 pub use health::SqlHealthCheck;
+pub use manager::SqlTransactionManager;
+pub use session::SqlTxSession;
 
 type SharedPool = Arc<OnceCell<Arc<AnyPool>>>;
 

@@ -18,10 +18,24 @@ alternatives, the pool cost, and the at-least-once window are recorded in
 
 ## Status
 
-This page describes slice 1 of a three-slice family. The surface, the model
-and the load validation exist; execution does not. A `transacted` block in a
-route today is rejected at load on every loader, because no
-`TransactionManager` is registered.
+The surface, the model, the load validation and the manager registration
+exist; execution does not. Bundle boot registers one `SqlTransactionManager`
+per catalog datasource, so a `transacted` block passes load through the
+single walk and fails closed at route-add with `JoinSessionMissing` (the
+executor slice is pending).
+
+Beyond the slice-1 rejections listed below, the load walk now rejects, each
+typed and naming the offender:
+
+- a joined sql step issuing a transaction-control or implicit-commit
+  statement (`TransactionControlSql`);
+- a joined sql step whose SQL comes from a runtime source, including a
+  `file:` URI path (`RuntimeSqlInJoinedStep`);
+- a URL scheme whose transaction semantics cannot be proven
+  (`DialectUnprovable`);
+- a dialect that does not support joined transactions in v1
+  (`UnsupportedJoinDialect`);
+- a dynamic routing target inside a block (`DynamicTargetUnprovable`).
 
 ## What exists after slice 1 (`sqltrans-portmodel`)
 

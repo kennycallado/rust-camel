@@ -1,0 +1,15 @@
+{
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "r_glm (final whole-change review, ses_dfc96b118)",
+  "impl_hash_note": "HEAD at review: 5fa3488a9; all findings resolved in 5fa3488a9..fa4517294; final gate sweep on fa4517294",
+  "conformance_check": {
+    "expert": "e_gpt",
+    "rounds": 2,
+    "round1": "NON-CONFORMANT — 6 findings (admission deadline order; CommitFailed masking; declarative walk ordering; scanner gaps file:/PREPARE TRANSACTION/glued comments; begin atomicity; post-cutoff cancellation fixtures)",
+    "round1_fixes": "a665db953 + dc0d10036 + 88e92e297, re-checked by r_glm (APPROVE-WITH-FINDINGS, doc minors applied)",
+    "round2": "NON-CONFORMANT — 2 findings (rc-9awnc admission tie through the port; rc-4g25r scanner leading-pair prefix match)",
+    "round2_fixes": "b47cc45ad + fa4517294, re-checked by r_glm (APPROVE-WITH-FINDINGS: AUTOCOMMIT regression fixture + deterministic tie fixture, applied)",
+    "final": "all round-1 and round-2 expert findings resolved and r_glm-verified; five recorded deviations accepted by the expert (rc-ngk4e warn-carry, rc-xbela ';' split, executor-route deferral, 30s default acquire, inert TransactionManager::Any)"
+  },
+  "spec_re_bless": "never triggered (per mission order)"
+}

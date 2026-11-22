@@ -2448,6 +2448,41 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// sqltrans-exec step 3 regression: `Managed` stays REJECTED at load. The
+    /// load walk landing at both fan-ins must not open S3's path — endpoint
+    /// creation still refuses `transactionMode=Managed` before any catalog
+    /// lookup, with the exact rc-qv2iz guidance message, and `Auto` stays
+    /// accepted.
+    #[test]
+    fn managed_stays_rejected_at_load() {
+        let managed = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&transactionMode=Managed",
+        )
+        .expect("Managed parses; the rejection happens at validate_transaction_mode");
+        let uri = "sql:select 1?db_url=postgres://localhost/test&transactionMode=Managed";
+        let err = managed
+            .validate_transaction_mode(uri)
+            .expect_err("Managed must stay rejected at load");
+        let rendered = err.to_string();
+        // The URI renders through redact_url (S1 behavior): the db_url query
+        // is masked, the statement prefix and the rc-qv2iz guidance stay.
+        assert!(
+            rendered.contains("transactionMode=Managed is not implemented")
+                && rendered.contains("bd rc-qv2iz")
+                && rendered.contains("rejected endpoint 'sql:select 1?[redacted]'"),
+            "the exact S1 rejection must be unchanged, got: {rendered}"
+        );
+
+        let auto = SqlEndpointConfig::from_uri(
+            "sql:select 1?db_url=postgres://localhost/test&transactionMode=Auto",
+        )
+        .expect("Auto parses");
+        assert!(
+            auto.validate_transaction_mode(uri).is_ok(),
+            "Auto must stay accepted"
+        );
+    }
+
     // SQL-015: repeatCount
     #[test]
     fn repeat_count_defaults_to_none() {
