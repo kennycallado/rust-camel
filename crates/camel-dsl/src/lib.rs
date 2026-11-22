@@ -47,8 +47,8 @@ pub use embedded_store::{
 };
 pub use env_interpolation::{interpolate_with_args, interpolate_yaml_source};
 pub use json::{
-    parse_json, parse_json_to_canonical, parse_json_to_declarative, parse_json_with_threshold,
-    parse_json_with_threshold_and_security,
+    parse_json, parse_json_routes_with_env, parse_json_to_canonical, parse_json_to_declarative,
+    parse_json_with_threshold, parse_json_with_threshold_and_security,
 };
 pub use model::{
     AggregateStepDef, AggregateStrategyDef, BodyTypeDef, ChoiceStepDef, DeclarativeCircuitBreaker,
@@ -97,6 +97,72 @@ pub(crate) mod test_support {
         if INIT.set(()).is_ok() {
             let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
         }
+    }
+
+    /// WARN/ERROR counters for one capture scope. `warn()` and `error()`
+    /// stay valid after the [`tracing::subscriber::DefaultGuard`] that
+    /// produced them drops (the counters are shared via `Arc`).
+    pub(crate) struct EventCounts {
+        warn: Arc<std::sync::atomic::AtomicUsize>,
+        error: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl EventCounts {
+        /// Events at WARN level observed since the subscriber was installed.
+        pub(crate) fn warn(&self) -> usize {
+            self.warn.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Events at ERROR level observed since the subscriber was installed.
+        pub(crate) fn error(&self) -> usize {
+            self.error.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    /// Level-counting layer over a thread-local default subscriber — same
+    /// mechanism as camel-core's `capture_warns` precedent. Counts WARN and
+    /// ERROR separately so quietness pins can assert exact counts (the
+    /// logging contract distinguishes "no error!" from "no repeated warn!").
+    struct LevelCountLayer {
+        warn: Arc<std::sync::atomic::AtomicUsize>,
+        error: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl<C> tracing_subscriber::Layer<C> for LevelCountLayer
+    where
+        C: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, C>,
+        ) {
+            match *event.metadata().level() {
+                tracing::Level::WARN => {
+                    self.warn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                tracing::Level::ERROR => {
+                    self.error.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Install a thread-local WARN/ERROR counting subscriber.
+    pub(crate) fn event_counting_subscriber() -> (EventCounts, tracing::subscriber::DefaultGuard) {
+        use tracing_subscriber::prelude::*;
+        ensure_global_tracing_default();
+        let counts = EventCounts {
+            warn: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            error: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let layer = LevelCountLayer {
+            warn: Arc::clone(&counts.warn),
+            error: Arc::clone(&counts.error),
+        };
+        let guard = tracing_subscriber::registry().with(layer).set_default();
+        (counts, guard)
     }
 
     /// Test double for `TokenAuthenticator`, shared by unit tests across this

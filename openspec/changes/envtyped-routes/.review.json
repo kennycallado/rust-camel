@@ -1,0 +1,31 @@
+{
+  "change": "envtyped-routes",
+  "kind": "holistic",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_dfcf6e091ffeF3MHcZ8v75XqZG",
+  "impl_hash": "sha256: (full diff 8c33eae54...HEAD at review time; final commits bda34234a + holistic-fix commit)",
+  "findings": [
+    {
+      "id": "H1",
+      "severity": "Minor — resolved",
+      "text": "run_probe doc overstated quiet guarantee for YAML oracles (error!-free only; warn! suppression is the JSON twin's contract)",
+      "resolution": "doc narrowed; YAML behavior unchanged per blessed spec"
+    },
+    {
+      "id": "H2",
+      "severity": "Minor — resolved",
+      "text": "spec's literal-quoted-numeric rejection had no integer-position pin (bool twin only)",
+      "resolution": "literal_quoted_int_at_int_position_stays_rejected added (first-pass untagged-variant class asserted)"
+    }
+  ],
+  "review_scope": "complete diff 8c33eae54...HEAD (15 files, +4781/-253): env_int_probe.rs, env_interpolation.rs, json.rs, lib.rs, yaml.rs, camel-cli openapi.rs tests, tests/envtyped_route_docs.rs, docs page, openspec artifacts; all 26 delta scenarios walked to owning tests; one probe loop, four call sites; boundaries verified (no camel-config/bundles, no new deps, pass-1 preserved)",
+  "verified_by_reviewer": [
+    "cargo test -p camel-dsl --lib: 1044 passed",
+    "cargo test -p camel-dsl (full lane): all targets ok",
+    "cargo test -p camel-dsl --test envtyped_route_docs: 6 passed",
+    "cargo test -p camel-cli -- openapi: 15 passed",
+    "cargo clippy camel-dsl + camel-cli -D warnings: clean"
+  ],
+  "post_review_fixes_commit": "(this commit: doc narrowing + literal-int pin)"
+}

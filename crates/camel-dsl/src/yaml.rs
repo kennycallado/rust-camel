@@ -215,6 +215,25 @@ pub fn extract_rest_blocks(yaml: &str) -> Result<Vec<RouteDslRest>, CamelError> 
     Ok(dsl.rest)
 }
 
+/// Quiet twin of [`extract_rest_blocks`] for the typed probe: same
+/// deserialize + error wording, ZERO logging. Speculative probe attempts are
+/// expected failures; the caller replays the final failure through the
+/// logging [`extract_rest_blocks`] exactly once.
+fn extract_rest_blocks_for_probe(yaml: &str) -> Result<Vec<RouteDslRest>, CamelError> {
+    let dsl: RouteDslRoutes = serde_yml::from_str(yaml)
+        .map_err(|e| CamelError::RouteError(format!("YAML parse error: {e}")))?;
+    Ok(dsl.rest)
+}
+
+/// JSON twin of [`extract_rest_blocks_for_probe`]: quiet deserialize with the
+/// JSON arm's error wording prefix (the file-path annotation belongs to the
+/// caller's first-pass error).
+fn extract_rest_blocks_json_for_probe(json: &str) -> Result<Vec<RouteDslRest>, CamelError> {
+    let dsl: RouteDslRoutes = serde_json::from_str(json)
+        .map_err(|e| CamelError::RouteError(format!("JSON parse error: {e}")))?;
+    Ok(dsl.rest)
+}
+
 pub fn parse_yaml(yaml: &str) -> Result<Vec<RouteDefinition>, CamelError> {
     annotate_format(
         InputFormat::Yaml,
@@ -2870,15 +2889,30 @@ fn parse_routes_with_env_inner(
 /// placeholders through `lookup` (never the process environment) before
 /// extracting the `rest:` blocks. Extension dispatch mirrors discovery's
 /// `interpolate_for_parse` with one deliberate divergence: `.json` uses the
-/// legacy whole-text splice ([`crate::env_interpolation::interpolate_env_with`]),
-/// while `yaml`, `yml`, **and extension-less** files all take the
-/// tree-walk-first YAML seam
+/// legacy whole-text splice ([`crate::env_interpolation::interpolate_env_with`])
+/// as its FIRST pass, while `yaml`, `yml`, **and extension-less** files all
+/// take the tree-walk-first YAML seam
 /// ([`crate::env_interpolation::interpolate_yaml_source`]) — discovery routes
 /// unknown extensions to the splice arm, but this surface keeps its
 /// historical YAML-parse behavior (and comment hermeticity) for them.
 /// Same error wording as [`load_from_file_with_env`]: an unresolved variable
 /// without default fails naming the variable; parse errors are annotated
 /// with the file path.
+///
+/// Typed-position parity with [`parse_routes_with_env`] (envtyped-routes
+/// task 1.6): after a failed typed extract, both arms run the loader-layer
+/// probe with a QUIET extract oracle — YAML over the tree-walk provenance,
+/// JSON over the splice first pass through the same oracle-generic repair
+/// gates as the crate-private `json::repair_json_with_probe` helper (so the
+/// extract arm can never repair a duplicate-key document the route seam
+/// refuses). On final
+/// failure the YAML arm replays the document through the logging
+/// [`extract_rest_blocks`] exactly once (preserving today's single error
+/// log) and returns the ORIGINAL first-pass error annotated with the path.
+/// The JSON arm defers its single error log to the FINAL-failure branch
+/// (repair did not apply): a repair that wins emits no error-level event at
+/// all, while an unrepairable document still logs exactly once and returns
+/// its original first-pass error.
 pub fn extract_rest_blocks_from_file_with_env(
     path: &Path,
     lookup: &dyn Fn(&str) -> Option<String>,
@@ -2899,22 +2933,67 @@ pub fn extract_rest_blocks_from_file_with_env(
         Some("json") => {
             let interpolated = crate::env_interpolation::interpolate_env_with(&content, lookup)
                 .map_err(not_set)?;
-            let dsl: RouteDslRoutes = serde_json::from_str(&interpolated).map_err(|e| {
-                // log-policy: system-broken
-                error!(error = %e, "json parse failed");
-                CamelError::RouteError(format!("JSON parse error: {e} (in {})", path.display()))
-            })?;
-            Ok(dsl.rest)
+            let parse_err = match serde_json::from_str::<RouteDslRoutes>(&interpolated) {
+                Ok(dsl) => return Ok(dsl.rest),
+                Err(e) => e,
+            };
+            let first_error = CamelError::RouteError(format!(
+                "JSON parse error: {parse_err} (in {})",
+                path.display()
+            ));
+            let probe =
+                |probe_text: &str, provenance: &[crate::env_interpolation::ProvenancePath]| {
+                    crate::env_int_probe::parse_json_with_probe(
+                        probe_text,
+                        Some(provenance),
+                        extract_rest_blocks_json_for_probe,
+                    )
+                };
+            match crate::json::repair_json_with_probe(&interpolated, &content, lookup, &probe) {
+                Ok(Some(rest)) => Ok(rest),
+                Ok(None) => {
+                    // Final-failure log site: only when no repair applies, so a
+                    // winning repair stays silent and a broken document keeps
+                    // exactly one error event.
+                    // log-policy: system-broken
+                    error!(error = %parse_err, "json parse failed");
+                    Err(first_error)
+                }
+                Err(variable) => Err(not_set(variable)),
+            }
         }
         _ => {
-            let interpolated = crate::env_interpolation::interpolate_yaml_source(&content, lookup)
-                .map_err(not_set)?;
-            extract_rest_blocks(&interpolated).map_err(|e| match e {
-                CamelError::RouteError(msg) => {
-                    CamelError::RouteError(format!("{msg} (in {})", path.display()))
+            let (interpolated, provenance) =
+                crate::env_interpolation::interpolate_yaml_source_with_provenance(&content, lookup)
+                    .map_err(not_set)?;
+            let first = match provenance.as_deref() {
+                Some(provenance) => {
+                    crate::env_int_probe::run_probe::<
+                        crate::env_int_probe::YamlDoc,
+                        Vec<RouteDslRest>,
+                    >(&interpolated, provenance, extract_rest_blocks_for_probe)
                 }
-                other => other,
-            })
+                // No tree walk (legacy splice fallback) means no provenance:
+                // only the first pass is possible.
+                None => extract_rest_blocks_for_probe(&interpolated),
+            };
+            match first {
+                Ok(rest) => Ok(rest),
+                Err(first_error) => {
+                    // Final-failure replay (logging only): re-run the
+                    // interpolated text through the logging extractor exactly
+                    // once so genuinely broken documents keep today's error
+                    // log. The returned error stays the original first-pass
+                    // failure, annotated with the file path.
+                    let _ = extract_rest_blocks(&interpolated);
+                    Err(match first_error {
+                        CamelError::RouteError(msg) => {
+                            CamelError::RouteError(format!("{msg} (in {})", path.display()))
+                        }
+                        other => other,
+                    })
+                }
+            }
         }
     }
 }
@@ -6547,7 +6626,7 @@ routes:
     }
 
     #[test]
-    fn extract_rest_from_file_int_field_fails_type_mismatch() {
+    fn extract_rest_from_file_int_default_coerces() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_route_file(
             &dir,
@@ -6555,8 +6634,22 @@ routes:
             "rest:\n  - host: 127.0.0.1\n    port: ${env:PORT:-8080}\n",
         );
 
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None)
+            .expect("int placeholder with a clean default must coerce via the probe");
+        assert_eq!(rest[0].port, 8080);
+    }
+
+    #[test]
+    fn extract_rest_from_file_int_notanumber_fails_type_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-int-bad.yaml",
+            "rest:\n  - host: 127.0.0.1\n    port: ${env:PORT:-notanumber}\n",
+        );
+
         let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
-            Ok(_) => panic!("expected int placeholder to fail type mismatch"),
+            Ok(_) => panic!("expected a non-numeric default to keep the type mismatch"),
             Err(e) => e,
         };
         let msg = err.to_string();
@@ -6564,7 +6657,8 @@ routes:
         // wording (`expected unsigned integer, found string`) — the same
         // class as the loader's boot-parity int test (which asserts the
         // untagged-variant wording for an enum field), NOT the named-variable
-        // doc error.
+        // doc error. The probe has no candidate (`notanumber` is not a clean
+        // integer), so the first-pass error stands.
         assert!(
             msg.contains("type mismatch")
                 && msg.contains("expected unsigned integer")
@@ -6578,6 +6672,46 @@ routes:
         assert!(
             !msg.contains("Environment variable"),
             "int placeholder with default must not name the env var, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_from_file_int_leading_zero_keeps_first_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-int-leading-zero.yaml",
+            "rest:\n  - host: 127.0.0.1\n    port: ${env:PORT:-007}\n",
+        );
+
+        let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
+            Ok(_) => panic!("`007` is not a clean integer candidate, so the error stands"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("type mismatch")
+                && msg.contains("expected unsigned integer")
+                && msg.contains("found string"),
+            "expected the first-pass type-mismatch wording for `007`, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn extract_rest_final_failure_logs_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-int-log.yaml",
+            "rest:\n  - host: 127.0.0.1\n    port: ${env:PORT:-notanumber}\n",
+        );
+
+        let (counts, _guard) = crate::test_support::event_counting_subscriber();
+        assert!(extract_rest_blocks_from_file_with_env(&path, &|_| None).is_err());
+        assert_eq!(
+            counts.error(),
+            1,
+            "final-failure replay must log exactly one error event"
         );
     }
 
@@ -6678,26 +6812,64 @@ routes:
     }
 
     #[test]
-    fn extract_rest_from_file_json_int_fails() {
+    fn extract_rest_json_int_default_coerces() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_route_file(
             &dir,
             "rest-int.json",
-            r#"{"rest":[{"host":"127.0.0.1","port":"${env:PORT:-8080}"}]}"#,
+            r#"{"rest":[{"host":"127.0.0.1","port":"${env:RC_OJ_PORT:-8082}"}]}"#,
+        );
+
+        let (counts, _guard) = crate::test_support::event_counting_subscriber();
+        let rest = extract_rest_blocks_from_file_with_env(&path, &|_| None)
+            .expect("JSON int placeholder with a clean default must coerce via the probe");
+        assert_eq!(rest[0].port, 8082);
+        assert_eq!(
+            counts.error(),
+            0,
+            "a winning repair is a success: the JSON arm must emit zero error-level events"
+        );
+    }
+
+    #[test]
+    fn extract_rest_json_final_failure_logs_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_route_file(
+            &dir,
+            "rest-int-log.json",
+            r#"{"rest":[{"host":"127.0.0.1","port":"${env:RC_OJ_PORT:-notanumber}"}]}"#,
+        );
+
+        let (counts, _guard) = crate::test_support::event_counting_subscriber();
+        assert!(extract_rest_blocks_from_file_with_env(&path, &|_| None).is_err());
+        assert_eq!(
+            counts.error(),
+            1,
+            "the first-pass JSON log site must fire exactly once"
+        );
+    }
+
+    #[test]
+    fn extract_rest_json_duplicate_key_never_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        // `path` is declared twice in the same object: the repair gate (shared
+        // with the route seam through the oracle-generic helper) refuses
+        // duplicate-key documents, so the still-string port keeps the
+        // first-pass error even though it is a clean coercion candidate.
+        let path = write_route_file(
+            &dir,
+            "rest-dup.json",
+            r#"{"rest":[{"host":"127.0.0.1","port":"${env:RC_OJ_PORT:-8082}","path":"/a","path":"/b"}]}"#,
         );
 
         let err = match extract_rest_blocks_from_file_with_env(&path, &|_| None) {
-            Ok(_) => panic!("expected json int placeholder to fail"),
+            Ok(_) => panic!("duplicate-key JSON documents must never be repaired"),
             Err(e) => e,
         };
         let msg = err.to_string();
         assert!(
-            msg.contains("invalid type"),
-            "expected type mismatch, got: {msg}"
-        );
-        assert!(
-            !msg.contains("not set"),
-            "int placeholder with default must not surface the named-var error, got: {msg}"
+            msg.contains("JSON parse error"),
+            "expected the first-pass JSON parse error, got: {msg}"
         );
     }
 

@@ -87,7 +87,84 @@ the edited map. Rebuilding drops the metadata that records which leaves
 carried a token, so no stale path coerces a token-free value. That metadata
 is never a value and never affects config equality.
 
-Route-document and DSL seams are covered separately (rc-3c67o.2).
+## Route documents
+
+Route documents probe typed leaves after a failed first parse. The candidate
+set spans every subtree except the two [stay-out subtrees](#stay-out-subtrees);
+in practice it covers `routes:`, `rest:`, and `mcp:`. A candidate is a
+whole-scalar `${env:}` substitution whose resolved text is a clean integer or
+a clean boolean. The lexical gates match
+[Typed values](#typed-values). Any other text is not a candidate, and the
+document keeps its first-pass parse error.
+
+```yaml
+rest:
+  - host: 0.0.0.0
+    port: ${env:ORDERS_PORT:-8080}
+    path: /orders
+```
+
+A `rest:` port is a number. The placeholder resolves to the string `8080`,
+the strict parse fails, and the probe coerces the leaf and retries. The route
+loads with the typed port. Probing runs only after a failed first parse, so a
+document that parses today never probes and keeps its values.
+
+The probe tries candidate subsets smallest-first, in document order, and
+parses a fresh tree for each attempt. The first success wins, so coercion
+never extends beyond a minimum-cardinality subset. The cap is eight candidate
+leaves for the whole document, shared by every probed subtree. Failures keep
+their usual shape: an unresolved variable without a default fails and names
+the variable; a non-clean value, an over-cap document, and a genuinely broken
+document all keep the first-pass error text.
+
+### Stay-out subtrees
+
+Two subtrees never contribute candidates:
+
+- **`templated_routes.parameters`** stays string. These values are
+  template-substitution inputs, and the map is `String` by contract. A
+  numeric-looking parameter value loads as text and consumes no cap budget.
+- **Template bodies (`templates[].routes[]`)** are untyped at document parse.
+  Typing happens at materialization, which the probe never observes. A direct
+  `${env:}` token in a template body keeps its materialization limitation: it
+  substitutes to a string and does not coerce there.
+
+For a numeric template input, use the typed-parameter machinery: declare a
+`number` or `boolean` parameter. The materializer then substitutes the whole
+node as a typed value.
+
+### JSON route documents
+
+A JSON route document repairs through the same probe. The legacy text splice
+stays the first pass, so a document that loads today keeps today's values,
+error text, and warnings. The probe runs only when that first pass fails.
+
+Two JSON conditions disable the repair. A document with a duplicate object key
+anywhere never repairs, because key-sorted maps cannot preserve the authored
+overwrite order. A document whose splice substitution breaks JSON syntax, or
+whose splice tree and walk tree differ, also never repairs. Both keep the
+first-pass error.
+
+### Collision and cap boundaries
+
+An insertion collision drops the overwritten provenance path and its
+descendants. A substituted
+key that a later mapping key overwrites is not a candidate, even when the
+values are equal: a surviving literal must never coerce on a token's
+provenance. The document keeps the first-pass error when that lost path was
+its only repair.
+
+A document over the eight-candidate cap keeps the first-pass error. This
+holds when candidates under `rest:` or `mcp:` push an otherwise repairable
+`routes:` document past the cap.
+
+### `camel openapi generate`
+
+The REST extractor shares the probe. A `rest:` port placeholder therefore
+coerces under `camel openapi generate` too, and the generated document carries
+the coerced value in its server URL. Extraction keeps the default-only
+lookup: ambient environment is never read. An unresolved no-default
+placeholder still fails and names the variable.
 
 ## Escapes
 

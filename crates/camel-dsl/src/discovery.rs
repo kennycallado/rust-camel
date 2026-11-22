@@ -867,18 +867,67 @@ fn parse_document_routes(
             }
         }
         Some("json") => {
-            // Parse regular routes
-            let file_routes = parse_json_with_threshold_and_security_with_script_ctx(
+            let threshold = stream_cache_threshold
+                .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD);
+            let security = security_ctx.cloned().unwrap_or_default();
+
+            // PASS 1 — the legacy whole-text splice + existing parse. Values,
+            // error text, and warnings stay byte-identical for every document
+            // that loads today (`interpolate_for_parse` keeps returning `None`
+            // provenance for JSON, so the spliced text is the first pass).
+            let first_pass = parse_json_with_threshold_and_security_with_script_ctx(
                 &content,
-                stream_cache_threshold
-                    .unwrap_or(camel_api::stream_cache::DEFAULT_STREAM_CACHE_THRESHOLD),
-                security_ctx.cloned().unwrap_or_default(),
+                threshold,
+                security.clone(),
                 &script_ctx,
-            )
-            .map_err(|e| DiscoveryError::Json {
-                path: path_str.to_string(),
-                error: e.to_string(),
-            })?;
+            );
+            let (file_routes, repaired_text) = match first_pass {
+                Ok(routes) => (routes, None),
+                Err(first_error) => {
+                    // REPAIR — only after pass 1 fails. The shared
+                    // oracle-generic helper runs the JSON baseline gates
+                    // (syntax + duplicate keys, tree-walk/splice equality,
+                    // nonempty candidates) so discovery can never repair a
+                    // document another JSON arm refuses. The quiet route
+                    // oracle built from THIS document's
+                    // threshold/security/script context owns the bounded
+                    // probe and returns the winning repaired text alongside
+                    // the routes — ONE probe execution, no second search.
+                    let quiet_probe = |text: &str, provenance: &[ProvenancePath]| {
+                        crate::env_int_probe::parse_json_with_probe_with_text(
+                            text,
+                            provenance,
+                            &script_ctx,
+                            threshold,
+                            security.clone(),
+                        )
+                    };
+                    match crate::json::repair_json_with_probe(
+                        &content,
+                        raw_content,
+                        lookup,
+                        &quiet_probe,
+                    ) {
+                        Ok(Some((repaired_routes, text))) => (repaired_routes, Some(text)),
+                        // No repair applies: the ORIGINAL first-pass error
+                        // stands, mapped exactly as before (no replay — the
+                        // JSON chain has no logging deserializer).
+                        Ok(None) => {
+                            return Err(DiscoveryError::Json {
+                                path: path_str.to_string(),
+                                error: first_error.to_string(),
+                            });
+                        }
+                        // Same unresolved-variable mapping as today.
+                        Err(var_name) => {
+                            return Err(DiscoveryError::Env {
+                                path: path_str.to_string(),
+                                var_name,
+                            });
+                        }
+                    }
+                }
+            };
             // Source hash finalization is post-parse: raw content plus every
             // referenced script's contents (deterministic `BTreeMap` order).
             attach_document_routes(
@@ -889,8 +938,15 @@ fn parse_document_routes(
                 registry,
             );
 
+            // When the repair won, the repaired document is what EVERY
+            // downstream consumer parses: the template extractors deserialize
+            // the whole `RouteDslRoutes` and would reject a still-string
+            // typed leaf in the original splice. Non-repaired documents keep
+            // today's spliced text.
+            let downstream = repaired_text.as_deref().unwrap_or(&content);
+
             // Parse templates
-            let tpls = crate::template::json::parse_json_templates(&content).map_err(|e| {
+            let tpls = crate::template::json::parse_json_templates(downstream).map_err(|e| {
                 DiscoveryError::MaterializationFailed {
                     path: path_str.to_string(),
                     source: e,
@@ -912,7 +968,7 @@ fn parse_document_routes(
 
             // Parse templated route specs for later materialization
             let specs =
-                crate::template::json::parse_json_templated_routes(&content).map_err(|e| {
+                crate::template::json::parse_json_templated_routes(downstream).map_err(|e| {
                     DiscoveryError::MaterializationFailed {
                         path: path_str.to_string(),
                         source: e,
@@ -2539,9 +2595,10 @@ templated_routes:
     }
 
     #[test]
-    fn json_int_placeholder_still_fails() {
-        // Non-goal pin: JSON route files never probe — a string at an
-        // integer position stays a discovery error.
+    fn discovery_json_numeric_pin_flipped() {
+        // Flipped pin (envtyped-routes task 1.5): the JSON arm now runs the
+        // shared repair probe after pass 1 fails, so a placeholder at a
+        // numeric position coerces instead of staying a discovery error.
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("int-placeholder.json");
         fs::write(
@@ -2551,24 +2608,118 @@ templated_routes:
         .unwrap();
         let pattern = file_path.to_string_lossy().to_string();
 
-        let err = match discover_routes_with_threshold_security_and_env(
+        let routes = discover_routes_with_threshold_security_and_env(
             &[pattern],
             4096,
             SecurityCompileContext::default(),
             &|_| None,
-        ) {
-            Ok(_) => panic!("expected JSON int placeholder to stay rejected"),
-            Err(e) => e,
-        };
-        match &err {
-            DiscoveryError::Json { error, .. } => {
-                assert!(
-                    error.contains("did not match any variant") || error.contains("invalid type"),
-                    "expected a typed parse error, got: {error}"
-                );
-            }
-            other => panic!("expected DiscoveryError::Json, got: {other:?}"),
-        }
+        )
+        .unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_discovered_throttle(&routes, 2);
+    }
+
+    // ── JSON arm: two-pass repair + repaired-text consumption (task 1.5) ──
+
+    #[test]
+    fn discovery_json_rest_doc_loads_through_repair() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("rest-port.json");
+        fs::write(
+            &file_path,
+            r#"{"rest":[{"host":"127.0.0.1","port":"${env:RC_D_PORT:-8081}","path":"/api","operations":[{"method":"GET","to":"direct:list"}]}]}"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|_| None,
+        )
+        .unwrap();
+        assert_eq!(routes.len(), 1, "one REST block lowers to one route");
+        let uri = routes[0].from_uri();
+        assert!(
+            uri.contains(":8081/"),
+            "the repaired REST port must reach the lowered URI, got: {uri}"
+        );
+    }
+
+    #[test]
+    fn discovery_json_routes_throttle_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("throttle.json");
+        fs::write(
+            &file_path,
+            r#"{"routes":[{"id":"json-repair-throttle","from":"direct:start","steps":[{"throttle":{"max_requests":"${env:RC_D_MAX:-3}","period_secs":1}}]}]}"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|_| None,
+        )
+        .unwrap();
+        assert_discovered_throttle(&routes, 3);
+    }
+
+    #[test]
+    fn discovery_json_repaired_text_feeds_template_extractors() {
+        // The template extractors deserialize the WHOLE `RouteDslRoutes`, so
+        // they reject a still-string `port` in the original splice. Discovery
+        // succeeding here proves they consumed the REPAIRED document text.
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("rest-and-templates.json");
+        fs::write(
+            &file_path,
+            r#"{
+                "rest":[{"host":"127.0.0.1","port":"${env:RC_D_TPL_PORT:-8084}","path":"/api","operations":[{"method":"GET","to":"direct:list"}]}],
+                "templates":[{"id":"rc-d-tpl","parameters":[{"name":"target"}],"routes":[{"id":"rc-d-tpl-body","from":"{{target}}","steps":[]}]}],
+                "templated_routes":[{"route_template_ref":"rc-d-tpl","route_id":"rc-d-inst","parameters":{"target":"direct:repaired"}}]
+            }"#,
+        )
+        .unwrap();
+        let pattern = file_path.to_string_lossy().to_string();
+
+        let routes = discover_routes_with_threshold_security_and_env(
+            &[pattern],
+            4096,
+            SecurityCompileContext::default(),
+            &|_| None,
+        )
+        .unwrap();
+
+        // ONE probe execution must feed BOTH consumers: the repaired route
+        // parse (numeric-port URI) and the template extractors (materialized
+        // instance). Exactly the two authored entries appear.
+        assert_eq!(
+            routes.len(),
+            2,
+            "one repaired REST route plus one materialized template instance"
+        );
+        let rest = routes
+            .iter()
+            .find(|r| r.from_uri().starts_with("http://"))
+            .expect("repaired REST route discovered");
+        assert_eq!(
+            rest.from_uri(),
+            "http://127.0.0.1:8084/api?httpMethod=GET",
+            "the repaired numeric port must reach the lowered REST URI"
+        );
+        let instance = routes
+            .iter()
+            .find(|r| r.route_id() == "rc-d-inst")
+            .expect("templated instance materialized from the repaired text");
+        assert_eq!(
+            instance.from_uri(),
+            "direct:repaired",
+            "the instance must carry the template body's from URI"
+        );
     }
 
     // ── Virtual-store config parity goldens (openspec change

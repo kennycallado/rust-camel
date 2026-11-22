@@ -1,8 +1,9 @@
 //! `camel openapi generate <file>` — generate an OpenAPI 3.0.3 document
 //! from `rest:` blocks in a YAML or JSON route file. `${env:}` placeholders in
-//! `rest:` blocks resolve default-only at generate time: string positions
-//! take the concrete default, int/bool positions fail per the tree-walk
-//! canon, and ambient env is never read.
+//! `rest:` blocks resolve default-only at generate time, and typed positions
+//! coerce through the loader-layer typed probe (rest blocks included); ambient
+//! env is never read. An unresolved no-default placeholder still fails naming
+//! the variable, and a literal without an env token stays rejected.
 
 use std::path::Path;
 
@@ -34,11 +35,14 @@ pub struct OpenapiGenerateArgs {
 /// Run the `openapi generate` subcommand logic.
 ///
 /// Reads the file and extracts `rest:` blocks in one sibling call, which
-/// also resolves `${env:}` placeholders default-only (string positions take
-/// the concrete default; int/bool positions fail per the tree-walk canon;
-/// ambient env is never read). Then validates via lowering, generates the
-/// OpenAPI document, and returns it. Warnings are printed
-/// to stderr by the caller.
+/// also resolves `${env:}` placeholders default-only. Typed positions
+/// coerce through the loader-layer typed probe (rest blocks included):
+/// string positions take the concrete default, and an int/bool position
+/// such as `port` takes the coerced typed value. Ambient env is never read.
+/// An unresolved no-default placeholder still fails naming the variable,
+/// and a literal without an env token stays rejected. Then validates via
+/// lowering, generates the OpenAPI document, and returns it. Warnings are
+/// printed to stderr by the caller.
 pub fn run_generate(args: &OpenapiGenerateArgs) -> Result<Value, String> {
     let rest_blocks =
         camel_dsl::extract_rest_blocks_from_file_with_env(Path::new(&args.file), &|_| None)
@@ -290,11 +294,100 @@ rest:
     }
 
     #[test]
-    fn generate_int_port_placeholder_errors() {
+    fn openapi_generate_yaml_rest_port_default_coerces() {
         let yaml = r#"
 rest:
   - host: 127.0.0.1
-    port: ${env:PORT:-8080}
+    port: ${env:CLI_OA_PORT:-8083}
+    path: /api/users
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+"#;
+        let mut tmp = tempfile::NamedTempFile::with_suffix(".yaml").unwrap(); // allow-unwrap
+        write!(tmp, "{yaml}").unwrap(); // allow-unwrap
+
+        let args = OpenapiGenerateArgs {
+            file: tmp.path().to_string_lossy().to_string(),
+            title: "API".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        let doc = run_generate(&args).expect("port default should coerce to a typed u16");
+        assert_eq!(doc["servers"][0]["url"], "http://127.0.0.1:8083");
+        let serialized = serde_json::to_string(&doc).unwrap(); // allow-unwrap
+        assert!(
+            serialized.contains(":8083"),
+            "server URL must carry the coerced port: {serialized}"
+        );
+        assert!(
+            !serialized.contains("${env"),
+            "document must not carry unresolved placeholders: {serialized}"
+        );
+    }
+
+    #[test]
+    fn openapi_generate_json_rest_port_default_coerces() {
+        let json = r#"{"rest":[{"host":"127.0.0.1","port":"${env:CLI_OA_PORT:-8083}","path":"/api/users","operations":[{"method":"GET","operation_id":"listUsers","to":"direct:listUsers"}]}]}"#;
+        let mut tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap(); // allow-unwrap
+        write!(tmp, "{json}").unwrap(); // allow-unwrap
+
+        let args = OpenapiGenerateArgs {
+            file: tmp.path().to_string_lossy().to_string(),
+            title: "API".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        let doc = run_generate(&args).expect("json port default should coerce to a typed u16");
+        assert_eq!(doc["servers"][0]["url"], "http://127.0.0.1:8083");
+        let serialized = serde_json::to_string(&doc).unwrap(); // allow-unwrap
+        assert!(
+            serialized.contains(":8083"),
+            "server URL must carry the coerced port: {serialized}"
+        );
+        assert!(
+            !serialized.contains("${env"),
+            "document must not carry unresolved placeholders: {serialized}"
+        );
+    }
+
+    #[test]
+    fn openapi_generate_unresolved_names_variable() {
+        let yaml = r#"
+rest:
+  - host: ${env:CLI_OA_UNSET}
+    port: 9090
+    path: /api/users
+    operations:
+      - method: GET
+        operation_id: listUsers
+        to: direct:listUsers
+"#;
+        let mut tmp = tempfile::NamedTempFile::with_suffix(".yaml").unwrap(); // allow-unwrap
+        write!(tmp, "{yaml}").unwrap(); // allow-unwrap
+
+        let args = OpenapiGenerateArgs {
+            file: tmp.path().to_string_lossy().to_string(),
+            title: "API".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        let result = run_generate(&args);
+        assert!(result.is_err());
+        let err = result.unwrap_err(); // allow-unwrap
+        assert!(
+            err.contains("CLI_OA_UNSET") && err.contains("not set"),
+            "expected the error to name CLI_OA_UNSET as not set, got: {err}"
+        );
+    }
+
+    #[test]
+    fn openapi_generate_broken_document_still_errors() {
+        let yaml = r#"
+rest:
+  - host: 127.0.0.1
+    port: ${env:CLI_OA_PORT:-notanumber}
     path: /api/users
     operations:
       - method: GET
@@ -317,13 +410,16 @@ rest:
             err.contains("type mismatch")
                 && err.contains("expected unsigned integer")
                 && err.contains("found string"),
-            "expected the type-mismatch wording, got: {err}"
+            "expected the first-pass type-mismatch wording, got: {err}"
         );
         assert!(
             !err.contains("not set"),
             "must not surface env wording: {err}"
         );
-        assert!(!err.contains("PORT"), "must not name the variable: {err}");
+        assert!(
+            !err.contains("CLI_OA_PORT"),
+            "must not name the variable: {err}"
+        );
     }
 
     #[test]
@@ -357,7 +453,7 @@ rest:
     }
 
     #[test]
-    fn generate_success_status_placeholder_errors() {
+    fn openapi_generate_yaml_success_status_default_coerces() {
         let yaml = r#"
 rest:
   - host: 127.0.0.1
@@ -368,7 +464,7 @@ rest:
         operation_id: createUser
         consumes: application/json
         produces: application/json
-        success_status: ${env:CODE:-201}
+        success_status: ${env:CLI_OA_STATUS:-201}
         to: direct:createUser
 "#;
         let mut tmp = tempfile::NamedTempFile::with_suffix(".yaml").unwrap(); // allow-unwrap
@@ -380,20 +476,17 @@ rest:
             version: "1.0.0".to_string(),
         };
 
-        let result = run_generate(&args);
-        assert!(result.is_err());
-        let err = result.unwrap_err(); // allow-unwrap
+        let doc = run_generate(&args).expect("status default should coerce to a typed u16");
+        let responses = &doc["paths"]["/api/users"]["post"]["responses"];
         assert!(
-            err.contains("type mismatch")
-                && err.contains("expected unsigned integer")
-                && err.contains("found string"),
-            "expected the type-mismatch wording, got: {err}"
+            responses.get("201").is_some(),
+            "coerced success_status must land on responses[\"201\"]: {responses}"
         );
         assert!(
-            !err.contains("not set"),
-            "must not surface env wording: {err}"
+            responses.get("200").is_none(),
+            "the default 200 stub must be replaced by the coerced status: {responses}"
         );
-        assert!(!err.contains("CODE"), "must not name the variable: {err}");
+        assert_eq!(doc["servers"][0]["url"], "http://127.0.0.1:9090");
     }
 
     #[test]
@@ -456,8 +549,9 @@ rest:
             "document must not carry unresolved placeholders: {serialized}"
         );
 
-        // Port placeholder fails deserialization: the spliced leaf is a JSON
-        // string where u16 is expected (verbatim serde_json wording).
+        // Port placeholder coerces: the spliced leaf is a string where u16 is
+        // expected, so the document repairs through the shared probe and the
+        // server URL carries the typed port.
         let int_port = r#"{"rest":[{"host":"127.0.0.1","port":"${env:PORT:-8080}","path":"/api/users","operations":[{"method":"GET","operation_id":"listUsers","to":"direct:listUsers"}]}]}"#;
         let mut tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap(); // allow-unwrap
         write!(tmp, "{int_port}").unwrap(); // allow-unwrap
@@ -467,18 +561,13 @@ rest:
             title: "API".to_string(),
             version: "1.0.0".to_string(),
         };
-        let result = run_generate(&args);
-        assert!(result.is_err());
-        let err = result.unwrap_err(); // allow-unwrap
+        let doc = run_generate(&args).expect("json port default should coerce");
+        assert_eq!(doc["servers"][0]["url"], "http://127.0.0.1:8080");
+        let serialized = serde_json::to_string(&doc).unwrap(); // allow-unwrap
         assert!(
-            err.contains("invalid type"),
-            "expected serde_json invalid-type wording, got: {err}"
+            !serialized.contains("${env"),
+            "document must not carry unresolved placeholders: {serialized}"
         );
-        assert!(
-            !err.contains("not set"),
-            "must not surface env wording: {err}"
-        );
-        assert!(!err.contains("PORT"), "must not name the variable: {err}");
 
         // No-default token fails naming the variable.
         let no_default = r#"{"rest":[{"host":"${env:REST_HOST}","port":9090,"path":"/api/users","operations":[{"method":"GET","operation_id":"listUsers","to":"direct:listUsers"}]}]}"#;

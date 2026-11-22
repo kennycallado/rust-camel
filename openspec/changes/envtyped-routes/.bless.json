@@ -1,0 +1,119 @@
+{
+  "change": "envtyped-routes",
+  "kind": "spec",
+  "final_verdict": "PLAN BLESS (spec: BLESS by owner override; plan: BLESS)",
+  "gate_outcome": "STOPPED \u2014 authorized closure dispatch returned BLESS-WITH-FIXES; parked blocked: design, no further attempts without human decision",
+  "expert": "experts/e_gpt",
+  "bless_hash": "sha256:0f4fd3751e905bf12903133c75903bc7656d1a1e08ac688f4a83e959a52029c4",
+  "rounds": [
+    {
+      "round": 1,
+      "hash": "sha256:d2df09c5b2009dde8d76ac11419ee8cf6b8a80e6cc23817ad5620d5e9da886e1",
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e018b57aaffe6i0H29FHftfbJq",
+      "fixes_applied": [
+        "candidate-set exclusion of templates/templated_routes stay-outs (cap-budget argument)",
+        "oracle explicitly spans deserialize+compile; S_min includes compile-required polymorphic coercions",
+        "JSON two-pass legacy-splice-first; provenance collision guard",
+        "quiet speculative parses (warnings-suppressed JSON twin)",
+        "regression matrix + stale pins (CLI openapi, discovery numeric)"
+      ]
+    },
+    {
+      "round": 2,
+      "hash": "sha256:a061b08cd6c70d1619eca95dc261db74a76eff102b464a7c1e2ef9f9ddee3ded",
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e01868a36ffewpTgVQ796eeasI",
+      "fixes_applied": [
+        "minimum-cardinality restatement of the subset argument; qualified cap-compat promise with pinned $schema boundary",
+        "JSON repair restricted to legacy semantic baseline (3 gate checks)",
+        "structural insert-time collision guard replacing text-equality",
+        "named counted quietness fixture"
+      ]
+    },
+    {
+      "round": 3,
+      "hash": "sha256:3d5efd0587d3c0ff0c85c2c860fc31f3f243391952606696b6af6d2ae97787bb",
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e015de3f6ffenQAEsNowBjosI",
+      "fixes_applied": [
+        "host removed from repair targets; compat promise split pass-1/(a) routes-only/(b) widened",
+        "JSON duplicate-key rejection (serde_json sorted maps cannot preserve authored overwrite order); key-sorted provenance order; preserve_order feature rejected",
+        "repaired text feeds discovery template extractors; clean REST/throttle discovery pins",
+        "fixture renamed json_repair_quiet_idempotent_warning with verified warning site"
+      ]
+    },
+    {
+      "round": 4,
+      "hash": "sha256:ad17d539c1c767d5276956e5d2a454b18ac63effabcfa0aa34751794dd688d40",
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e0158a8e3ffeAaxG1sLnKqXlps",
+      "fixes_NOT_applied": [
+        "F1 (semantic, expert-reproduced): YAML collision guard correctly drops stale provenance for a routes:-only doc that probe-loads TODAY with one candidate ('${env:KEY:-max_requests}': '${env:VALUE:-404}' followed by max_requests: '404') -> same doc fails below cap after the change; compat promise must exclude collision-guarded documents in all three artifacts + pin the below-cap stale-provenance case",
+        "F2 (fixture, expert-verified): zero-throttle step fails at AST lowering BEFORE the idempotent_consumer warning site (yaml.rs:1782-1789, json.rs:73-76,165-174 vs compile.rs:1701-1713) -> fixture vacuous; verified replacement: trailing {\"unmarshal\":\"no-such-format\"} yields exactly one warning for both string and numeric set_body values"
+      ],
+      "authorized_closure_dispatch": false
+    },
+    {
+      "round": 5,
+      "authorized_closure_dispatch": true,
+      "hash": "sha256:2a168f9f2a81cf4d13d6e2637f14ee30851bb58ac3b66c61f2b9072cb188a556",
+      "verdict": "BLESS-WITH-FIXES",
+      "session": "ses_e0151d556ffe6OimIeGJKr7vWk",
+      "fixes_applied_before_dispatch": [
+        "F1: compat promise re-classified (a) routes-only except over-cap / (b) collision-guarded excluded / (c) widened repairs; below-cap stale-provenance scenario pinned with the exact KEY/VALUE doc; Testing matrix + proposal updated",
+        "F2: json_repair_quiet_idempotent_warning uses the verified trailing unmarshal no-such-format step (zero-throttle excluded with AST-lowering rationale), exact counts, both set_body variants"
+      ],
+      "remaining_findings": [
+        "R5-1 (wording contradiction): design.md still carries an unconditional 'routes:-only behavior bit-identical' line in the compatibility block (~design.md:128-129) contradicting the collision-guard exclusion; proposal.md acceptance criterion must be explicitly FIRST-PASS-ONLY.",
+        "R5-2 (scope label): the below-cap repair-loss pin is YAML-ONLY (JSON rejects duplicate keys before probing, so the same regression cannot occur there); the design Testing 'JSON glue: same matrix' line wrongly includes it \u2014 mark YAML-only, keep JSON's separate duplicate-key rejection pin."
+      ],
+      "confirmed_good": [
+        "F2 fixture reaches the warning site (compile processes steps in order: idempotent warning precedes the trailing unknown-format error)",
+        "strict openspec validation passes; hash verified"
+      ],
+      "gate_outcome": "STOPPED per authorization: one dispatch only; not BLESSED -> park blocked: design"
+    },
+    {
+      "round": 6,
+      "authorized_closure_dispatch": true,
+      "final": true,
+      "verdict": "BLESS-WITH-FIXES \u2014 R5-2 holds; R5-1 still unmet (design.md:128-134 named collisions as the ONLY exception, omitting the pinned $schema over-cap exception)",
+      "session": "ses_dfddf66f8ffestY8Ve97jFiCzR",
+      "outcome": "STOP RULE executed: worker applied the expert's text verbatim (both clauses: $schema over-cap exception included AND claim limited to documents whose only candidates are under routes:); mission PARKS; BLESS recorded by owner override per stop rule \u2014 no 7th dispatch",
+      "post_fix_hash": "sha256:0f4fd3751e905bf12903133c75903bc7656d1a1e08ac688f4a83e959a52029c4"
+    }
+  ],
+  "validation": "openspec validate envtyped-routes --type change --json -> valid: true",
+  "note": "Both R5 findings are wording-level (one stale sentence, one scope label). Further closure requires a human-authorized dispatch; do not self-bless.",
+  "closure_dispatch_6_stop_rule": {
+    "authorized_by": "owner 2026-11-22, per e_opus memo 2026-11-21 section A",
+    "dispatch_cap": 1,
+    "no_seventh_dispatch": "under any outcome \u2014 no exceptions",
+    "out_of_scope_findings": "any finding outside R5-1/R5-2 is OUT OF SCOPE: file as a bd child of rc-3c67o.2 + add a STAGE-2 test task; it NEVER triggers a re-bless (standing rule e_opus D5: gate findings citing file:line or runtime-only properties become STAGE-2 tasks with named tests, never re-blesses)",
+    "unmet_R5_outcome": "if the verdict says R5-1 or R5-2 is still unmet: worker applies the expert's text verbatim and PARKS; the master records BLESS by override",
+    "question": "Do R5-1 and R5-2 now hold? Answer BLESS or name the item that is still not met."
+  },
+  "override": {
+    "recorded_by": "master, under owner-approved stop rule (recorded on bd rc-3c67o.2, 2026-11-22)",
+    "verdict": "BLESS by owner override",
+    "hash": "sha256:0f4fd3751e905bf12903133c75903bc7656d1a1e08ac688f4a83e959a52029c4",
+    "dispatches": 6,
+    "cap": "exhausted",
+    "basis": "dispatch-6 handling verified: R5-1 text applied verbatim (3aa4f9e71), R5-2 confirmed, validate clean, no 7th dispatch"
+  },
+  "plan_bless": {
+    "kind": "plan",
+    "verdict": "BLESS",
+    "expert": "experts/e_gpt",
+    "session": "ses_dfdd2899dffetuFsQDkUpRVY3O",
+    "hash": "sha256:2a73245fa4e0df07fb7a3c4d62c710322b35b96b553011adce4f8db895f6de4f",
+    "semantic_findings": "none",
+    "d5_followups_filed_by_expert": [
+      "rc-3c67o.2.3",
+      "rc-3c67o.2.4",
+      "rc-3c67o.2.5"
+    ],
+    "note": "D5 follow-ups added as tasks 1.10-1.12 with named tests (post-bless addition sanctioned by standing rule; never a re-bless)"
+  }
+}
