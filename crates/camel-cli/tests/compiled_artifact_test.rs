@@ -1,15 +1,18 @@
 //! Integration tests for compiled-artifact runtime (openspec change
 //! `cli-compile`, Tasks 2.2 and 2.3). The suite compiles each distinct
 //! document ONCE with the real `camel compile` into a shared immutable
-//! fixture — the compile step copies the full ~287 MB `camel` binary into
+//! fixture — the compile step copies the full `camel` binary into
 //! every artifact, so per-test compiles would write gigabytes under
 //! parallel execution and exhaust the disk (ENOSPC). The fixture and the
 //! per-test deploy directories live on a space-probed [`fixture_root`]:
-//! the OS temp directory when it holds the ~3.7 GiB the suite writes,
-//! otherwise the workspace target directory (bd rc-fdkta). Every test
-//! then deploys the fixture artifact into its own source-free directory
-//! and runs it through `run_embedded_document` — the same entry the
-//! binary self-detect path (Task 2.3) calls.
+//! on unix, the candidate (OS temp directory or workspace target
+//! directory) with the most headroom above the 8 GiB
+//! [`REQUIRED_ROOT_FREE`] gate, with the temp directory winning ties; the
+//! gate derives from the suite's 6.92 GiB measured peak (bd rc-bpwa4, bd
+//! rc-fdkta). Non-unix hosts have no probe and use the OS temp directory
+//! unprobed. Every test then deploys the fixture artifact into its own
+//! source-free directory and runs it through `run_embedded_document` —
+//! the same entry the binary self-detect path (Task 2.3) calls.
 //!
 //! The artifact runtime executes in a harness CHILD of this test binary:
 //! the parent re-spawns `current_exe()` with `--exact <test>` and the
@@ -479,22 +482,22 @@ fn sig_path_of(artifact: &Path) -> PathBuf {
 const FIXTURE_SEED: [u8; 32] = *b"r4sign-fixture-seed-00000000000\0";
 
 /// Distinct documents compiled once per test process. `camel compile`
-/// copies the full ~287 MB `camel` binary into every artifact, so
-/// compiling per test would write gigabytes under parallel execution and
-/// exhaust the disk (ENOSPC). The fixture compiles each document exactly
-/// once — serialized by the `OnceLock` — and tests share the immutable
+/// copies the full `camel` binary into every artifact, so compiling per
+/// test would write gigabytes under parallel execution and exhaust the
+/// disk (ENOSPC). The fixture compiles each document exactly once —
+/// serialized by the `OnceLock` — and tests share the immutable
 /// artifacts; only mutation tests copy (see [`deploy_artifact`]).
 ///
 /// The artifacts live in a single cache directory keyed by this test
 /// process (`camel-compiled-fixture-<pid>` under the space-probed
-/// [`fixture_root`], the repo's `camel-test-*` convention): thirteen
-/// artifacts at the current binary size total ~3.7 GiB, so the root
-/// needs [`REQUIRED_ROOT_FREE`] free before the suite starts — the OS
-/// temp directory when it has room (CI, unchanged), the workspace
-/// target directory as fallback on small-`/tmp` dev machines. A
-/// detached reaper child removes that directory once this process dies
-/// — normal exit or crash — and the next run sweeps any leftover, so
-/// repeated runs never accumulate the ~3.7 GiB of compiled artifacts.
+/// [`fixture_root`], the repo's `camel-test-*` convention). The suite's
+/// measured peak is 6.92 GiB, so the root must have
+/// [`REQUIRED_ROOT_FREE`] (8 GiB) free before the suite starts; on unix
+/// [`fixture_root`] then picks the candidate with the most headroom above
+/// that gate (bd rc-bpwa4). A detached reaper child removes that
+/// directory once this process dies — normal exit or crash — and the next
+/// run sweeps any leftover, so repeated runs never accumulate the
+/// compiled artifacts.
 struct Fixture {
     /// `ROUTE_DOC` artifact (timer→log route).
     route: PathBuf,
@@ -544,21 +547,67 @@ struct Fixture {
 
 static FIXTURE: OnceLock<Fixture> = OnceLock::new();
 
-/// Free space the fixture root must have before the suite starts
-/// compiling: fifteen artifact writes at the current ~287 MB binary
-/// (~4.3 GiB — the fourteen fixture compiles including the two r4sign
-/// signed twins, plus the accepted loose compile) plus the transient
-/// whole-artifact copies (the mutation tests hold up to one copy each
-/// in parallel). Bump this when the suite gains artifacts or the binary
-/// grows past what the headroom covers.
-#[cfg_attr(not(unix), allow(dead_code))]
-const REQUIRED_ROOT_FREE: u64 = 8 << 30;
+/// Measured persistent fixture footprint: fourteen fixture compiles
+/// (including the two r4sign signed twins) at the current binary size
+/// total ≈ 4.42 GiB, rounded up to 4_526 MiB — bd rc-bpwa4 mission-538
+/// measurement.
+const FIXTURE_PERSISTENT_MIB: u64 = 4_526;
 
-/// The cargo target directory of this workspace: the fallback fixture
-/// root when the OS temp directory does not have [`REQUIRED_ROOT_FREE`]
-/// bytes free (a small `/tmp` on a shared root partition is the norm on
-/// dev machines). `CARGO_TARGET_DIR` wins when cargo set it; otherwise
-/// the workspace target directory next to this crate's manifest.
+/// Measured transient peak during the suite: nine concurrent
+/// whole-artifact copies × 296.7 MB on 12 threads ≈ 2.50 GiB, rounded
+/// up to 2_560 MiB (bd rc-bpwa4).
+const FIXTURE_TRANSIENT_MIB: u64 = 2_560;
+
+/// Safety margin above the measured peak: 1.16× the 6.92 GiB peak,
+/// absorbing binary growth between the measurement and a deliberate
+/// bump (bd rc-bpwa4).
+const FIXTURE_MARGIN_MIB: u64 = 1_106;
+
+/// Free space the fixture root must have before the suite starts
+/// compiling: measured persistent footprint + measured transient peak +
+/// margin = 4_526 + 2_560 + 1_106 = 8_192 MiB (`8 << 30`), 1.16× the
+/// 6.92 GiB measured peak (bd rc-bpwa4). The guard exists because the
+/// fixture alone exhausted a 4 GiB `/tmp`, ENOSPC-ing the
+/// artifact-mutation tests (bd rc-fdkta). Bump this when the suite gains
+/// artifacts or the binary grows past what the headroom covers.
+#[cfg_attr(not(unix), allow(dead_code))]
+const REQUIRED_ROOT_FREE: u64 =
+    (FIXTURE_PERSISTENT_MIB + FIXTURE_TRANSIENT_MIB + FIXTURE_MARGIN_MIB) << 20;
+
+/// The disk gate is derived from the measured fixture footprint plus a
+/// safety margin: the named components must sum to the validated
+/// [`REQUIRED_ROOT_FREE`], and the margin must stay the residual over the
+/// measured peak rather than the whole gate (bd rc-bpwa4).
+#[test]
+fn required_free_tracks_fixture_footprint() {
+    // The gate is exactly the three named components.
+    assert_eq!(
+        REQUIRED_ROOT_FREE,
+        (FIXTURE_PERSISTENT_MIB + FIXTURE_TRANSIENT_MIB + FIXTURE_MARGIN_MIB) << 20
+    );
+    // The persistent + transient components cover the measured 6.92 GiB
+    // peak, not an unrelated headroom number.
+    assert_eq!(
+        (FIXTURE_PERSISTENT_MIB + FIXTURE_TRANSIENT_MIB) << 20,
+        7086 << 20
+    );
+    // The margin is the residual over the measured footprint, not the
+    // whole gate.
+    assert_eq!(
+        (REQUIRED_ROOT_FREE >> 20) - FIXTURE_PERSISTENT_MIB - FIXTURE_TRANSIENT_MIB,
+        FIXTURE_MARGIN_MIB
+    );
+    // The mission-538 validated value is pinned: any future bump is a
+    // deliberate change to this assertion.
+    assert_eq!(REQUIRED_ROOT_FREE, 8 << 30);
+}
+
+/// The cargo target directory of this workspace: the second fixture-root
+/// candidate, chosen when it has more headroom than the OS temp
+/// directory above [`REQUIRED_ROOT_FREE`] (on a small `/tmp` shared with
+/// the root partition it wins, bd rc-fdkta). `CARGO_TARGET_DIR` wins
+/// when cargo set it; otherwise the workspace target directory next to
+/// this crate's manifest.
 fn cargo_target_dir() -> PathBuf {
     match std::env::var_os("CARGO_TARGET_DIR") {
         Some(dir) => PathBuf::from(dir),
@@ -591,9 +640,11 @@ fn free_bytes(_path: &Path) -> Option<u64> {
     None
 }
 
-/// Pick the first candidate root whose free space (per `free_of`)
-/// reaches `required`; `None` (probe unavailable) counts as
-/// insufficient. When no candidate qualifies, return `Err` naming the
+/// Pick the eligible candidate root whose free space (per `free_of`)
+/// holds the most headroom; `None` (probe unavailable) and a
+/// below-`required` probe count as insufficient. The earliest candidate
+/// wins a tie, preserving the historic temp-first choice on a shared
+/// filesystem. When no candidate qualifies, return `Err` naming the
 /// requirement and every candidate, so a misconfigured environment
 /// fails loudly at suite start instead of ENOSPC-ing mid-suite.
 fn pick_root(
@@ -601,11 +652,30 @@ fn pick_root(
     required: u64,
     free_of: impl Fn(&Path) -> Option<u64>,
 ) -> Result<PathBuf, String> {
+    // Probe every candidate once, keeping the ones that clear the
+    // requirement.
+    let mut qualified: Vec<(PathBuf, u64)> = Vec::new();
     for candidate in candidates {
         match free_of(candidate) {
-            Some(free) if free >= required => return Ok(candidate.clone()),
+            Some(free) if free >= required => qualified.push((candidate.clone(), free)),
             _ => continue,
         }
+    }
+    // Strict `>` leaves the earlier candidate holding the best slot on
+    // equal free space, so the earliest wins the tie without re-scanning
+    // the candidate list.
+    let mut best: Option<(PathBuf, u64)> = None;
+    for (root, free) in qualified {
+        let better = match &best {
+            Some((_, best_free)) => free > *best_free,
+            None => true,
+        };
+        if better {
+            best = Some((root, free));
+        }
+    }
+    if let Some((root, _)) = best {
+        return Ok(root);
     }
     let listed = candidates
         .iter()
@@ -654,14 +724,105 @@ fn fixture_root_picking_prefers_roomy_candidates() {
     );
 }
 
+/// A roomy temp directory wins when it holds the most headroom, and
+/// keeps winning ties as the earliest candidate — the unchanged CI
+/// paths (bd rc-bpwa4).
+#[test]
+fn pick_root_prefers_temp_dir_when_roomy() {
+    let temp = PathBuf::from("temp");
+    let target = PathBuf::from("target");
+    let free_of = |path: &Path| match path {
+        p if p == temp => Some(10 << 30),
+        p if p == target => Some(9 << 30),
+        _ => None,
+    };
+    assert_eq!(
+        pick_root(&[temp.clone(), target.clone()], REQUIRED_ROOT_FREE, free_of),
+        Ok(temp.clone()),
+        "temp holds the most headroom, so it wins over the roomy target"
+    );
+    // Equal headroom is the shared-filesystem CI case: the earliest
+    // candidate wins the tie.
+    let tied = |path: &Path| match path {
+        p if p == temp => Some(10 << 30),
+        p if p == target => Some(10 << 30),
+        _ => None,
+    };
+    assert_eq!(
+        pick_root(&[temp.clone(), target.clone()], REQUIRED_ROOT_FREE, tied),
+        Ok(temp.clone()),
+        "equal headroom resolves to the earliest candidate"
+    );
+}
+
+/// A temp directory below the requirement yields to the roomy target
+/// directory — the rc-fdkta small-`/tmp` fallback.
+#[test]
+fn pick_root_falls_back_to_roomy_target_when_tmp_is_small() {
+    let temp = PathBuf::from("temp");
+    let target = PathBuf::from("target");
+    let free_of = |path: &Path| match path {
+        p if p == temp => Some(2 << 30),
+        p if p == target => Some(20 << 30),
+        _ => None,
+    };
+    assert_eq!(
+        pick_root(&[temp.clone(), target.clone()], REQUIRED_ROOT_FREE, free_of),
+        Ok(target.clone()),
+        "the only qualifying candidate is chosen"
+    );
+}
+
+/// The qualifying candidate with the most headroom wins even when it
+/// sits later in the list (bd rc-bpwa4).
+#[test]
+fn pick_root_prefers_most_headroom() {
+    let temp = PathBuf::from("temp");
+    let target = PathBuf::from("target");
+    let free_of = |path: &Path| match path {
+        p if p == temp => Some(9 << 30),
+        p if p == target => Some(12 << 30),
+        _ => None,
+    };
+    assert_eq!(
+        pick_root(&[temp.clone(), target.clone()], REQUIRED_ROOT_FREE, free_of),
+        Ok(target.clone()),
+        "the roomier target wins over the earlier qualifying temp"
+    );
+}
+
+/// Nothing usable fails closed: no `Ok` variant is produced, and the
+/// message names the requirement and every candidate (bd rc-bpwa4).
+#[test]
+fn pick_root_names_candidates_when_none_usable() {
+    let temp = PathBuf::from("temp");
+    let target = PathBuf::from("target");
+    let free_of = |path: &Path| match path {
+        p if p == temp => Some(2 << 30),
+        p if p == target => Some(4 << 30),
+        _ => None,
+    };
+    let err = match pick_root(&[temp.clone(), target.clone()], REQUIRED_ROOT_FREE, free_of) {
+        Err(err) => err,
+        Ok(root) => panic!("below-requirement roots must not qualify: {root:?}"),
+    };
+    assert_eq!(
+        err,
+        "no temp root has the required free space: need 8589934592 bytes, candidates [temp, target]"
+    );
+}
+
 /// The root directory for this suite's large writes: the compiled
 /// fixture and the per-test deploy directories (both must sit on the
 /// same filesystem so deploys can hardlink the immutable fixture
-/// artifacts). Prefers the OS temp directory when it has room — the
-/// CI behavior is unchanged — and falls back to the workspace target
-/// directory on machines whose `/tmp` is too small for the ~3.7 GiB
-/// suite footprint (bd rc-fdkta: the fixture alone exhausted a 4 GiB
-/// `/tmp`, ENOSPC-ing the artifact-mutation tests).
+/// artifacts). On unix, probes the OS temp directory and the workspace
+/// target directory and picks the candidate with the most headroom that
+/// still clears [`REQUIRED_ROOT_FREE`], with the temp directory winning
+/// ties — the CI path is unchanged, while a `/tmp` too small for the
+/// 6.92 GiB measured peak (bd rc-bpwa4) yields to the roomier target
+/// directory (bd rc-fdkta: the fixture alone exhausted a 4 GiB `/tmp`,
+/// ENOSPC-ing the artifact-mutation tests). Non-unix hosts have no probe
+/// and use the OS temp directory unprobed.
 fn fixture_root() -> PathBuf {
     static ROOT: OnceLock<PathBuf> = OnceLock::new();
     ROOT.get_or_init(|| {

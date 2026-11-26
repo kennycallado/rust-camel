@@ -1,0 +1,10 @@
+{
+  "verdict": "BLESS-WITH-FIXES",
+  "fixes_applied": true,
+  "expert": "@experts/e_gpt",
+  "kind": "combined-spec-and-plan",
+  "dispatch_policy": "D5: one combined dispatch, verbatim fixes, no re-bless",
+  "hash": "sha256:30981e6aeb87155d6e9322f61392afb28ead5de0d8dd376bdc9c2faaabb2ee8a",
+  "date": "2026-11-26",
+  "session": "ses_de8811d13ffeZwXAzBXKiEqVDU"
+}
