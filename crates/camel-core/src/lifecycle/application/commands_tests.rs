@@ -1386,6 +1386,182 @@ async fn canonical_runtime_registration_rejects_block() {
     );
 }
 
+#[test]
+fn canonical_block_rejects_parallel_split() {
+    use camel_api::runtime::{
+        CanonicalSplitAggregationSpec, CanonicalSplitExpressionSpec, CanonicalStepSpec,
+        CanonicalTransactedSpec,
+    };
+    use camel_api::transaction::TransactionError;
+
+    // The manager for `pg` IS registered (via `registry_with_pg()`), so the
+    // asserted variant proves the structural check wins over `ManagerMissing`.
+    let registry = registry_with_pg();
+    let step = CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+        datasource: "pg".into(),
+        steps: vec![CanonicalStepSpec::Split {
+            expression: CanonicalSplitExpressionSpec::BodyLines,
+            aggregation: CanonicalSplitAggregationSpec::LastWins,
+            parallel: true,
+            parallel_limit: None,
+            trace_item_threshold: None,
+            stop_on_exception: false,
+            steps: vec![CanonicalStepSpec::To {
+                uri: "sql:select 1?datasource=pg".into(),
+            }],
+        }],
+    });
+
+    let err = match canonical_step_to_builder_step_at(step, &registry, None, 0) {
+        Ok(_) => panic!("a parallel split inside a transacted block must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::ParallelInBlock { step, datasource })
+                if step == "split" && datasource == "pg"
+        ),
+        "expected ParallelInBlock on 'split'/'pg', got {err:?}"
+    );
+}
+
+#[test]
+fn canonical_block_rejects_wiretap_and_multicast() {
+    use camel_api::MulticastConfig;
+    use camel_api::runtime::{CanonicalStepSpec, CanonicalTransactedSpec};
+    use camel_api::transaction::TransactionError;
+
+    // The manager for `pg` IS registered (via `registry_with_pg()`), so every
+    // asserted variant proves the structural check wins over `ManagerMissing`.
+    let registry = registry_with_pg();
+
+    // (a) wire tap on a joined sql URI.
+    let step = CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+        datasource: "pg".into(),
+        steps: vec![
+            CanonicalStepSpec::To {
+                uri: "sql:select 1?datasource=pg".into(),
+            },
+            CanonicalStepSpec::WireTap {
+                uri: "sql:select 1?datasource=pg".into(),
+            },
+        ],
+    });
+    let err = match canonical_step_to_builder_step_at(step, &registry, None, 0) {
+        Ok(_) => panic!("a wire tap on a joined sql step must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::WireTapInBlock { step, datasource })
+                if step == "sql:select 1?datasource=pg" && datasource == "pg"
+        ),
+        "expected WireTapInBlock naming the tapped URI, got {err:?}"
+    );
+
+    // (b) wire tap callee on a foreign datasource.
+    let step = CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+        datasource: "pg".into(),
+        steps: vec![CanonicalStepSpec::WireTap {
+            uri: "sql:select 1?datasource=audit".into(),
+        }],
+    });
+    let err = match canonical_step_to_builder_step_at(step, &registry, None, 0) {
+        Ok(_) => panic!("a foreign-datasource wire tap must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::ForeignDatasource {
+                step,
+                block_datasource,
+                step_datasource,
+            }) if step == "sql:select 1?datasource=audit"
+                && block_datasource == "pg"
+                && step_datasource == "audit"
+        ),
+        "expected ForeignDatasource naming both datasources, got {err:?}"
+    );
+
+    // (c) multicast reaching a joined sql step inside the block.
+    let built = BuilderStep::Transacted {
+        datasource: "pg".into(),
+        steps: vec![BuilderStep::Multicast {
+            steps: vec![BuilderStep::To("sql:select 1?datasource=pg".into())],
+            config: MulticastConfig::new(),
+        }],
+    };
+    let err = match crate::transacted_walk::walk_transacted_block(
+        &built,
+        &|ds: &str| registry.get(ds),
+        &|_ds: &str| None,
+    ) {
+        Ok(()) => panic!("a multicast reaching joined sql must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::MulticastInBlock { step, datasource })
+                if step == "multicast" && datasource == "pg"
+        ),
+        "expected MulticastInBlock on 'multicast'/'pg', got {err:?}"
+    );
+}
+
+#[test]
+fn canonical_block_rejects_nested_and_unnamed() {
+    use camel_api::runtime::{CanonicalStepSpec, CanonicalTransactedSpec};
+    use camel_api::transaction::TransactionError;
+
+    // The manager for `pg` IS registered (via `registry_with_pg()`), so both
+    // asserted variants prove the structural check wins over `ManagerMissing`.
+    let registry = registry_with_pg();
+
+    // Nested block: the inner datasource is named, never resolved.
+    let step = CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+        datasource: "pg".into(),
+        steps: vec![CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+            datasource: "inner".into(),
+            steps: vec![],
+        })],
+    });
+    let err = match canonical_step_to_builder_step_at(step, &registry, None, 0) {
+        Ok(_) => panic!("a nested transacted block must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::NestedBlock { inner }) if inner == "inner"
+        ),
+        "expected NestedBlock naming the inner datasource, got {err:?}"
+    );
+
+    // Unnamed sql step: no `datasource` parameter.
+    let step = CanonicalStepSpec::Transacted(CanonicalTransactedSpec {
+        datasource: "pg".into(),
+        steps: vec![CanonicalStepSpec::To {
+            uri: "sql:select 1".into(),
+        }],
+    });
+    let err = match canonical_step_to_builder_step_at(step, &registry, None, 0) {
+        Ok(_) => panic!("an unnamed sql step must fail the walk"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            &err,
+            CamelError::Transaction(TransactionError::UnnamedDatasource { step })
+                if step == "sql:select 1"
+        ),
+        "expected UnnamedDatasource naming the step, got {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn apply_runtime_lifecycle_start_recovery_error_path() {
     let execution = ConfigurableExecutionPort::with_start_and_resume_failure();

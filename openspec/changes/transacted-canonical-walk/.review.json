@@ -1,0 +1,44 @@
+{
+  "change": "transacted-canonical-walk",
+  "mission": "617",
+  "bd": "rc-c3mjp",
+  "verdict": "APPROVE",
+  "verdict_detail": "Holistic review returned APPROVE-WITH-FINDINGS (1 Important process item = this file; 2 Minor substantive; 1 Minor record-only). Both substantive Minors were fixed (commit 71bb6a6b31b21fd691d2df3720f1bb9fdf113703) and re-reviewed APPROVE. The process item is satisfied by this file. Effective verdict on the reviewed tree: APPROVE.",
+  "reviewer": "experts/e_opus",
+  "reviewer_substitution": {
+    "reason": "provider exhaustion of reviewers/r_glm (zai-coding-plan, 5h window reset 2026-11-26 23:35:22) and reviewers/r_gpt (openai, usage limit)",
+    "recorded_for_master_review": true,
+    "sessions": {
+      "plan_review_and_spec_rebless": "ses_de7aada95ffefCfJqeX9Rl93CX",
+      "plan_rebless": "ses_de7a79109ffe2CdTZY0qW8ZBPo",
+      "task_1_1": "ses_de7a136c5ffe0JOYkVO0tFvLYt",
+      "task_1_2": "ses_de79f520affeYn06pE7LhxRsA4",
+      "task_1_2_rereview": "ses_de79e4d39ffeCiBxfFwfMD41NX",
+      "task_1_3": "ses_de79a9337ffe15mVaA9Yjz2hFd",
+      "task_1_4": "ses_de79920a5ffek0lkqZrodgOp6z",
+      "holistic": "ses_de77b72cfffeU3tG7tNeM125xr",
+      "holistic_rereview": "ses_de7754149ffejFT4z7xy1NC3L9"
+    }
+  },
+  "impl_hash": {
+    "commit": "71bb6a6b31b21fd691d2df3720f1bb9fdf113703",
+    "diff_sha256_vs_d84bfd804": "12597aed634bd78deffcbfcbcb0022f714d094c9422b858557d7710a5942e81a",
+    "base": "d84bfd804"
+  },
+  "task_reviews": [
+    {"task": "1.1", "verdict": "APPROVE", "notes": "three canonical-entry pinning tests; exact typed variants; registered manager makes ManagerMissing impossible"},
+    {"task": "1.2", "verdict": "APPROVE after minor doc fixes", "notes": "dynamic-target load rejection pinned; duplication justification added"},
+    {"task": "1.3", "verdict": "APPROVE", "notes": "production-only source assertions + behavioural parity via DynamicTargetUnprovable"},
+    {"task": "1.4", "verdict": "APPROVE", "notes": "ADR-0101 S1 bullet matches the blessed replacement verbatim; claims verified against code"},
+    {"task": "1.5", "verdict": "VERIFIED by conductor", "notes": "mutation evidence logs: 3 FAILED under canonical-walk bypass, 1 FAILED under per-arm disable, restores byte-identical (cmp), tree clean"},
+    {"task": "1.6", "verdict": "PASS", "notes": "fmt 0, build --workspace 0, clippy touched crates 0, cargo test -p camel-core 0, -p camel-dsl 0, openspec validate valid"}
+  ],
+  "holistic_findings_disposition": {
+    "important_process_review_json": "resolved by this file",
+    "minor_1_third_call_site": "fixed in 71bb6a6b (compile.rs assertion for walk_transacted_block_deferred_unresolved)",
+    "minor_2_stale_doc_comment": "fixed in 71bb6a6b (transacted_validation.rs:316-318 reworded in place)",
+    "minor_3_mutation_b_scope": "recorded as deviation in park report (mutation disabled all of check_per_arm; evidence remains valid; no rerun)",
+    "informational_third_entry_point": "recorded in park report; tracked by bd rc-ltfyp which blocks rc-ggo3d"
+  },
+  "gate_note": "See the park report for the authoritative gate table run on the final tree after this file's commit."
+}

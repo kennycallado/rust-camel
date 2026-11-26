@@ -2692,7 +2692,7 @@ mod tests {
         MulticastStepDef, RecipientListStepDef, RoutingSlipStepDef, SetBodyStepDef,
         SetHeaderStepDef, SetPropertyStepDef, SplitAggregationDef, SplitExpressionDef,
         SplitStepDef, StreamCacheStepDef, ThrottleStepDef, ThrottleStrategyDef, ToStepDef,
-        ValueSourceDef, WhenStepDef, WireTapStepDef,
+        TransactedStepDef, ValueSourceDef, WhenStepDef, WireTapStepDef,
     };
     use crate::test_support::test_authenticator;
     use async_trait::async_trait;
@@ -8086,5 +8086,105 @@ routes:
             err.to_string().contains("correlation source"),
             "error must mention correlation source, got: {err}"
         );
+    }
+
+    /// Task 1.3 (transacted-canonical-walk): the declarative lowering entry and
+    /// the canonical/core route-add entry must reach the SAME transacted-walk
+    /// visitor, so neither path can drift into its own copy of the rules.
+    #[test]
+    fn declarative_and_canonical_share_one_walk() {
+        use camel_api::transaction::TransactionError;
+
+        // Structural half: assert against PRODUCTION text only. The searched
+        // strings also live in this test module, so cut the module off first
+        // and search only the prefix.
+        let src = include_str!("compile.rs");
+        let (prod, tests) = src
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module marker present");
+        assert!(
+            !tests.is_empty(),
+            "the split must leave a non-empty test module behind"
+        );
+        assert!(
+            prod.contains("walk_transacted_block_deferred(&built, resolve_manager)"),
+            "declarative lowering must reach the deferred transacted walk"
+        );
+        // The trailing `(` excludes the `_deferred*` wrappers: only the core
+        // route-add site calls the registry-resolving walk. Textual read only —
+        // no new dependency on camel-core from the DSL crate.
+        assert!(
+            include_str!("../../camel-core/src/lifecycle/application/commands.rs")
+                .contains("crate::transacted_walk::walk_transacted_block("),
+            "canonical route-add must reach the registry-resolving transacted walk"
+        );
+        assert!(
+            prod.contains("walk_transacted_block_deferred_unresolved(&built)"),
+            "camel-dsl canonical lowering arm must reach the shared transacted walk"
+        );
+
+        // Behavioural half: a dynamic target inside a declarative block is
+        // deferred by the S1 AST validator (transacted_validation.rs:316-318),
+        // so this rejection can only come from the LOWERED walk — it proves the
+        // declarative entry ran it.
+        let route = DeclarativeRoute {
+            from: "direct:start".into(),
+            route_id: "share-walk".into(),
+            auto_startup: true,
+            startup_order: 0,
+            concurrency: None,
+            error_handler: None,
+            circuit_breaker: None,
+            security_policy: None,
+            unit_of_work: None,
+            steps: vec![DeclarativeStep::Transacted(TransactedStepDef {
+                datasource: "pg".into(),
+                steps: vec![
+                    DeclarativeStep::To(ToStepDef::new("sql:select 1?datasource=pg")),
+                    DeclarativeStep::RecipientList(RecipientListStepDef {
+                        expression: make_predicate("${body}"),
+                        delimiter: ",".into(),
+                        parallel: false,
+                        parallel_limit: None,
+                        stop_on_exception: false,
+                        aggregation: MulticastAggregationDef::LastWins,
+                    }),
+                ],
+            })],
+            http_error_mapping: None,
+        };
+        let Err(CamelError::Transaction(TransactionError::DynamicTargetUnprovable { step })) =
+            compile_declarative_route(route)
+        else {
+            panic!("declarative lowering must reject the dynamic recipient-list target");
+        };
+        assert_eq!(step, "recipient-list");
+
+        // Direct-walk half: the canonical entry walks the very same lowered
+        // shape and must produce the identical typed rejection.
+        let built = BuilderStep::Transacted {
+            datasource: "pg".into(),
+            steps: vec![
+                BuilderStep::To("sql:select 1?datasource=pg".into()),
+                BuilderStep::DeclarativeRecipientList {
+                    expression: make_predicate("${body}"),
+                    delimiter: ",".into(),
+                    parallel: false,
+                    parallel_limit: None,
+                    stop_on_exception: false,
+                    aggregation: "last_wins".into(),
+                },
+            ],
+        };
+        let Err(CamelError::Transaction(TransactionError::DynamicTargetUnprovable { step })) =
+            camel_core::transacted_walk::walk_transacted_block(
+                &built,
+                &|_ds: &str| None,
+                &|_ds: &str| None,
+            )
+        else {
+            panic!("canonical walk must reject the dynamic recipient-list target");
+        };
+        assert_eq!(step, "recipient-list");
     }
 }

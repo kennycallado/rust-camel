@@ -1,0 +1,44 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "hash": "sha256:6827dfabea245118a33376a39b9ec68c50c939d8e10afa3fa040e8d0dc1c42a4",
+  "hash_covers": "proposal.md + design.md + specs/sql-transactions/spec.md + tasks.md",
+  "expert": "experts/e_opus",
+  "substitution": {
+    "authorized_basis": "provider exhaustion of BOTH order-authorized experts; master runbook 2026-11-22 manages experts across pools and names anthropic as headroom; orders 228/229 show e_opus taking spec+plan blessing duty under rebalance; master continuation 2026-11-26 directs continuing to STAGE 2 and parking at the merge gate",
+    "recorded_for_master_review": true
+  },
+  "provider_failures": [
+    {"expert": "experts/e_gpt", "model": "openai/gpt-6.2-sol", "phase": "spec initial verdict", "error": "The usage limit has been reached", "session": "ses_de7ca812bffe6DMGXIT2vvjKFA"},
+    {"expert": "experts/e_glm", "model": "zai-coding-plan/glm-5.4", "phase": "spec re-bless round 1", "error": "Usage limit reached for 5 hour; resets 2026-11-26 23:35:22", "session": "ses_de7ca425bffeG3ANbBB6Vvqyd0"},
+    {"expert": "experts/e_gpt", "model": "openai/gpt-6.2-sol", "phase": "spec re-bless retry", "error": "The usage limit has been reached", "session": "ses_de7af33b1ffegIDLQ42GCZLqnP"},
+    {"expert": "reviewers/r_glm", "model": "zai-coding-plan/glm-5.3-flash", "phase": "plan review dispatch", "error": "Usage limit reached for 5 hour; resets 2026-11-26 23:35:22", "session": "ses_de7aba088ffeUXZD3bd3qhUZeP"},
+    {"expert": "reviewers/r_gpt", "model": "openai/gpt-6.2-sol", "phase": "plan review dispatch", "error": "The usage limit has been reached", "session": "ses_de7ab8afdffecHCX2532Nw9zc9"}
+  ],
+  "rounds": [
+    {
+      "round": 1,
+      "hash_reviewed": "sha256:c094b157ce224cdca15e5bf0c1d82c879e9a11edb88a06aba1021899bd877686",
+      "expert": "experts/e_glm",
+      "verdict": "SPEC APPROVED-WITH-FIXES",
+      "findings": "4 semantic + 4 wording, all text-only, no behavioural finding",
+      "disposition": "All 8 applied verbatim; record at /home/shared/tmp/transacted-canonical-walk/spec-bless-617-self-grill.md"
+    },
+    {
+      "round": 2,
+      "hash_reviewed": "sha256:c9fd9181d76e9cda29ebd3dd9af91bb20283c96f3c4ca0109fa705e625997cb8",
+      "expert": "experts/e_opus",
+      "verdict": "SPEC RE-BLESS CONFIRMED + PLAN APPROVED-WITH-FIXES (F1-F6, plan-level text only)",
+      "session": "ses_de7aada95ffefCfJqeX9Rl93CX"
+    },
+    {
+      "round": 3,
+      "hash_reviewed": "sha256:6827dfabea245118a33376a39b9ec68c50c939d8e10afa3fa040e8d0dc1c42a4",
+      "expert": "experts/e_opus",
+      "verdict": "PLAN APPROVED",
+      "session": "ses_de7a79109ffe2CdTZY0qW8ZBPo",
+      "notes": "Non-blocking nit left as blessed: Task 1.6 acceptance says 'five commands' while six steps are listed; meaning is unambiguous and the blessed hash must stay byte-identical."
+    }
+  ],
+  "reviewer_dispatch_record": "reviewers/r_glm and reviewers/r_gpt could not run (provider exhaustion, see provider_failures). Plan review was performed by experts/e_opus in rounds 2-3; per-task and holistic reviews will use experts/e_opus and be recorded in the park report."
+}

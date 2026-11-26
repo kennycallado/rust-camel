@@ -314,8 +314,8 @@ fn is_joined_sql_uri(uri: &str, datasource: &str) -> bool {
 /// which inspects the tap side pipeline rather than the tap target.
 ///
 /// Dynamic-URI steps (recipient list, routing slip, dynamic router) are
-/// DEFERRED: their targets are computed from the exchange at run time, and
-/// req 5's fail-closed dynamic-target rule lands in slice 2 (bd rc-c3mjp).
+/// DEFERRED: the lowered walk rejects them at load (`camel_core::transacted_walk`,
+/// `DynamicTargetUnprovable`); this AST gate defers them because it cannot see the lowered tree.
 fn sql_step_facts_of(step: &DeclarativeStep) -> Option<SqlStepFacts> {
     sql_step_facts(static_step_uri(step)?)
 }

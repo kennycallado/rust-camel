@@ -1352,6 +1352,57 @@ mod tests {
         );
     }
 
+    /// Pins the decision: a dynamic target inside a transacted block is
+    /// rejected at load, never accepted under a membership proof. The
+    /// routing expression is evaluated at exchange time, so block membership
+    /// is not statically provable; the canonical `CanonicalStepSpec` cannot
+    /// author a dynamic target at all. It duplicates
+    /// `walk_rejects_dynamic_targets_in_block` on purpose: mission 617 names
+    /// this test, and the canonical entry cannot build its input. So this
+    /// test exercises the SAME `walk_transacted_block` entry and
+    /// registry-backed resolver shape the canonical `Transacted` lowering in
+    /// `lifecycle/application/commands.rs` uses, which calls
+    /// `walk_transacted_block` at block depth 0.
+    #[test]
+    fn canonical_block_dynamic_uri_is_rejected_at_load() {
+        let step = block(
+            "registered_ds",
+            vec![
+                sql("sql:select 1?datasource=registered_ds"),
+                BuilderStep::DeclarativeRecipientList {
+                    expression: predicate(),
+                    delimiter: ",".into(),
+                    parallel: false,
+                    parallel_limit: None,
+                    stop_on_exception: false,
+                    aggregation: "last_wins".into(),
+                },
+            ],
+        );
+        assert_eq!(
+            transaction_error(&step),
+            TransactionError::DynamicTargetUnprovable {
+                step: "recipient-list".to_string(),
+            }
+        );
+
+        let slip = block(
+            "registered_ds",
+            vec![BuilderStep::DeclarativeRoutingSlip {
+                expression: predicate(),
+                uri_delimiter: ",".into(),
+                cache_size: 0,
+                ignore_invalid_endpoints: false,
+            }],
+        );
+        assert_eq!(
+            transaction_error(&slip),
+            TransactionError::DynamicTargetUnprovable {
+                step: "routing-slip".to_string(),
+            }
+        );
+    }
+
     #[test]
     fn walk_rejects_dynamic_target_nested_in_split() {
         let recipient_source: std::sync::Arc<dyn Fn(&camel_api::Exchange) -> String + Send + Sync> =

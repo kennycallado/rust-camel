@@ -189,15 +189,20 @@ Slices are separate changes with separate bd issues; each amends this ADR.
   errors, the `camel-core` `TransactionManagerRegistry` with fail-closed
   resolution, `BuilderStep::Transacted`, and the declarative authoring surfaces
   (YAML, JSON, template) with ALL load rejections. Those rejections hold on the
-  DECLARATIVE load path — the validating compile entry. The canonical and
-  programmatic lowering paths resolve the manager and fail closed with the
-  typed `ManagerMissing` backstop, but they do NOT run the structural walk;
-  covering them at the lowering fan-in is a BLOCKING obligation of S2 (`bd
-  rc-c3mjp`). No manager is registered, so every block is rejected at load with
-  the typed
-  `Transaction(TransactionError::ManagerMissing { datasource })` error;
-  `Managed` keeps the current
-  endpoint-creation rejection. Runtime behavior is unchanged.
+  DECLARATIVE load path and on the canonical lowering path through ONE shared
+  load walk over the lowered step tree (`sqltrans-exec` step 3; pinned by
+  `transacted-canonical-walk`). A `RouteDefinition` registered already lowered
+  (`CamelContext::add_route_definition` → `RuntimeBus::register_route` →
+  `handle_register_internal`) passes no lowering entry and does not run the
+  registry-backed walk: a hand-authored block skips the structural and per-arm
+  checks, and every pre-lowered block skips manager and dialect resolution.
+  Today such a block fails closed at route-add with the typed
+  `Transaction(TransactionError::JoinSessionMissing { datasource })` error,
+  surfaced stringified; the executor slice may not remove that backstop before
+  the walk runs there (bd rc-ltfyp, blocks `rc-ggo3d`). Bundle boot registers
+  one manager per catalog datasource, so a block on a catalog datasource passes
+  load; `Managed` keeps the current endpoint-creation rejection. Runtime
+  behavior is unchanged.
 - **S2 — `sqltrans-runtime` (`rc-qv2iz.6`)**: execution, finalization, join
   semantics, hygiene, detach, timeout, pool-exhaustion surface, camel-sql
   manager implementation over sqlx, and the docker suite. The registry seam
