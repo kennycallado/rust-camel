@@ -35,6 +35,14 @@ would reject its legitimate sibling references.
   validator traversal order, not a sort.
 - `Violation { instance_path, message }`, formatted by consumers as
   `"{message} at {instance_path}"`.
+- `CompiledSchema::redacted_violations(&Value) -> Vec<RedactedViolation>`. Same upstream
+  traversal order, but each error is reduced to its keyword and a redacted pointer: a
+  segment survives only when it is an in-bounds array index or a name declared under
+  `properties` (any depth, bounded walk), and every other member name becomes `<prop>`.
+  `violations` is unchanged.
+- `RedactedViolation { keyword, instance_path }`. `keyword` is
+  `ValidationErrorKind::keyword()` (`falseSchema`, `type`, `maxLength`, …), not the schema
+  path. No instance value and no undeclared member name is carried.
 - `SchemaError`, one variant per rejection class.
 
 `MAX_FILE_BYTES`, `MAX_RESOURCES`, and `MAX_TOTAL_BYTES` are public constants. They are

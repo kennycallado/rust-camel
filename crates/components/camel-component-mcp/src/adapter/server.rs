@@ -520,11 +520,16 @@ fn validate_arguments(
             None,
         )
     })?;
-    let violations: Vec<String> = schema
-        .violations(arguments)
+    // Project only what is safe to show a caller: the upstream keyword and a
+    // redacted instance path, never the validator's message text (which
+    // embeds the instance value). 25-entry cap — enough for schema authoring,
+    // bounded logs.
+    let mut violations: Vec<String> = schema
+        .redacted_violations(arguments)
         .into_iter()
-        .map(|violation| format!("{} at {}", violation.message, violation.instance_path))
+        .map(|violation| format!("{} at {}", violation.keyword, violation.instance_path))
         .collect();
+    violations.truncate(25);
     if violations.is_empty() {
         Ok(())
     } else {
@@ -854,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_arguments_violation_shape_unchanged() {
+    fn validate_arguments_violation_shape_is_keyword_and_redacted_path() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": { "name": { "type": "string" } },
@@ -872,10 +877,7 @@ mod tests {
             .and_then(|data| data.get("violations"))
             .and_then(serde_json::Value::as_array)
             .expect("violations array");
-        assert_eq!(
-            violations,
-            &vec![serde_json::json!("\"name\" is a required property at ")]
-        );
+        assert_eq!(violations, &vec![serde_json::json!("required at ")]);
     }
 
     #[test]

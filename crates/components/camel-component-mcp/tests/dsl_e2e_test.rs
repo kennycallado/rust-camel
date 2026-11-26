@@ -30,17 +30,13 @@ use camel_component_mcp::component::McpComponent;
 use camel_component_mcp::config::{
     McpGlobalConfig, McpRemoteConfig, McpServerConfig, McpTransport,
 };
-use rmcp::ClientLifecycleMode;
-use rmcp::model::{
-    CallToolRequestParams, ProtocolVersion, ReadResourceRequestParams, ResourceContents,
-};
-use rmcp::service::ClientServiceExt;
-use rmcp::transport::streamable_http_client::{
-    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
-};
+use common::raw_rmcp_client;
+use rmcp::model::{CallToolRequestParams, ReadResourceRequestParams, ResourceContents};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+
+mod common;
 
 /// The tool's input schema: `{"id": string}` required.
 fn id_schema() -> serde_json::Value {
@@ -114,23 +110,6 @@ fn test_context() -> (ConsumerContext, mpsc::Receiver<ExchangeEnvelope>) {
     let (tx, rx) = mpsc::channel::<ExchangeEnvelope>(16);
     let ctx = ConsumerContext::new(tx, CancellationToken::new(), "test-route".to_string());
     (ctx, rx)
-}
-
-/// A fresh discover-lifecycle rmcp host client against the listener.
-async fn rmcp_client(
-    addr: SocketAddr,
-) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
-    );
-    ().serve_with_lifecycle(
-        transport,
-        ClientLifecycleMode::Discover {
-            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
-        },
-    )
-    .await
-    .expect("discover-lifecycle connect against the component server")
 }
 
 /// The component's own client for `tools/call` — JSON-RPC error codes are
@@ -235,7 +214,7 @@ async fn dsl_block_runs_end_to_end() {
             .expect("resource route reply");
     });
 
-    let client = rmcp_client(addr).await;
+    let client = raw_rmcp_client(addr).await;
 
     let listed = client
         .peer()

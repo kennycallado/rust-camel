@@ -1,0 +1,39 @@
+{
+  "change": "mcp-error-projection",
+  "kind": "plan",
+  "verdict": "BLESS-WITH-FIXES (final; all items applied verbatim — expert confirmed none needed another round)",
+  "hash": "sha256:281fe9172f72b3e5c879a79ac6ebf947c06ce46e3cdff56154dd77462a686d2b",
+  "rounds": [
+    {
+      "round": 1,
+      "expert": "experts/e_gpt",
+      "session": "ses_de87b0f49ffes6Hlst3U6Mz4q5",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash_in": "sha256:4f861d1181da3a4af12e767d42a627c89f3457ceaa9159a7fc30eb3f88d7b574",
+      "applied": "6 items (numeric-key critical → instance-aware redaction + named regression test; field-aware WARN capture; raw-peer wire assertions + shape-test update; reproduce-first hardening; camel-component-http package + storage/walk/keyword fixes; coverage map + Task 5.1)"
+    },
+    {
+      "round": 2,
+      "expert": "experts/e_glm (SUBSTITUTE)",
+      "session": "ses_de86d6b0dffeUprBKysqyAiaUm",
+      "substitution_reason": "e_gpt provider quota exhausted after 2 failed attempts (ses_de87277d1ffeLMYhS7MOGCDjju, ses_de86dfb29ffezZ3fcUaxVQkMao); independent expert gate preserved — NOT a self-signed blessing",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash_in": "sha256:281fe9172f72b3e5c879a79ac6ebf947c06ce46e3cdff56154dd77462a686d2b",
+      "applied": "F1-F5 verbatim from /home/shared/tmp/mcp-error-projection/plan-bless-round2-fixes.md (pinned has_warn_field_containing semantics + 'response error' event needles; materialization tests wire-level in the integration binary with Display-text needles and distinct event messages; // allow-unwrap marker on .expect; redact_url_fail_closed on uri fields; bind discipline 127.0.0.61-70 + component_client content[0][\"text\"] + raw peer only in 4.3) plus N1-N7 non-blocking (fail-closed redact walk, CONTEXT.md public-surface entry, stale-comment updates, workspace dev-dep form, ProcessorError leak-shape fixture, three follow-up clippy commands, allow-test-wait discipline)"
+    }
+  ],
+  "spec_gate": {
+    "kind": "spec",
+    "verdict": "BLESS-WITH-FIXES",
+    "expert": "experts/e_gpt",
+    "session": "ses_de88c0e72ffevR3QiUI8SX1Niz",
+    "hash": "sha256:a1e53eb0bb5004e710209f6349ad57b351aa27d24bc7f265059f5518e557c373",
+    "applied_fixes": 4
+  },
+  "plan_review": {
+    "reviewer": "reviewers/r_glm",
+    "session": "ses_de88119a3ffekJmwdNbAD4WQ4m",
+    "verdict": "APPROVE-WITH-FINDINGS (4 minors, all applied)"
+  },
+  "budget": "1 spec + 2 plan dispatches — exactly consumed"
+}

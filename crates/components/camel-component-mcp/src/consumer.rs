@@ -472,6 +472,31 @@ fn default_public_plan() -> RouteSecurityPlan {
     }
 }
 
+/// The generic internal-error body, parsed once per process.
+///
+/// [`camel_api::error_projection::INTERNAL_ERROR_BODY_JSON`] stays the single
+/// source of the wording; this only avoids re-parsing it per failure.
+static INTERNAL_ERROR_BODY: std::sync::LazyLock<serde_json::Value> =
+    std::sync::LazyLock::new(|| {
+        serde_json::from_str(camel_api::error_projection::INTERNAL_ERROR_BODY_JSON)
+            .expect("INTERNAL_ERROR_BODY_JSON must parse") // allow-unwrap
+    });
+
+/// Project a bridge failure into a client-visible tool-result payload.
+///
+/// Business errors keep only the ADR-0097 operator-authored `code`/`kind`;
+/// their exchange-derived `message`/`data` are log-only. Every other variant
+/// collapses to the generic constant — the bridge never forwards `Display`
+/// text, which can carry URLs, guard wording, and upstream type names.
+fn project_failure(error: &CamelError) -> serde_json::Value {
+    match error {
+        CamelError::Business { code, kind, .. } => {
+            camel_api::error_projection::business_envelope(code, kind)
+        }
+        _ => INTERNAL_ERROR_BODY.clone(),
+    }
+}
+
 /// Route-facing bridge for one tool consumer: turns registry-delivered
 /// [`McpToolInvocation`]s into request-reply Exchanges.
 ///
@@ -518,13 +543,38 @@ fn spawn_tool_bridge(
                             ctx.send_and_wait(exchange).await
                         };
                         // The structured `is_error` flag is set ONLY on a
-                        // genuine failure: a failed exchange, or a body
-                        // materialization failure. A successful route that
-                        // happens to produce an `{"error": ...}` payload stays
-                        // `is_error: false` — hosts must not sniff content.
+                        // genuine failure: a failed exchange, a propagated
+                        // output error, or a body materialization failure. A
+                        // successful route that happens to produce an
+                        // `{"error": ...}` payload stays `is_error: false` —
+                        // hosts must not sniff content. Failure bodies are
+                        // projected (ADR-0097): business errors keep
+                        // `code`/`kind`, everything else collapses to the
+                        // generic constant, and the detail goes to a WARN log
+                        // only.
                         let (content, is_error) = match result {
-                            Ok(out) => body_to_json(out.input.body).await,
-                            Err(e) => (serde_json::json!({ "error": e.to_string() }), true),
+                            Ok(mut out) => {
+                                let carried = out.error.take();
+                                match carried {
+                                    Some(e) => {
+                                        tracing::warn!(
+                                            tool = %invocation.name,
+                                            error = %e,
+                                            "tool dispatch failed"
+                                        );
+                                        (project_failure(&e), true)
+                                    }
+                                    None => body_to_json(out.input.body, &invocation.name).await,
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool = %invocation.name,
+                                    error = %e,
+                                    "tool dispatch failed"
+                                );
+                                (project_failure(&e), true)
+                            }
                         };
                         // A dropped reply means the dispatcher gave up; the
                         // invocation is answered or discarded on that side.
@@ -577,12 +627,25 @@ fn spawn_resource_bridge(
                             ctx.send_and_wait(exchange).await
                         };
                         let resource = match result {
-                            Ok(out) => body_to_resource(out, &read.uri).await,
-                            Err(e) => McpResource {
-                                uri: read.uri.clone(),
-                                content: e.to_string().into_bytes(),
-                                mime_type: "text/plain; charset=utf-8".to_owned(),
+                            Ok(mut out) => match out.error.take() {
+                                Some(e) => {
+                                    tracing::warn!(
+                                        uri = %camel_api::redact::redact_url_fail_closed(&read.uri),
+                                        error = %e,
+                                        "resource read failed"
+                                    );
+                                    projected_resource(&read.uri, &e)
+                                }
+                                None => body_to_resource(out, &read.uri).await,
                             },
+                            Err(e) => {
+                                tracing::warn!(
+                                    uri = %camel_api::redact::redact_url_fail_closed(&read.uri),
+                                    error = %e,
+                                    "resource read failed"
+                                );
+                                projected_resource(&read.uri, &e)
+                            }
                         };
                         let _ = read.reply.send(resource);
                     });
@@ -593,16 +656,29 @@ fn spawn_resource_bridge(
     })
 }
 
+/// The failure shape of one resource read: the ADR-0097 envelope
+/// ([`project_failure`]) as `application/json` content. The detail lives in
+/// the caller's WARN event only.
+fn projected_resource(uri: &str, error: &CamelError) -> McpResource {
+    McpResource {
+        uri: uri.to_owned(),
+        content: project_failure(error).to_string().into_bytes(),
+        mime_type: "application/json".to_owned(),
+    }
+}
+
 /// Serialize a route output body into tool-result content.
 ///
 /// Returns `(content, is_error)`: `is_error` is true only when the body
 /// materialization itself failed (oversize or unreadable stream), never based
-/// on what the content contains.
+/// on what the content contains. A materialization failure projects through
+/// [`project_failure`] (generic constant) and logs the detail in a WARN event
+/// naming `tool`.
 ///
 /// `Json` bodies pass through as JSON; textual bodies become JSON strings;
 /// bytes are best-effort UTF-8; empty bodies become `null`; streams are
 /// materialized (bounded) and treated as bytes.
-async fn body_to_json(body: Body) -> (serde_json::Value, bool) {
+async fn body_to_json(body: Body, tool: &str) -> (serde_json::Value, bool) {
     match body {
         Body::Json(value) => (value, false),
         Body::Text(s) => (serde_json::Value::String(s), false),
@@ -613,7 +689,14 @@ async fn body_to_json(body: Body) -> (serde_json::Value, bool) {
                 serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned()),
                 false,
             ),
-            Err(e) => (serde_json::json!({ "error": e.to_string() }), true),
+            Err(e) => {
+                tracing::warn!(
+                    tool = %tool,
+                    error = %e,
+                    "tool output materialization failed"
+                );
+                (project_failure(&e), true)
+            }
         },
     }
 }
@@ -624,11 +707,10 @@ async fn body_to_json(body: Body) -> (serde_json::Value, bool) {
 /// streamed body's metadata content type, then the
 /// `application/octet-stream` default.
 ///
-/// Read failures are never silent: a failed or oversize stream body yields
-/// the error string as `text/plain` content — the same shape the resource
-/// bridge uses for a route failure (and [`body_to_json`] mirrors for tools
-/// via `{"error": ...}`) — so a failed read is distinguishable from an
-/// empty resource.
+/// Read failures are never silent: a failed or oversize stream body projects
+/// through [`project_failure`] (the same ADR-0097 envelope the resource bridge
+/// uses for a route failure) as `application/json` content, and the detail
+/// goes to a WARN event naming `uri` only.
 async fn body_to_resource(out: Exchange, uri: &str) -> McpResource {
     let header_mime = out
         .input
@@ -660,10 +742,17 @@ async fn body_to_resource(out: Exchange, uri: &str) -> McpResource {
                 .or(stream_mime)
                 .unwrap_or_else(|| "application/octet-stream".to_owned()),
         ),
-        Err(e) => (
-            e.to_string().into_bytes(),
-            "text/plain; charset=utf-8".to_owned(),
-        ),
+        Err(e) => {
+            tracing::warn!(
+                uri = %camel_api::redact::redact_url_fail_closed(uri),
+                error = %e,
+                "resource body materialization failed"
+            );
+            (
+                project_failure(&e).to_string().into_bytes(),
+                "application/json".to_owned(),
+            )
+        }
     };
 
     McpResource {

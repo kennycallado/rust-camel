@@ -3857,12 +3857,13 @@ fn pipeline_error_to_reply(
 /// the rest of the payload is runtime exchange data (ADR-0032). The status is
 /// resolved upstream by `camel_api::http_error_mapping::business_status`,
 /// which never yields 2xx.
+///
+/// The body value comes from the shared
+/// `camel_api::error_projection::business_envelope` helper, so the envelope is
+/// projected in exactly one place.
 fn business_error_reply(status: u16, code: &str, kind: &str) -> HttpReply {
-    let body = serde_json::to_string(&serde_json::json!({
-        "error": code,
-        "kind": kind,
-    }))
-    .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
+    let body = serde_json::to_string(&camel_api::error_projection::business_envelope(code, kind))
+        .unwrap_or_else(|_| "{}".to_string()); // allow-unwrap
     HttpReply {
         status,
         headers: vec![("Content-Type".to_string(), "application/json".to_string())],

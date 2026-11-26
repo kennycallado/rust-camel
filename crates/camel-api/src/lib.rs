@@ -23,6 +23,7 @@ pub mod endpoint_pipeline;
 pub mod endpoint_uri;
 pub mod error;
 pub mod error_handler;
+pub mod error_projection;
 pub mod exchange;
 pub mod exchange_lookup;
 pub mod filter;

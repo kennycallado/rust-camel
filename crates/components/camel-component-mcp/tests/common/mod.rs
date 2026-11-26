@@ -11,13 +11,17 @@
 //!   recording must happen at the HTTP layer, not in a `ServerHandler`.
 //! - [`warn_capture`] — returns a handle over the process-wide recording
 //!   tracing subscriber (installed once via `set_global_default`); assert on
-//!   captured `(level, message)` pairs filtered by message substring.
+//!   captured `(level, message)` pairs filtered by message substring, and on
+//!   an event's non-`message` fields via [`WarnCapture::has_warn_field_containing`].
+//! - [`raw_rmcp_client`] — a discover-lifecycle rmcp host client against a
+//!   component listener's `/mcp` endpoint.
 //! - [`spawn_mock`] — an in-process rmcp Streamable-HTTP server on
 //!   `127.0.0.1:0` with parameterizable `supported_protocol_versions()` and
 //!   canned `tools/call` / `resources/read` answers.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -25,11 +29,15 @@ use axum::body::Body;
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
+use rmcp::ClientLifecycleMode;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, DiscoverResult, ProtocolVersion,
     ReadResourceRequestParams, ReadResourceResponse, ServerCapabilities, ServerConfig,
 };
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{ClientServiceExt, RequestContext, RoleServer};
+use rmcp::transport::streamable_http_client::{
+    StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use tracing_subscriber::layer::SubscriberExt;
@@ -285,8 +293,37 @@ async fn record_request(request: Request, next: Next, sink: RequestSink) -> Resp
     next.run(request).await
 }
 
-/// Sink of captured `(level, message)` pairs, shared process-wide.
-type WarnSink = Arc<Mutex<Vec<(tracing::Level, String)>>>;
+/// A fresh discover-lifecycle rmcp host client against the listener at `addr`.
+pub async fn raw_rmcp_client(
+    addr: SocketAddr,
+) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+    );
+    ().serve_with_lifecycle(
+        transport,
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+    )
+    .await
+    .expect("discover-lifecycle connect against the component server")
+}
+
+/// Sink of captured events, shared process-wide.
+///
+/// `fields` renders every non-`message` field as `name=Debug`, joined with
+/// `"; "` (`""` when the event carries no other field). Records and their
+/// fields live in ONE vector under ONE lock so index `i` always pairs an event
+/// with its own fields, even under parallel tests.
+type WarnSink = Arc<Mutex<Vec<WarnRecord>>>;
+
+/// One captured event: level, the `message` field alone, and the other fields.
+struct WarnRecord {
+    level: tracing::Level,
+    message: String,
+    fields: String,
+}
 
 /// Handle over the process-wide recording sink.
 pub struct WarnCapture {
@@ -333,7 +370,7 @@ impl WarnCapture {
             .lock()
             .expect("warn records poisoned")
             .iter()
-            .any(|(level, message)| *level == tracing::Level::WARN && message.contains(needle))
+            .any(|record| record.level == tracing::Level::WARN && record.message.contains(needle))
     }
 
     /// Number of captured `WARN` messages containing `needle` — for
@@ -343,7 +380,9 @@ impl WarnCapture {
             .lock()
             .expect("warn records poisoned")
             .iter()
-            .filter(|(level, message)| *level == tracing::Level::WARN && message.contains(needle))
+            .filter(|record| {
+                record.level == tracing::Level::WARN && record.message.contains(needle)
+            })
             .count()
     }
 
@@ -355,15 +394,38 @@ impl WarnCapture {
             .lock()
             .expect("warn records poisoned")
             .iter()
-            .filter(|(level, message)| *level == tracing::Level::WARN && message.contains(needle))
-            .map(|(_, message)| message.clone())
+            .filter(|record| {
+                record.level == tracing::Level::WARN && record.message.contains(needle)
+            })
+            .map(|record| record.message.clone())
             .collect()
+    }
+
+    /// True when one captured `WARN` event has `event_needle` in its MESSAGE
+    /// and `field_needle` in the rendered non-`message` fields of the SAME
+    /// event.
+    ///
+    /// Caller contract: `event_needle` is a static tracing event message and
+    /// `field_needle` is unique to the calling test, because the sink is
+    /// shared by every test in the binary. An existence proof passes a
+    /// `field_needle` that must be present; a leak-absence proof passes the
+    /// leaked text.
+    pub fn has_warn_field_containing(&self, event_needle: &str, field_needle: &str) -> bool {
+        self.records
+            .lock()
+            .expect("warn records poisoned")
+            .iter()
+            .any(|record| {
+                record.level == tracing::Level::WARN
+                    && record.message.contains(event_needle)
+                    && record.fields.contains(field_needle)
+            })
     }
 }
 
-/// `tracing_subscriber` layer recording `(level, message)` pairs.
+/// `tracing_subscriber` layer recording `(level, message, fields)` records.
 struct RecordingLayer {
-    records: Arc<Mutex<Vec<(tracing::Level, String)>>>,
+    records: Arc<Mutex<Vec<WarnRecord>>>,
 }
 
 impl<S> tracing_subscriber::Layer<S> for RecordingLayer
@@ -375,28 +437,43 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = MessageVisitor(String::new());
+        let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
+        // One lock covers the record and its field entry: index `i` always
+        // pairs an event with its own fields under parallel tests.
         self.records
             .lock()
             .expect("warn records poisoned")
-            .push((*event.metadata().level(), visitor.0));
+            .push(WarnRecord {
+                level: *event.metadata().level(),
+                message: visitor.message,
+                fields: visitor.fields.join("; "),
+            });
     }
 }
 
-/// Field visitor extracting the `message` field.
-struct MessageVisitor(String);
+/// Field visitor extracting the `message` field and rendering every other
+/// field as `name=Debug`.
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+    fields: Vec<String>,
+}
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         if field.name() == "message" {
-            self.0 = value.to_owned();
+            self.message = value.to_owned();
+        } else {
+            self.fields.push(format!("{}={:?}", field.name(), value));
         }
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "message" {
-            self.0 = format!("{value:?}");
+            self.message = format!("{value:?}");
+        } else {
+            self.fields.push(format!("{}={:?}", field.name(), value));
         }
     }
 }

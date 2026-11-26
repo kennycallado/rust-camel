@@ -1,0 +1,23 @@
+{
+  "change": "mcp-error-projection",
+  "kind": "holistic",
+  "verdict": "APPROVE",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_de80adb64ffeW4PDQfhBk9L54s",
+  "impl_hash": "sha256git:7b26e8f6564fb2a751be60012503fd8690c814ad",
+  "history": [
+    {
+      "round": 1,
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": "4 minors: stale test name validate_arguments_violation_shape_unchanged; runtime parse of compile-time constant in project_failure; per-call declared-set recompute with retained root_schema; 3 redaction edge-case tests missing",
+      "resolution": "commit 7b26e8f65 applied all four verbatim"
+    },
+    {
+      "round": 2,
+      "reviewer_session": "ses_de8012bf2ffer5USfoRGLXM1M5",
+      "verdict": "APPROVE",
+      "note": "delta review of the fix commit; suites re-run in worktree (camel-json-schema 40, mcp lane 186)"
+    }
+  ],
+  "per_task_reviews": "all APPROVE or APPROVE-WITH-FINDINGS-resolved (see tasks.md + park report)"
+}
