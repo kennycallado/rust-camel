@@ -189,17 +189,19 @@ Slices are separate changes with separate bd issues; each amends this ADR.
   errors, the `camel-core` `TransactionManagerRegistry` with fail-closed
   resolution, `BuilderStep::Transacted`, and the declarative authoring surfaces
   (YAML, JSON, template) with ALL load rejections. Those rejections hold on the
-  DECLARATIVE load path and on the canonical lowering path through ONE shared
-  load walk over the lowered step tree (`sqltrans-exec` step 3; pinned by
-  `transacted-canonical-walk`). A `RouteDefinition` registered already lowered
-  (`CamelContext::add_route_definition` → `RuntimeBus::register_route` →
-  `handle_register_internal`) passes no lowering entry and does not run the
-  registry-backed walk: a hand-authored block skips the structural and per-arm
-  checks, and every pre-lowered block skips manager and dialect resolution.
-  Today such a block fails closed at route-add with the typed
-  `Transaction(TransactionError::JoinSessionMissing { datasource })` error,
-  surfaced stringified; the executor slice may not remove that backstop before
-  the walk runs there (bd rc-ltfyp, blocks `rc-ggo3d`). Bundle boot registers
+  DECLARATIVE load path, on the canonical lowering path, and at the internal
+  registration seam through ONE shared walk over the lowered step tree
+  (`sqltrans-exec` step 3; pinned by `transacted-canonical-walk`). The
+  internal registration seam (`RuntimeBus::register_route` →
+  `handle_register_internal`) runs the same shared walk over
+  `RouteDefinition::steps` and `circuit_breaker_fallback`, with
+  registry-backed manager resolution and catalog-backed dialect resolution,
+  before the runtime side effect and before the duplicate-route check (bd
+  `rc-ltfyp`). The typed `TransactionError` from the scan crosses the internal
+  registration port; non-scan registration failures keep their existing
+  `invalid state: …` text. The `JoinSessionMissing` route-add backstop remains
+  in force until `rc-ggo3d` removes it deliberately; its surface stays
+  `RouteError` through the unchanged execution adapter. Bundle boot registers
   one manager per catalog datasource, so a block on a catalog datasource passes
   load; `Managed` keeps the current endpoint-creation rejection. Runtime
   behavior is unchanged.

@@ -10,6 +10,14 @@
 //! structural set over the lowered `BuilderStep` tree plus the req-5 per-arm
 //! guards that S1 does not know about.
 //!
+//! The internal registration seam (`handle_register_internal`) is a third
+//! caller of the ONE visitor: it scans an already-lowered [`RouteDefinition`]
+//! before registration through `walk_route_definition_transacted_blocks`,
+//! which enters only the OUTERMOST blocks in the route body and in the
+//! circuit-breaker fallback (the visitor owns each block subtree and rejects
+//! nesting). Both sequences are visited in document order; the first error
+//! wins.
+//!
 //! Precedence (binding, ruling 604c / mission 609 step 3): depth-first in
 //! document order; at each node the STRUCTURAL checks run before the PER-ARM
 //! checks, both before children recurse; first error wins. After the whole
@@ -71,6 +79,7 @@ use camel_api::CamelError;
 use camel_api::transaction::{TransactionError, TransactionManager};
 
 use crate::lifecycle::application::route_definition::BuilderStep;
+use crate::lifecycle::application::route_definition::RouteDefinition;
 
 /// Answers "what is the configured JDBC/DB URL for this datasource?".
 type ResolveUrl<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -148,6 +157,50 @@ pub fn walk_transacted_block_deferred(
 /// dialect stage belongs to the boundary that can resolve URLs (probe R2-3).
 pub fn walk_transacted_block_deferred_unresolved(step: &BuilderStep) -> Result<(), CamelError> {
     walk_block(step, None)
+}
+
+/// Scan an already-lowered [`RouteDefinition`] for `transacted`-block
+/// offences (registration seam).
+///
+/// Entry point for `handle_register_internal`: the route body and the
+/// circuit-breaker fallback are each scanned in document order, entering only
+/// outermost blocks — [`walk_transacted_block`] owns each block subtree, so
+/// nesting is rejected inside the visitor, never by this scan. The first
+/// error wins.
+pub(crate) fn walk_route_definition_transacted_blocks(
+    definition: &RouteDefinition,
+    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn TransactionManager>>,
+    resolve_url: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), CamelError> {
+    walk_outermost_blocks(definition.steps(), resolve_manager, resolve_url)?;
+    walk_outermost_blocks(
+        definition.circuit_breaker_fallback(),
+        resolve_manager,
+        resolve_url,
+    )
+}
+
+/// Scan one step sequence, entering each outermost [`BuilderStep::Transacted`]
+/// block and recursing through every other container.
+///
+/// Document order is preserved, so the first offence in the route wins. A
+/// block node is handed to [`walk_transacted_block`] and NOT descended: the
+/// visitor owns the block subtree and rejects nesting there.
+fn walk_outermost_blocks(
+    steps: &[BuilderStep],
+    resolve_manager: &dyn Fn(&str) -> Option<Arc<dyn TransactionManager>>,
+    resolve_url: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), CamelError> {
+    for step in steps {
+        if matches!(step, BuilderStep::Transacted { .. }) {
+            walk_transacted_block(step, resolve_manager, resolve_url)?;
+            continue;
+        }
+        for child in child_steps(step) {
+            walk_outermost_blocks(child, resolve_manager, resolve_url)?;
+        }
+    }
+    Ok(())
 }
 
 /// The ONE visitor: structural + per-arm checks over the whole block subtree,
@@ -1655,6 +1708,91 @@ mod tests {
                 ))
             ),
             "a percent-encoded file: source rejects before the manager is consulted"
+        );
+    }
+
+    /// The registration seam scans the circuit-breaker fallback too: an
+    /// offence inside a fallback block is rejected exactly like one in the
+    /// route body.
+    #[test]
+    fn route_definition_scan_rejects_offence_in_circuit_breaker_fallback() {
+        let definition = RouteDefinition::new("direct:start", vec![])
+            .with_circuit_breaker_fallback(vec![BuilderStep::DeclarativeFilter {
+                predicate: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "true".into(),
+                },
+                steps: vec![BuilderStep::Transacted {
+                    datasource: "pg".into(),
+                    steps: vec![BuilderStep::DeclarativeRecipientList {
+                        expression: LanguageExpressionDef {
+                            language: "simple".into(),
+                            source: "${body}".into(),
+                        },
+                        delimiter: ",".into(),
+                        parallel: false,
+                        parallel_limit: None,
+                        stop_on_exception: false,
+                        aggregation: "last_wins".into(),
+                    }],
+                }],
+            }]);
+        let error = match walk_route_definition_transacted_blocks(
+            &definition,
+            &|datasource| (datasource == "pg").then(|| fake_manager("pg")),
+            &|_datasource| Some("postgres://localhost/pg".to_string()),
+        ) {
+            Err(CamelError::Transaction(error)) => error,
+            other => panic!("expected DynamicTargetUnprovable, got {other:?}"),
+        };
+        assert_eq!(
+            error,
+            TransactionError::DynamicTargetUnprovable {
+                step: "recipient-list".to_string(),
+            }
+        );
+    }
+
+    /// A nested block in the circuit-breaker fallback is still a structural
+    /// rejection: the scan enters the outermost fallback block and the
+    /// visitor owns its subtree.
+    #[test]
+    fn route_definition_scan_rejects_nested_block_in_fallback() {
+        let definition = RouteDefinition::new("direct:start", vec![])
+            .with_circuit_breaker_fallback(vec![block(
+                "pg",
+                vec![block("pg", vec![sql("sql:select 1?datasource=pg")])],
+            )]);
+        let error = match walk_route_definition_transacted_blocks(
+            &definition,
+            &|datasource| (datasource == "pg").then(|| fake_manager("pg")),
+            &|_datasource| Some("postgres://localhost/pg".to_string()),
+        ) {
+            Err(CamelError::Transaction(error)) => error,
+            other => panic!("expected NestedBlock, got {other:?}"),
+        };
+        assert_eq!(
+            error,
+            TransactionError::NestedBlock {
+                inner: "pg".to_string(),
+            }
+        );
+    }
+
+    /// A definition with no transacted block never consults the resolvers.
+    #[test]
+    fn route_definition_scan_plain_definition_is_ok() {
+        let definition =
+            RouteDefinition::new("direct:start", vec![BuilderStep::To("direct:next".into())])
+                .with_circuit_breaker_fallback(vec![]);
+        let resolve_manager = |_: &str| -> Option<Arc<dyn TransactionManager>> {
+            panic!("the scan must not resolve a manager for a plain definition")
+        };
+        let resolve_url = |_: &str| -> Option<String> { panic!("the scan must not resolve a url") };
+        assert!(
+            walk_route_definition_transacted_blocks(&definition, &resolve_manager, &resolve_url)
+                .is_ok(),
+            "a definition without a transacted block passes the scan"
         );
     }
 }

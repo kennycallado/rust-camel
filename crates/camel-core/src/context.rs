@@ -185,10 +185,7 @@ impl RuntimeExecutionHandle {
         definition: RouteDefinition,
     ) -> Result<(), CamelError> {
         use crate::lifecycle::application::ports::RouteRegistrationPort;
-        self.runtime
-            .register_route(definition)
-            .await
-            .map_err(Into::into)
+        self.runtime.register_route(definition).await
     }
 
     /// Compile a route definition into a bare BoxProcessor (no lifecycle).
@@ -657,10 +654,7 @@ impl CamelContext {
             route_id = %definition.route_id(),
             "Adding route definition"
         );
-        self.runtime
-            .register_route(definition)
-            .await
-            .map_err(Into::into)
+        self.runtime.register_route(definition).await
     }
 
     /// Access the component registry.

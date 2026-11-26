@@ -339,18 +339,19 @@ impl RuntimeQueryBus for RuntimeBus {
 
 #[async_trait]
 impl RouteRegistrationPort for RuntimeBus {
-    async fn register_route(&self, def: RouteDefinition) -> Result<(), DomainError> {
+    async fn register_route(&self, def: RouteDefinition) -> Result<(), CamelError> {
         self.ensure_journal_recovered()
             .await
             .map_err(|e| DomainError::InvalidState(e.to_string()))?;
         let deps = self.deps();
-        handle_register_internal(&deps, def)
-            .await
-            .map(|_| ())
-            .map_err(|e| match e {
-                CamelError::RouteError(msg) => DomainError::InvalidState(msg),
-                other => DomainError::InvalidState(other.to_string()),
-            })
+        match handle_register_internal(&deps, def).await {
+            Ok(_) => Ok(()),
+            Err(CamelError::Transaction(err)) => Err(CamelError::Transaction(err)),
+            Err(CamelError::RouteError(msg)) => {
+                Err(CamelError::RouteError(format!("invalid state: {msg}")))
+            }
+            Err(other) => Err(CamelError::RouteError(format!("invalid state: {other}"))),
+        }
     }
 }
 

@@ -5,12 +5,17 @@
 
 use async_trait::async_trait;
 
+use camel_api::CamelError;
+
 use crate::lifecycle::application::route_definition::RouteDefinition;
-use crate::lifecycle::domain::DomainError;
 
 /// Port for in-process route registration with compiled pipeline.
 /// Non-serializable — in-process only. Implemented by RuntimeBus.
+///
+/// Returns `CamelError` so the typed `TransactionError` a registration-seam
+/// transacted-block scan produces crosses the port intact; every other
+/// failure keeps its historical `invalid state: …` text.
 #[async_trait]
 pub(crate) trait RouteRegistrationPort: Send + Sync {
-    async fn register_route(&self, def: RouteDefinition) -> Result<(), DomainError>;
+    async fn register_route(&self, def: RouteDefinition) -> Result<(), CamelError>;
 }

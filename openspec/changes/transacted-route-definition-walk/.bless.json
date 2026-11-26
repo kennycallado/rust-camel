@@ -1,0 +1,60 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS-WITH-FIXES",
+  "expert": "experts/e_gpt",
+  "hash": "sha256:3467a83187b051791d9b9dc9baca7bd5a1705c15bc467574d694d20205c95aff",
+  "hash_at_dispatch": "sha256:902210ff0572262919976ba3b59f06198145374b2697cb3df3cda84f69b75dad",
+  "dispatches": 2,
+  "substitutions": [],
+  "note": "Mission order caps plan blessing at 2 dispatches. Dispatch 1 returned BLESS-WITH-FIXES (four important, one minor); all applied. Dispatch 2 returned BLESS-WITH-FIXES (four important, one minor); all applied. No third dispatch was permitted under the cap. r_glm reviewed the plan twice (APPROVE-WITH-FINDINGS then APPROVE). Post-fix hash recorded above.",
+  "dispatch_log": [
+    {
+      "round": 1,
+      "agent": "experts/e_gpt",
+      "result": "BLESS-WITH-FIXES",
+      "findings": 5,
+      "applied": [
+        "Plain-route fixture changed to empty steps (no component needed).",
+        "Parallel-seam test injects a cloned InMemoryRuntimeStore and asserts RouteRepositoryPort::load == None (projection is not the aggregate repository).",
+        "Source-level acceptance checks added for the shared-walk scenario (two rg checks, no fifth test).",
+        "Non-scan failure assertion tightened to full payload equality 'invalid state: Component not found: no-such-scheme'.",
+        "ADR verification switched from git diff --stat/negative rg to reading the full diff hunk."
+      ]
+    },
+    {
+      "round": 2,
+      "agent": "experts/e_gpt",
+      "result": "BLESS-WITH-FIXES",
+      "findings": 5,
+      "applied": [
+        "Task 1.3 plain-route fixture empty steps (also affects the Tests block).",
+        "Task 1.3 imports add InMemoryRuntimeStore + RouteRepositoryPort.",
+        "Source checks A/B added to Task 1.1 acceptance for the shared-walk scenario.",
+        "Task 1.2 step 5 full-payload equality assertion.",
+        "Task 2.1 full-diff inspection acceptance."
+      ]
+    }
+  ],
+  "review_log": [
+    {
+      "round": 1,
+      "agent": "reviewers/r_glm",
+      "verdict": "APPROVE-WITH-FINDINGS",
+      "findings": 6,
+      "applied": [
+        "rd-parallel route id added (vacuous status assertion otherwise).",
+        "Journal-recovery line left as-is; DomainError import stays used.",
+        "CircuitBreakerConfig import added to Task 1.3.",
+        "Scenario ownership note added for the shared-walk scenario.",
+        "Hexagonal boundaries lane added to Task 1.2 acceptance.",
+        "ADR verification grep made discriminating (post-rewrite-only phrase)."
+      ]
+    },
+    {
+      "round": 2,
+      "agent": "reviewers/r_glm",
+      "verdict": "APPROVE",
+      "findings": 0
+    }
+  ]
+}

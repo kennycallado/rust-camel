@@ -1,10 +1,14 @@
 use super::*;
+use crate::lifecycle::adapters::InMemoryRuntimeStore;
+use crate::lifecycle::application::ports::RouteRepositoryPort;
 use crate::lifecycle::application::route_definition::{
     BuilderStep, LanguageExpressionDef, RouteDefinition,
 };
 use crate::lifecycle::domain::{RouteRuntimeAggregate, RouteRuntimeState};
 use async_trait::async_trait;
 use camel_api::CamelError;
+use camel_api::circuit_breaker::CircuitBreakerConfig;
+use camel_api::transaction::TransactionError;
 use camel_api::{
     AsyncHealthCheck, CanonicalRouteSpec, CheckResult, HealthStatus, RuntimeCommand,
     RuntimeCommandResult, RuntimeQuery, RuntimeQueryResult, ServiceStatus,
@@ -708,6 +712,174 @@ async fn add_route_definition_produces_registered_state() {
         }
         _ => panic!("unexpected query result"),
     }
+}
+
+#[tokio::test]
+async fn route_definition_non_scan_failure_keeps_invalid_state_prefix() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let definition = RouteDefinition::new(
+        "direct:start",
+        vec![BuilderStep::To("no-such-scheme:probe".into())],
+    )
+    .with_route_id("keeps-prefix");
+
+    let error = ctx
+        .add_route_definition(definition)
+        .await
+        .expect_err("an unknown component must fail registration");
+
+    // Full-payload equality: a prefix check would also accept a doubled
+    // `invalid state: ` prefix, so the whole message is asserted.
+    match error {
+        CamelError::RouteError(msg) => assert_eq!(
+            msg, "invalid state: Component not found: no-such-scheme",
+            "non-scan registration failures keep their historical text"
+        ),
+        other => panic!("expected CamelError::RouteError, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn route_definition_block_rejects_parallel_split() {
+    let store = InMemoryRuntimeStore::default();
+    let ctx = CamelContext::builder()
+        .runtime_store(store.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let definition = RouteDefinition::new(
+        "direct:start",
+        vec![BuilderStep::Transacted {
+            datasource: "pg".into(),
+            steps: vec![BuilderStep::DeclarativeSplit {
+                expression: LanguageExpressionDef {
+                    language: "simple".into(),
+                    source: "${body}".into(),
+                },
+                aggregation: camel_api::splitter::AggregationStrategy::LastWins,
+                parallel: true,
+                parallel_limit: None,
+                trace_item_threshold: None,
+                stop_on_exception: false,
+                steps: vec![BuilderStep::To("sql:select 1?datasource=pg".into())],
+            }],
+        }],
+    )
+    .with_route_id("rd-parallel");
+
+    let error = ctx
+        .add_route_definition(definition)
+        .await
+        .expect_err("a parallel split inside a transacted block must fail registration");
+
+    match error {
+        CamelError::Transaction(TransactionError::ParallelInBlock { step, datasource }) => {
+            assert_eq!(step, "split");
+            assert_eq!(datasource, "pg");
+        }
+        other => panic!("expected CamelError::Transaction(ParallelInBlock), got {other:?}"),
+    }
+
+    assert!(
+        ctx.runtime_route_status("rd-parallel")
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected registration must not reach the status projection"
+    );
+    // The projection alone cannot prove no aggregate was persisted: check the
+    // aggregate repository too.
+    assert!(
+        RouteRepositoryPort::load(&store, "rd-parallel")
+            .await
+            .unwrap()
+            .is_none(),
+        "a rejected registration must not persist a route aggregate"
+    );
+}
+
+#[tokio::test]
+async fn route_definition_block_rejects_dynamic_uri() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+
+    let definition = RouteDefinition::new("direct:start", vec![])
+        .with_circuit_breaker(CircuitBreakerConfig::new())
+        .with_circuit_breaker_fallback(vec![BuilderStep::DeclarativeFilter {
+            predicate: LanguageExpressionDef {
+                language: "simple".into(),
+                source: "true".into(),
+            },
+            steps: vec![BuilderStep::Transacted {
+                datasource: "pg".into(),
+                steps: vec![BuilderStep::DeclarativeRecipientList {
+                    expression: LanguageExpressionDef {
+                        language: "simple".into(),
+                        source: "${body}".into(),
+                    },
+                    delimiter: ",".into(),
+                    parallel: false,
+                    parallel_limit: None,
+                    stop_on_exception: false,
+                    aggregation: "last_wins".into(),
+                }],
+            }],
+        }])
+        .with_route_id("rd-dynamic");
+
+    let error = ctx
+        .add_route_definition(definition)
+        .await
+        .expect_err("a dynamic routing target inside a block must fail registration");
+
+    match error {
+        CamelError::Transaction(TransactionError::DynamicTargetUnprovable { step }) => {
+            assert_eq!(step, "recipient-list");
+        }
+        other => panic!("expected CamelError::Transaction(DynamicTargetUnprovable), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn route_definition_block_reports_missing_manager() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+
+    let definition = RouteDefinition::new(
+        "direct:start",
+        vec![BuilderStep::Transacted {
+            datasource: "pg".into(),
+            steps: vec![BuilderStep::To("sql:select 1?datasource=pg".into())],
+        }],
+    )
+    .with_route_id("rd-missing-manager");
+
+    let error = ctx
+        .add_route_definition(definition)
+        .await
+        .expect_err("an unregistered datasource must fail registration");
+
+    match error {
+        CamelError::Transaction(TransactionError::ManagerMissing { datasource }) => {
+            assert_eq!(datasource, "pg");
+        }
+        other => panic!("expected CamelError::Transaction(ManagerMissing), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn route_definition_plain_route_still_registers() {
+    let ctx = CamelContext::builder().build().await.unwrap();
+    let definition = RouteDefinition::new("direct:start", vec![]).with_route_id("rd-plain");
+
+    ctx.add_route_definition(definition).await.unwrap();
+
+    assert_eq!(
+        ctx.runtime_route_status("rd-plain")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("Registered")
+    );
 }
 
 #[tokio::test]

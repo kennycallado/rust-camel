@@ -273,6 +273,24 @@ pub(crate) async fn handle_register_internal(
 ) -> Result<RuntimeCommandResult, CamelError> {
     let route_id = def.route_id().to_string();
 
+    // Registration-seam transacted-block scan (ADR-0101 §h): the SAME shared
+    // walk the lowering arms use, resolved against this seam's manager
+    // registry and datasource catalog. It runs before the duplicate check and
+    // before the runtime side effect, so a rejection never leaves a persisted
+    // aggregate or an installed route. The typed `TransactionError` crosses
+    // the registration port intact.
+    let catalog = deps.datasource_catalog.as_deref();
+    let resolve_url = |datasource: &str| {
+        catalog
+            .and_then(|c| c.get_config(datasource))
+            .map(|config| config.db_url)
+    };
+    crate::transacted_walk::walk_route_definition_transacted_blocks(
+        &def,
+        &|datasource: &str| deps.transaction_registry.get(datasource),
+        &resolve_url,
+    )?;
+
     // Adopt-on-recovery: see `handle_register`. A journal-recovered aggregate is
     // adopted by the first declarative re-registration (runtime reinstalled +
     // aggregate reset to Registered below); a true same-session duplicate is
