@@ -262,6 +262,18 @@ mod tests {
 
     // --- Tests ---
 
+    #[test]
+    fn permission_policy_is_not_request_independent() {
+        let policy = PermissionPolicy::new(
+            Arc::new(GrantEvaluator),
+            PermissionValueSource::Literal("/orders".into()),
+            PermissionValueSource::Literal("read".into()),
+            vec![],
+            default_context_config(),
+        );
+        assert!(!policy.is_request_independent());
+    }
+
     #[tokio::test]
     async fn grants_when_evaluator_grants() {
         let principal = TestPrincipal(test_principal());

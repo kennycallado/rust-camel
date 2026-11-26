@@ -80,7 +80,8 @@ pub struct McpBindSecurity {
 }
 
 impl McpBindSecurity {
-    fn new() -> Self {
+    /// Creates an empty security book (no plans, no provider snapshot).
+    pub(crate) fn new() -> Self {
         Self {
             plans: Mutex::new(HashMap::new()),
             providers: Mutex::new(None),
@@ -636,6 +637,10 @@ pub struct ToolEntry {
     /// The serving route's id — the key into the bind's
     /// [`McpBindSecurity`] plan map (dispatch-time authentication, Task 2.6).
     pub route_id: String,
+    /// The compiled [`RouteSecurityPlan`] captured at registration — the
+    /// catalog classification input (`None` = public pass-through
+    /// registration, listed to every caller).
+    pub plan: Option<RouteSecurityPlan>,
     /// Readiness flag — tools not yet ready are hidden from `tools/list`.
     pub ready: AtomicBool,
     /// Owner liveness token: the registering consumer holds the strong
@@ -645,14 +650,15 @@ pub struct ToolEntry {
 }
 
 /// Snapshot clone for `resolve`: the `AtomicBool` is copied by value (a fresh
-/// flag at the entry's current state), while the sender (an `mpsc` handle)
-/// and schema are cheap clones.
+/// flag at the entry's current state), while the sender (an `mpsc` handle),
+/// schema, and compiled plan are cheap clones.
 impl Clone for ToolEntry {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
             input_schema: self.input_schema.clone(),
             route_id: self.route_id.clone(),
+            plan: self.plan.clone(),
             ready: AtomicBool::new(self.ready.load(Ordering::SeqCst)),
             // Liveness is registry-internal (ADR-0068): the dispatch snapshot
             // carries an inert token, never the registering owner.
@@ -670,6 +676,24 @@ fn prune_dead(entries: &mut HashMap<String, ToolEntry>) {
     entries.retain(|_, entry| entry.owner.upgrade().is_some());
 }
 
+/// One ready tool as catalog discovery sees it: name, input schema, serving
+/// route id, and the compiled plan captured at registration.
+///
+/// Crate-private snapshot shape (Task 2.1): the adapter's catalog filter
+/// classifies each entry by `route_id`/`plan`, while `list_ready` keeps its
+/// public `(name, input_schema)` projection.
+pub(crate) struct ReadyTool {
+    /// Registered tool name.
+    pub name: String,
+    /// Declared JSON Schema for the tool's arguments.
+    pub input_schema: serde_json::Value,
+    /// The serving route's id (key into the bind security book).
+    pub route_id: String,
+    /// The compiled plan captured at registration; `None` = public
+    /// pass-through registration (listed to every caller).
+    pub plan: Option<RouteSecurityPlan>,
+}
+
 impl McpToolRegistry {
     /// Creates an empty tool registry with capacity `max`.
     pub fn new(max: usize) -> Self {
@@ -680,7 +704,9 @@ impl McpToolRegistry {
     }
 
     /// Registers `name` → (`sender`, `input_schema`) for `route_id` under
-    /// the liveness token `owner`.
+    /// the liveness token `owner`, carrying no plan.
+    ///
+    /// Delegates to [`Self::register_with_plan`] with `plan = None`.
     ///
     /// A duplicate `name` whose entry is still owned by a live token is
     /// rejected with an [`McpError::Endpoint`] — closing the
@@ -697,11 +723,11 @@ impl McpToolRegistry {
     /// [`McpError::CapExceeded`].
     /// # Security note
     ///
-    /// Tools registered directly through this pub API carry no
-    /// `RouteSecurityPlan` and are served WITHOUT authentication (public
-    /// pass-through, invisible to the per-bind exposure gate).
-    /// Kernel-secured registration flows through the consumer's plan
-    /// registration instead.
+    /// An entry registered through this API carries no plan, so catalog
+    /// discovery lists it to every caller. Dispatch still follows the bind
+    /// security book, so a direct-drive route with a registered dispatch
+    /// plan stays authenticated at call time. Use
+    /// [`Self::register_with_plan`] to hand the entry its compiled plan.
     pub fn register(
         &self,
         name: String,
@@ -709,6 +735,30 @@ impl McpToolRegistry {
         sender: tokio::sync::mpsc::Sender<McpToolInvocation>,
         input_schema: serde_json::Value,
         owner: Weak<()>,
+    ) -> Result<(), McpError> {
+        self.register_with_plan(name, route_id, sender, input_schema, owner, None)
+    }
+
+    /// Registers `name` → (`sender`, `input_schema`) for `route_id` under
+    /// the liveness token `owner`, storing `plan` — the compiled
+    /// [`RouteSecurityPlan`] captured at registration.
+    ///
+    /// `plan` is the catalog classification contract: `None` marks a public
+    /// pass-through registration that every caller sees in `tools/list`,
+    /// while `Some(plan)` lets catalog discovery classify the entry by its
+    /// access mode. Dispatch is unchanged — it always follows the bind
+    /// security book ([`McpBindSecurity`]), not this copy.
+    ///
+    /// Duplicate rejection, dead-owner replacement, lazy pruning, and the
+    /// `max` cap are identical to [`Self::register`].
+    pub fn register_with_plan(
+        &self,
+        name: String,
+        route_id: String,
+        sender: tokio::sync::mpsc::Sender<McpToolInvocation>,
+        input_schema: serde_json::Value,
+        owner: Weak<()>,
+        plan: Option<RouteSecurityPlan>,
     ) -> Result<(), McpError> {
         let mut entries = self
             .entries
@@ -732,6 +782,7 @@ impl McpToolRegistry {
                     sender,
                     input_schema,
                     route_id,
+                    plan,
                     ready: AtomicBool::new(false),
                     owner,
                 },
@@ -754,6 +805,7 @@ impl McpToolRegistry {
                 sender,
                 input_schema,
                 route_id,
+                plan,
                 ready: AtomicBool::new(false),
                 owner,
             },
@@ -813,10 +865,10 @@ impl McpToolRegistry {
             .is_some_and(|entry| entry.owner.upgrade().is_some())
     }
 
-    /// Ready tools as `(name, input_schema)` pairs; not-ready tools are
-    /// hidden and dead-owner entries are pruned before listing. Order is
-    /// unspecified.
-    pub fn list_ready(&self) -> Vec<(String, serde_json::Value)> {
+    /// Crate-private ready snapshot: every ready tool with its serving route
+    /// id and compiled plan. Dead-owner entries are pruned before listing and
+    /// not-ready tools are hidden. Order is unspecified.
+    pub(crate) fn ready_tools(&self) -> Vec<ReadyTool> {
         let mut entries = self
             .entries
             .lock()
@@ -825,7 +877,22 @@ impl McpToolRegistry {
         entries
             .iter()
             .filter(|(_, entry)| entry.ready.load(Ordering::SeqCst))
-            .map(|(name, entry)| (name.clone(), entry.input_schema.clone()))
+            .map(|(name, entry)| ReadyTool {
+                name: name.clone(),
+                input_schema: entry.input_schema.clone(),
+                route_id: entry.route_id.clone(),
+                plan: entry.plan.clone(),
+            })
+            .collect()
+    }
+
+    /// Ready tools as `(name, input_schema)` pairs; not-ready tools are
+    /// hidden and dead-owner entries are pruned before listing. Order is
+    /// unspecified.
+    pub fn list_ready(&self) -> Vec<(String, serde_json::Value)> {
+        self.ready_tools()
+            .into_iter()
+            .map(|tool| (tool.name, tool.input_schema))
             .collect()
     }
 
@@ -864,6 +931,10 @@ pub struct ResourceEntry {
     /// The serving route's id — the key into the bind's
     /// [`McpBindSecurity`] plan map (dispatch-time authentication, Task 2.6).
     pub route_id: String,
+    /// The compiled [`RouteSecurityPlan`] captured at registration — the
+    /// catalog classification input (`None` = public pass-through
+    /// registration, listed to every caller).
+    pub plan: Option<RouteSecurityPlan>,
     /// Readiness flag — resources not yet ready are hidden from
     /// `resources/list`.
     pub ready: AtomicBool,
@@ -874,13 +945,14 @@ pub struct ResourceEntry {
 }
 
 /// Snapshot clone for `resolve`: the `AtomicBool` is copied by value (a fresh
-/// flag at the entry's current state), while the sender (an `mpsc` handle) is
-/// a cheap clone.
+/// flag at the entry's current state), while the sender (an `mpsc` handle)
+/// and compiled plan are cheap clones.
 impl Clone for ResourceEntry {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
             route_id: self.route_id.clone(),
+            plan: self.plan.clone(),
             ready: AtomicBool::new(self.ready.load(Ordering::SeqCst)),
             // Liveness is registry-internal (ADR-0068): the dispatch snapshot
             // carries an inert token, never the registering owner.
@@ -896,6 +968,22 @@ fn prune_dead_resources(entries: &mut HashMap<String, ResourceEntry>) {
     entries.retain(|_, entry| entry.owner.upgrade().is_some());
 }
 
+/// One ready resource as catalog discovery sees it: URI, serving route id,
+/// and the compiled plan captured at registration.
+///
+/// Crate-private snapshot shape (Task 2.1): the adapter's catalog filter
+/// classifies each entry by `route_id`/`plan`, while `list_ready` keeps its
+/// public URI-only projection.
+pub(crate) struct ReadyResource {
+    /// Registered resource URI.
+    pub uri: String,
+    /// The serving route's id (key into the bind security book).
+    pub route_id: String,
+    /// The compiled plan captured at registration; `None` = public
+    /// pass-through registration (listed to every caller).
+    pub plan: Option<RouteSecurityPlan>,
+}
+
 impl McpResourceRegistry {
     /// Creates an empty resource registry with capacity `max`.
     pub fn new(max: usize) -> Self {
@@ -906,7 +994,9 @@ impl McpResourceRegistry {
     }
 
     /// Registers `uri` → `sender` for `route_id` under the liveness token
-    /// `owner`.
+    /// `owner`, carrying no plan.
+    ///
+    /// Delegates to [`Self::register_with_plan`] with `plan = None`.
     ///
     /// A duplicate `uri` whose entry is still owned by a live token is
     /// rejected with an [`McpError::Endpoint`] — closing the
@@ -923,17 +1013,40 @@ impl McpResourceRegistry {
     /// [`McpError::CapExceeded`].
     /// # Security note
     ///
-    /// Resources registered directly through this pub API carry no
-    /// `RouteSecurityPlan` and are served WITHOUT authentication (public
-    /// pass-through, invisible to the per-bind exposure gate).
-    /// Kernel-secured registration flows through the consumer's plan
-    /// registration instead.
+    /// An entry registered through this API carries no plan, so catalog
+    /// discovery lists it to every caller. Dispatch still follows the bind
+    /// security book, so a direct-drive route with a registered dispatch
+    /// plan stays authenticated at call time. Use
+    /// [`Self::register_with_plan`] to hand the entry its compiled plan.
     pub fn register(
         &self,
         uri: String,
         route_id: String,
         sender: tokio::sync::mpsc::Sender<McpResourceRead>,
         owner: Weak<()>,
+    ) -> Result<(), McpError> {
+        self.register_with_plan(uri, route_id, sender, owner, None)
+    }
+
+    /// Registers `uri` → `sender` for `route_id` under the liveness token
+    /// `owner`, storing `plan` — the compiled [`RouteSecurityPlan`] captured
+    /// at registration.
+    ///
+    /// `plan` is the catalog classification contract: `None` marks a public
+    /// pass-through registration that every caller sees in
+    /// `resources/list`, while `Some(plan)` lets catalog discovery classify
+    /// the entry by its access mode. Dispatch is unchanged — it always
+    /// follows the bind security book ([`McpBindSecurity`]), not this copy.
+    ///
+    /// Duplicate rejection, dead-owner replacement, lazy pruning, and the
+    /// `max` cap are identical to [`Self::register`].
+    pub fn register_with_plan(
+        &self,
+        uri: String,
+        route_id: String,
+        sender: tokio::sync::mpsc::Sender<McpResourceRead>,
+        owner: Weak<()>,
+        plan: Option<RouteSecurityPlan>,
     ) -> Result<(), McpError> {
         let mut entries = self
             .entries
@@ -956,6 +1069,7 @@ impl McpResourceRegistry {
                 ResourceEntry {
                     sender,
                     route_id,
+                    plan,
                     ready: AtomicBool::new(false),
                     owner,
                 },
@@ -977,6 +1091,7 @@ impl McpResourceRegistry {
             ResourceEntry {
                 sender,
                 route_id,
+                plan,
                 ready: AtomicBool::new(false),
                 owner,
             },
@@ -1035,9 +1150,11 @@ impl McpResourceRegistry {
             .is_some_and(|entry| entry.owner.upgrade().is_some())
     }
 
-    /// Ready resource URIs; not-ready resources are hidden and dead-owner
-    /// entries are pruned before listing. Order is unspecified.
-    pub fn list_ready(&self) -> Vec<String> {
+    /// Crate-private ready snapshot: every ready resource URI with its
+    /// serving route id and compiled plan. Dead-owner entries are pruned
+    /// before listing and not-ready resources are hidden. Order is
+    /// unspecified.
+    pub(crate) fn ready_resources(&self) -> Vec<ReadyResource> {
         let mut entries = self
             .entries
             .lock()
@@ -1046,7 +1163,20 @@ impl McpResourceRegistry {
         entries
             .iter()
             .filter(|(_, entry)| entry.ready.load(Ordering::SeqCst))
-            .map(|(uri, _)| uri.clone())
+            .map(|(uri, entry)| ReadyResource {
+                uri: uri.clone(),
+                route_id: entry.route_id.clone(),
+                plan: entry.plan.clone(),
+            })
+            .collect()
+    }
+
+    /// Ready resource URIs; not-ready resources are hidden and dead-owner
+    /// entries are pruned before listing. Order is unspecified.
+    pub fn list_ready(&self) -> Vec<String> {
+        self.ready_resources()
+            .into_iter()
+            .map(|resource| resource.uri)
             .collect()
     }
 
@@ -1061,5 +1191,133 @@ impl McpResourceRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         prune_dead_resources(&mut entries);
         entries.get(uri).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use camel_api::security_policy::{AccessMode, TransportId};
+
+    /// A Public plan — the pass-through shape catalog discovery lists to
+    /// every caller. Used to prove the plan captured at registration rides
+    /// the ready snapshot.
+    fn public_plan() -> RouteSecurityPlan {
+        RouteSecurityPlan {
+            access_mode: AccessMode::Public,
+            provider_ref: None,
+            transport: TransportId::Mcp,
+            credential_sources: vec![],
+            audience_binding: None,
+        }
+    }
+
+    #[test]
+    fn ready_snapshot_carries_route_id_and_plan() {
+        let registry = McpToolRegistry::new(8);
+        let owner = Arc::new(());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        registry
+            .register_with_plan(
+                "t".to_string(),
+                "route-t".to_string(),
+                tx,
+                serde_json::json!({}),
+                Arc::downgrade(&owner),
+                Some(public_plan()),
+            )
+            .expect("registration must succeed");
+        registry.mark_ready("t");
+
+        let ready = registry.ready_tools();
+        assert_eq!(ready.len(), 1, "exactly one ready tool");
+        assert_eq!(ready[0].route_id, "route-t");
+        let plan = ready[0]
+            .plan
+            .as_ref()
+            .expect("plan captured at registration");
+        assert!(
+            matches!(&plan.access_mode, AccessMode::Public),
+            "the snapshot must carry the registered plan's access mode"
+        );
+    }
+
+    #[test]
+    fn register_without_plan_carries_none() {
+        let registry = McpToolRegistry::new(8);
+        let owner = Arc::new(());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        registry
+            .register(
+                "t".to_string(),
+                "route-t".to_string(),
+                tx,
+                serde_json::json!({}),
+                Arc::downgrade(&owner),
+            )
+            .expect("registration must succeed");
+        registry.mark_ready("t");
+
+        let ready = registry.ready_tools();
+        assert_eq!(ready.len(), 1, "exactly one ready tool");
+        assert!(
+            ready[0].plan.is_none(),
+            "a plan-less registration must carry None"
+        );
+    }
+
+    #[test]
+    fn ready_resources_snapshot_carries_route_id_and_plan() {
+        let registry = McpResourceRegistry::new(8);
+        let owner = Arc::new(());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        registry
+            .register_with_plan(
+                "crm://x".to_string(),
+                "route-r".to_string(),
+                tx,
+                Arc::downgrade(&owner),
+                Some(public_plan()),
+            )
+            .expect("registration must succeed");
+        registry.mark_ready("crm://x");
+
+        let ready = registry.ready_resources();
+        assert_eq!(ready.len(), 1, "exactly one ready resource");
+        assert_eq!(ready[0].uri, "crm://x");
+        assert_eq!(ready[0].route_id, "route-r");
+        let plan = ready[0]
+            .plan
+            .as_ref()
+            .expect("plan captured at registration");
+        assert!(
+            matches!(&plan.access_mode, AccessMode::Public),
+            "the snapshot must carry the registered plan's access mode"
+        );
+    }
+
+    #[test]
+    fn list_ready_still_projects_name_and_schema() {
+        let registry = McpToolRegistry::new(8);
+        let owner = Arc::new(());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let schema = serde_json::json!({"type": "object"});
+        registry
+            .register(
+                "t".to_string(),
+                "route-t".to_string(),
+                tx,
+                schema.clone(),
+                Arc::downgrade(&owner),
+            )
+            .expect("registration must succeed");
+        registry.mark_ready("t");
+
+        assert_eq!(
+            registry.list_ready(),
+            vec![("t".to_string(), schema)],
+            "list_ready must keep its (name, schema) projection"
+        );
     }
 }

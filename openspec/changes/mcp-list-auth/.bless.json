@@ -1,0 +1,52 @@
+{
+  "change": "mcp-list-auth",
+  "kind": "plan",
+  "verdict": "BLESS-WITH-FIXES (final; all round-2 edits applied verbatim, no third dispatch — mission 621 budget is at most 2 plan dispatches)",
+  "hash": "sha256:b1f5fc0f891e25c92229415b71eccd1591eb8fdbc780569a2548747aaca54598",
+  "rounds": [
+    {
+      "round": 1,
+      "expert": "experts/e_gpt",
+      "session": "ses_de707d360ffeRElv3baGDp0r4h",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash_in": "sha256:ef817b57b3d6dfb928c11547ebc4dfa3b4903c9c4d637763fae8bf85b5b79f0a",
+      "findings": "3 important (t6 asserted success where the spec requires the pipeline denial and used a client that cannot send credentials; resource r1 cannot use two single-token provider snapshots; Task 2.1 dead-code fields fail its own clippy checkpoint) + 5 minors (reproduce-first sequencing, header assert form, policy-less cfg helper, ADR heading check, gates-local command)",
+      "applied": "all 3 important + 5 minors applied. t6 now uses the authenticated rmcp client, asserts a minted principal, evaluates the same shared Arc<EmptyGrantPolicy> at the pipeline boundary, replies McpToolResult, and asserts is_error; one multi-token authenticator/provider snapshot per bind; cfg_attr(not(test), expect(dead_code)) on the 2.1 snapshot fields; Task 2.2 step 1 reproduces the leak before the filter; spawn_plain_server; rg -Fxc heading check"
+    },
+    {
+      "round": 2,
+      "expert": "experts/e_glm (SUBSTITUTE)",
+      "session": "ses_de7032324ffeLSGDqMO4pebNRZ",
+      "substitution_reason": "e_gpt provider usage limit reached on the round-2 dispatch (failed session ses_de7037080ffekyMw1RlMSK6gy7). Mission fallback chain (e_gpt → e_glm → e_opus) applied; the independent expert gate is preserved — NOT a self-signed blessing",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash_in": "sha256:7442d5152294fc73e3b09e523e7b392290f0ca0b6bfbe625d6945e873afd6226",
+      "findings": "3 important (cfg_attr not(test) required for the dead-code expectation under --all-targets; t6 reply type is McpToolResult not rmcp CallToolResult; Task 2.1 production wiring had no red→green test for consumer step 6) + minors (join timeout + allow-test-wait, full gates-local call, allow-secret marker moved with the string, local public_plan, test_principal in the 3.2 mirror list, helper naming in the reproduction, register() doc rewording, lint-context-citations scope, docs sentences)",
+      "applied": "all 3 important + minors applied verbatim, including consumer_start_captures_plan_on_tool_and_resource_entries on 127.0.0.80, the McpToolResult reply, cfg_attr(not(test), ...), the bounded t6 join, and one sentence each in docs/src/components/mcp.md and the component CONTEXT.md"
+    }
+  ],
+  "spec_gate": {
+    "kind": "spec",
+    "verdict": "BLESS-WITH-FIXES (final; 3 wording edits applied, no third dispatch)",
+    "hash": "sha256:29df3f5f73f32749b5a3e146d56930582f1749f88ebd5865de20ebe91014e673",
+    "hash_reviewed": "sha256:f64265409b0410427dc17875d83f39d4f2630a44ff1c837626a9d7b1f59133ae",
+    "rounds": [
+      {
+        "round": 1,
+        "expert": "experts/e_gpt",
+        "session": "ses_de7217b48ffe7e04ZUDdJFHf2p",
+        "verdict": "REJECTED",
+        "hash_in": "sha256:a9c21f8960c06d82bd850b8d12356ed054bd20ef87c76b27ffa72245f2e27290",
+        "findings": "2 critical (empty-Exchange grant can differ from dispatch; stale plan snapshot can expose a protected entry), 3 important, 1 minor — all fixed in design v2 (is_request_independent contract, entry-carried plan, denial wording, ADR-0061 separation, resource coverage, budget corrections)"
+      },
+      {
+        "round": 2,
+        "expert": "experts/e_gpt",
+        "session": "ses_de717f9ceffeaCktF3mj1Fvp5M",
+        "verdict": "BLESS-WITH-FIXES",
+        "hash_in": "sha256:f64265409b0410427dc17875d83f39d4f2630a44ff1c837626a9d7b1f59133ae",
+        "applied": "3 wording edits verbatim; no critical findings"
+      }
+    ]
+  },
+  "budget": "Spec: mission budget 1 dispatch, a re-bless was required after the round-1 REJECTED (conductor cap allows 3). Plan: at most 2 dispatches — exactly consumed (e_gpt round 1 + e_glm substitute round 2). No round 3/4. Substitutions and failures recorded above."
+}

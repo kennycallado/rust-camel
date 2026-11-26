@@ -67,10 +67,13 @@ use tokio::sync::{mpsc, oneshot};
 use crate::headers::normalize_repeated;
 use crate::registry::{McpBindSecurity, McpResourceRegistry, McpToolRegistry};
 use crate::types::{McpRequestHeaders, McpResource, McpResourceRead, McpToolInvocation};
-use camel_api::CamelError;
-use camel_api::security_policy::AccessMode;
+use camel_api::Body as CamelBody;
+use camel_api::security_policy::{
+    AccessMode, AuthContext, AuthorizationDecision, RouteSecurityPlan, SecurityPolicy, TransportId,
+};
+use camel_api::{CamelError, Exchange, Message};
 use camel_auth::AuthenticatedPrincipal;
-use camel_auth::{extract_token_multi, kernel_authenticate};
+use camel_auth::{extract_token_multi, install_carrier, kernel_authenticate};
 use camel_json_schema::FormatMode;
 use camel_json_schema::SchemaSource;
 use camel_json_schema::SchemaSyntax;
@@ -167,22 +170,28 @@ impl rmcp::ServerHandler for McpServerAdapter {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         // Readiness gating: only `mark_ready`ed tools are listed, each with
         // its registered input schema (spec: not-ready tools are hidden).
+        // Per-entry visibility (Task 2.2): each entry is classified by its
+        // captured plan against the caller's credentials, so a tool whose
+        // route the caller cannot authenticate against stays hidden.
         // (`Tool` is non-exhaustive, so it is built from its `Default`.)
-        let tools = self
-            .tools
-            .list_ready()
-            .into_iter()
-            .map(|(name, input_schema)| {
-                let mut tool = Tool::default();
-                tool.name = Cow::Owned(name);
-                tool.input_schema = Arc::new(input_schema_object(&input_schema));
-                tool
-            })
-            .collect();
+        let headers = normalized_headers(&context);
+        let mut tools = Vec::new();
+        for entry in self.tools.ready_tools() {
+            if !self
+                .catalog_entry_visible(&entry.route_id, entry.plan.as_ref(), &headers)
+                .await
+            {
+                continue;
+            }
+            let mut tool = Tool::default();
+            tool.name = Cow::Owned(entry.name);
+            tool.input_schema = Arc::new(input_schema_object(&entry.input_schema));
+            tools.push(tool);
+        }
         Ok(ListToolsResult::with_all_items(tools)
             .with_ttl_ms(LIST_RESULT_TTL_MS)
             .with_cache_scope(CacheScope::Private))
@@ -256,18 +265,25 @@ impl rmcp::ServerHandler for McpServerAdapter {
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
         // Readiness gating: only `mark_ready`ed resources are listed (spec:
-        // not-ready resources are hidden). (`Resource` is non-exhaustive, so
-        // it is built from its `new` constructor; the registry stores URIs
-        // only, so the URI doubles as the programmatic name.)
-        let resources = self
-            .resources
-            .list_ready()
-            .into_iter()
-            .map(|uri| Resource::new(uri.clone(), uri))
-            .collect();
+        // not-ready resources are hidden). Per-entry visibility (Task 2.2)
+        // mirrors `tools/list`: an entry the caller cannot authenticate
+        // against stays hidden. (`Resource` is non-exhaustive, so it is built
+        // from its `new` constructor; the registry stores URIs only, so the
+        // URI doubles as the programmatic name.)
+        let headers = normalized_headers(&context);
+        let mut resources = Vec::new();
+        for entry in self.resources.ready_resources() {
+            if !self
+                .catalog_entry_visible(&entry.route_id, entry.plan.as_ref(), &headers)
+                .await
+            {
+                continue;
+            }
+            resources.push(Resource::new(entry.uri.clone(), entry.uri));
+        }
         Ok(ListResourcesResult::with_all_items(resources)
             .with_ttl_ms(LIST_RESULT_TTL_MS)
             .with_cache_scope(CacheScope::Private))
@@ -352,6 +368,42 @@ impl rmcp::ServerHandler for McpServerAdapter {
     }
 }
 
+impl McpServerAdapter {
+    /// Per-entry catalog visibility (Task 2.2): a tool or resource is listed
+    /// only when the caller can authenticate against the plan captured at
+    /// registration.
+    ///
+    /// No captured plan (a pre-plan registration) and `Public` plans are
+    /// listed to every caller. Otherwise the dispatch kernel path runs
+    /// ([`kernel_authn_for`]) against the caller's normalized headers: a
+    /// denial hides the entry. An `Authorized` plan additionally requires
+    /// [`catalog_policy_grants`]; `Authenticated` needs only the principal.
+    async fn catalog_entry_visible(
+        &self,
+        route_id: &str,
+        plan: Option<&RouteSecurityPlan>,
+        headers: &http::HeaderMap,
+    ) -> bool {
+        let Some(plan) = plan else {
+            return true;
+        };
+        if matches!(plan.access_mode, AccessMode::Public) {
+            return true;
+        }
+        match kernel_authn_for(&self.security, route_id, plan, headers).await {
+            KernelAuthn::Denied(_) => false,
+            KernelAuthn::Public => true,
+            KernelAuthn::Granted(principal) => match &plan.access_mode {
+                AccessMode::Authorized(policy) => {
+                    catalog_policy_grants(policy.as_ref(), plan.transport, &principal, headers)
+                        .await
+                }
+                _ => true,
+            },
+        }
+    }
+}
+
 /// Clean method-level error for a tool the listener will not dispatch:
 /// unknown, stopped (unregistered), or not ready (hidden and uncallable).
 fn tool_unavailable(name: &str) -> ErrorData {
@@ -417,13 +469,10 @@ enum KernelAuthn {
 /// Authenticate one dispatch against the serving route's plan (ADR-0061
 /// Rule 1: transports extract, the kernel authenticates).
 ///
-/// `Public` plans (and routes with no registered plan) skip extraction
-/// entirely; anything else extracts per `plan.credential_sources` from the
-/// NORMALIZED headers (Task 2.5) — first-match-wins source order — and
-/// hands the token to `kernel_authenticate`. QueryParam sources never
-/// appear here: plan compilation rejects them for the MCP transport
-/// (Task 1.8 capability check), and the adapter has no URI to read one
-/// from anyway (the empty URI keeps `extract_token_multi` honest).
+/// Resolves the route's plan from the bind security book; a route with no
+/// registered plan (pre-2.6 direct-drive route) passes through as `Public`.
+/// The plan itself is evaluated by [`kernel_authn_for`], which the catalog
+/// filter calls directly with the plan captured on the entry.
 async fn kernel_authn(
     security: &McpBindSecurity,
     route_id: &str,
@@ -432,6 +481,25 @@ async fn kernel_authn(
     let Some(plan) = security.plan_for(route_id) else {
         return KernelAuthn::Public;
     };
+    kernel_authn_for(security, route_id, &plan, headers).await
+}
+
+/// Authenticate one request against an explicit plan: the shared kernel path
+/// for dispatch and catalog discovery (Task 2.2).
+///
+/// `Public` plans skip extraction entirely; anything else extracts per
+/// `plan.credential_sources` from the NORMALIZED headers (Task 2.5) —
+/// first-match-wins source order — and hands the token to
+/// `kernel_authenticate`. QueryParam sources never appear here: plan
+/// compilation rejects them for the MCP transport (Task 1.8 capability
+/// check), and the adapter has no URI to read one from anyway (the empty URI
+/// keeps `extract_token_multi` honest).
+async fn kernel_authn_for(
+    security: &McpBindSecurity,
+    route_id: &str,
+    plan: &RouteSecurityPlan,
+    headers: &http::HeaderMap,
+) -> KernelAuthn {
     if matches!(plan.access_mode, AccessMode::Public) {
         return KernelAuthn::Public;
     }
@@ -446,10 +514,57 @@ async fn kernel_authn(
             "no credential found for route '{route_id}' (credential sources exhausted)" // allow-secret
         )));
     };
-    match kernel_authenticate(&plan, &providers, &credentials).await {
+    match kernel_authenticate(plan, &providers, &credentials).await {
         Ok(principal) => KernelAuthn::Granted(principal),
         Err(e) => KernelAuthn::Denied(e),
     }
+}
+
+/// Build the header-only Exchange a catalog policy decision runs against
+/// (Task 2.2): the request headers as message headers, empty body.
+///
+/// The Exchange carries the request headers for parity with dispatch. By
+/// contract, a policy granted discovery must not read Exchange content;
+/// `is_request_independent` is the guard that keeps such a policy out of
+/// discovery.
+fn catalog_exchange(headers: &http::HeaderMap) -> Exchange {
+    let mut exchange = Exchange::new(Message::new(CamelBody::Empty));
+    for (name, value) in mcp_request_headers(headers) {
+        exchange
+            .input
+            .set_header(name, serde_json::Value::String(value));
+    }
+    exchange
+}
+
+/// Run an `Authorized` plan's policy for catalog discovery (Task 2.2).
+///
+/// Only request-independent policies may render a grant: the listing has no
+/// request content, so a policy whose decision depends on Exchange content
+/// stays out of discovery (fail closed). The decision runs against a
+/// header-only Exchange with the caller's typed principal installed, through
+/// the same `evaluate` entry point as dispatch.
+async fn catalog_policy_grants(
+    policy: &dyn SecurityPolicy,
+    transport: TransportId,
+    principal: &AuthenticatedPrincipal,
+    headers: &http::HeaderMap,
+) -> bool {
+    if !policy.is_request_independent() {
+        return false;
+    }
+    let mut exchange = catalog_exchange(headers);
+    install_carrier(&mut exchange, principal);
+    let result = policy
+        .evaluate(
+            &mut exchange,
+            &AuthContext {
+                principal,
+                transport,
+            },
+        )
+        .await;
+    matches!(result, Ok(AuthorizationDecision::Granted { .. }))
 }
 
 /// The tool-result content block carrying a kernel denial — the same
@@ -763,6 +878,8 @@ mod tests {
     use super::*;
     use crate::types::McpResource;
     use base64::prelude::BASE64_STANDARD;
+    use camel_api::security_policy::CredentialSource;
+    use camel_auth::ScopePolicy;
 
     fn resource(uri: &str, content: &[u8], mime_type: &str) -> McpResource {
         McpResource {
@@ -950,6 +1067,93 @@ mod tests {
         assert!(
             validation_accepts(&schema, "not-an-email"),
             "mixed-draft inline resource keeps the root dialect's format annotation"
+        );
+    }
+
+    fn public_plan() -> RouteSecurityPlan {
+        RouteSecurityPlan {
+            access_mode: AccessMode::Public,
+            provider_ref: None,
+            transport: TransportId::Mcp,
+            credential_sources: vec![],
+            audience_binding: None,
+        }
+    }
+
+    fn test_adapter(security: Arc<McpBindSecurity>) -> McpServerAdapter {
+        McpServerAdapter {
+            tools: Arc::new(McpToolRegistry::new(8)),
+            resources: Arc::new(McpResourceRegistry::new(8)),
+            security,
+            identity_name: "catalog-test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn catalog_exchange_carries_request_headers() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer tok".parse().expect("valid header value"),
+        );
+        headers.insert("x-trace-id", "t1".parse().expect("valid header value"));
+
+        let exchange = catalog_exchange(&headers);
+
+        assert_eq!(
+            exchange.input.header("authorization"),
+            Some(&serde_json::json!("Bearer tok"))
+        );
+        assert_eq!(
+            exchange.input.header("x-trace-id"),
+            Some(&serde_json::json!("t1"))
+        );
+    }
+
+    #[test]
+    fn catalog_exchange_body_is_empty() {
+        let exchange = catalog_exchange(&http::HeaderMap::new());
+        assert!(matches!(exchange.input.body, CamelBody::Empty));
+    }
+
+    #[tokio::test]
+    async fn catalog_entry_without_plan_is_visible() {
+        let adapter = test_adapter(Arc::new(McpBindSecurity::new()));
+        assert!(
+            adapter
+                .catalog_entry_visible("r", None, &http::HeaderMap::new())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_entry_with_public_plan_is_visible() {
+        let adapter = test_adapter(Arc::new(McpBindSecurity::new()));
+        assert!(
+            adapter
+                .catalog_entry_visible("r", Some(&public_plan()), &http::HeaderMap::new())
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_entry_with_authorized_plan_and_no_provider_snapshot_is_hidden() {
+        let adapter = test_adapter(Arc::new(McpBindSecurity::new()));
+        let plan = RouteSecurityPlan {
+            access_mode: AccessMode::Authorized(Arc::new(ScopePolicy::new(
+                vec!["secret:read".into()],
+                false,
+            ))),
+            provider_ref: Some("idp".into()),
+            transport: TransportId::Mcp,
+            credential_sources: vec![CredentialSource::AuthorizationHeader],
+            audience_binding: None,
+        };
+        assert!(
+            !adapter
+                .catalog_entry_visible("r", Some(&plan), &http::HeaderMap::new())
+                .await,
+            "an Authorized entry with no provider snapshot must fail closed"
         );
     }
 }

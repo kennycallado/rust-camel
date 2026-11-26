@@ -28,6 +28,9 @@ Consumer (server role):
   `tools/call` for `<name>`; arguments are validated against the schema.
 - `mcp:<server>/resource/<name>?uri=<mcp-uri>` — serves `resources/read` for
   `<uri>`; `resources/list` projects the registered URIs.
+- `tools/list` / `resources/list` list only what the caller may see: Public
+  entries to every caller, protected entries only after kernel authentication
+  (and authorization for request-independent policies).
 
 A `mcp:` DSL block lowers each tool/resource to a consumer route. The
 `rest:` → `http:` analogue now holds: the block is a catalog declaration

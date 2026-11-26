@@ -64,6 +64,11 @@ impl SecurityPolicy for RolePolicy {
             })
         }
     }
+
+    /// The decision reads only `auth.principal()`.
+    fn is_request_independent(&self) -> bool {
+        true
+    }
 }
 
 /// Scope-based access control policy.
@@ -121,6 +126,11 @@ impl SecurityPolicy for ScopePolicy {
             })
         }
     }
+
+    /// The decision reads only `auth.principal()`.
+    fn is_request_independent(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -165,6 +175,18 @@ mod tests {
 
     fn empty_exchange() -> Exchange {
         Exchange::new(Message::default())
+    }
+
+    #[test]
+    fn role_policy_is_request_independent() {
+        let policy = RolePolicy::new(vec!["admin".into()], false);
+        assert!(policy.is_request_independent());
+    }
+
+    #[test]
+    fn scope_policy_is_request_independent() {
+        let policy = ScopePolicy::new(vec!["read".into()], true);
+        assert!(policy.is_request_independent());
     }
 
     #[tokio::test]

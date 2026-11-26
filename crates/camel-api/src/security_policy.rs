@@ -116,11 +116,34 @@ pub struct AuthContext<'a> {
 
 #[async_trait]
 pub trait SecurityPolicy: Send + Sync {
+    /// Decide whether the authenticated principal may access the exchange.
+    ///
+    /// `evaluate` may read any content of `exchange`, so the same principal
+    /// can be granted on one exchange and denied on another.
     async fn evaluate(
         &self,
         exchange: &mut Exchange,
         auth: &AuthContext<'_>,
     ) -> Result<AuthorizationDecision, CamelError>;
+
+    /// Whether this policy's decision is independent of the request content.
+    ///
+    /// Returns `true` only when `evaluate` depends solely on the
+    /// authenticated principal and the transport — never on Exchange content
+    /// (headers, body, properties, attachments, or route state).
+    ///
+    /// Catalog discovery (`tools/list`, `resources/list`) has no request
+    /// content to give a policy, so it may render a grant only for policies
+    /// answering `true`. The `false` default is the fail-closed answer for
+    /// every policy that reads Exchange content: such a policy is treated as
+    /// request-dependent and stays out of discovery until its author opts in.
+    ///
+    /// The method takes `&self` and returns `bool`, so `SecurityPolicy`
+    /// remains object safe. Because it is a provided method with a default,
+    /// no existing implementor is forced to change.
+    fn is_request_independent(&self) -> bool {
+        false
+    }
 }
 
 /// Name of the input header camel-http uses to carry the raw HTTP query string.
@@ -391,6 +414,30 @@ mod tests {
         }
 
         GrantPolicy
+    }
+
+    #[test]
+    fn security_policy_default_is_not_request_independent() {
+        struct ContentPolicy;
+
+        #[async_trait]
+        impl SecurityPolicy for ContentPolicy {
+            async fn evaluate(
+                &self,
+                _exchange: &mut Exchange,
+                _auth: &AuthContext<'_>,
+            ) -> Result<AuthorizationDecision, CamelError> {
+                Ok(AuthorizationDecision::Granted {
+                    principal: test_principal(vec![], vec![]),
+                })
+            }
+        }
+
+        let policy: &dyn SecurityPolicy = &ContentPolicy;
+        assert!(
+            !policy.is_request_independent(),
+            "a policy that did not opt in must default to request-dependent (fail closed)"
+        );
     }
 
     #[test]

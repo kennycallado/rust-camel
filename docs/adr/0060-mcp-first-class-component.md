@@ -256,3 +256,23 @@ obligations; the schema-advertisement drift is tracked in bd rc-ap58.
 **Self-grill mode:** manual (4 principles L6: glossary consistency, conflict
 with existing ADRs, redundancy with implicit ADRs, numbering — 0060 next free
 after 0058).
+
+## Amendment 2026-11-26 (rc-6ymfr): catalog filtering follows authentication
+
+On 2026-11-26, change `mcp-list-auth` (bd rc-6ymfr) extends Rule 8 from
+dispatch-only enforcement to catalog discovery.
+
+- `tools/list` and `resources/list` filter the ready catalog through the same
+  per-route kernel authentication path dispatch uses: the compiled plan,
+  normalized header extraction, and `kernel_authenticate`.
+- `Public` and plan-less entries stay listed to every caller. A non-`Public`
+  entry is listed only when the request authenticates against the entry's own
+  plan. A plan's authorization policy renders a discovery grant only when the
+  policy declares itself independent of request content (`RolePolicy`,
+  `ScopePolicy`); content-dependent policies stay hidden.
+- There is no second interpretation of scopes or roles. The `SecurityPolicy`
+  object decides.
+- ADR-0061 remains authoritative for bind exposure. The superseded Rule 8
+  presence gate is not reinstated.
+- The normative statement is the `mcp-component` requirement "MCP catalog
+  visibility follows caller authentication".

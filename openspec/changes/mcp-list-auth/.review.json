@@ -1,0 +1,24 @@
+{
+  "change": "mcp-list-auth",
+  "kind": "holistic",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_de6a0afc3ffe2PEGxwofW2xUKd",
+  "verdict": "APPROVE-WITH-FINDINGS (1 minor: docs omission overclaim; fixed before merge; no blocking findings)",
+  "reviewed_commit": "803038bf6",
+  "impl_hash": "sha256:7e9f114c01a464ab6ffa03823b45129f9bb5a29bfb9c73053ddca48d9e391247",
+  "findings": [
+    {
+      "severity": "minor",
+      "file": "docs/src/components/mcp.md",
+      "finding": "the omission clause implied hidden means uncallable; a request-dependent policy entry is hidden yet may dispatch",
+      "fix": "reworded to 'omission never weakens call-time enforcement \u2014 a listed or omitted entry faces the same kernel and pipeline gate at call time'"
+    },
+    {
+      "severity": "residual",
+      "file": "crates/components/camel-component-mcp/src/adapter/server.rs",
+      "finding": "deliberate per-entry kernel authentication cost on every list",
+      "fix": "none; documented in design.md risk budget"
+    }
+  ],
+  "gate_evidence": "cargo build --workspace; cargo test -p camel-component-mcp; -p camel-api; -p camel-auth; --workspace --lib; hexagonal boundary test; fmt --check; scripts/gates-local.sh 30/30 gates 3/3 lanes (4 network/docs skips); docs mdbook test \u2014 all exit 0"
+}

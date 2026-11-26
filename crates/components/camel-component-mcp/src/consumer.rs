@@ -306,12 +306,13 @@ impl Consumer for McpConsumer {
                     .into());
                 }
                 let (tx, rx) = mpsc::channel(INVOCATION_BUFFER);
-                if let Err(e) = handle.tool_registry.register(
+                if let Err(e) = handle.tool_registry.register_with_plan(
                     name.clone(),
                     route_id.clone(),
                     tx,
                     input_schema,
                     Arc::downgrade(&owner),
+                    Some(plan.clone()),
                 ) {
                     security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                     return Err(e.into());
@@ -344,11 +345,12 @@ impl Consumer for McpConsumer {
                     .into());
                 }
                 let (tx, rx) = mpsc::channel(INVOCATION_BUFFER);
-                if let Err(e) = handle.resource_registry.register(
+                if let Err(e) = handle.resource_registry.register_with_plan(
                     resource_uri.clone(),
                     route_id.clone(),
                     tx,
                     Arc::downgrade(&owner),
+                    Some(plan.clone()),
                 ) {
                     security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
                     return Err(e.into());

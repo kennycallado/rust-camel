@@ -44,8 +44,13 @@ policy: bind, TLS, and policy are server properties, not per-tool URI options.
 A tool that needs its own policy needs an explicit consumer route declared with
 `from: mcp:<server>/tool/<name>` and its own `security_policy`. The kernel
 authenticates each request per the route plan's credential sources (normalized
-RFC 9110 headers) and installs the typed principal before the pipeline. Catalog
-caps (`max_tools`, `max_resources`, default 128 each) reject surplus
+RFC 9110 headers) and installs the typed principal before the pipeline.
+`tools/list` and `resources/list` use the same kernel gate: a Public entry is
+listed to every caller, a protected entry only when the caller authenticates
+(and, for request-independent policies, authorization grants); omission never
+weakens call-time enforcement — a listed or omitted entry faces the same
+kernel and pipeline gate at call time. Catalog caps (`max_tools`,
+`max_resources`, default 128 each) reject surplus
 registrations at start. The mcp-component spec owns the server-property rule
 (`openspec/specs/mcp-component/spec.md` in the repository, outside the rendered
 book).

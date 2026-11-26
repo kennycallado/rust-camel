@@ -873,6 +873,74 @@ async fn live_duplicate_consumer_rejected() {
 }
 
 #[tokio::test]
+async fn consumer_start_captures_plan_on_tool_and_resource_entries() {
+    // Task 2.1 step 6 wiring proof: the consumer hands its compiled plan to
+    // the registry entry at registration, so catalog discovery can classify
+    // the tool/resource without re-reading the bind security book.
+    let bind = "127.0.0.80:0";
+    let cfg = server_config(bind, true, None);
+    let component = component_with_server("crm", cfg.clone());
+
+    let mut tool_consumer = consumer_for(
+        &component,
+        &format!("mcp:crm/tool/t?schema={}", encoded(TRIVIAL_SCHEMA)),
+    );
+    tool_consumer.set_security_context(SecurityContext::from_plan(security_plan("plan-a")));
+    let (ctx, _tool_route_rx) = test_context();
+    tool_consumer
+        .start(ctx)
+        .await
+        .expect("tool consumer must start");
+
+    let mut resource_consumer = consumer_for(&component, "mcp:crm/resource/r?uri=crm://x");
+    resource_consumer.set_security_context(SecurityContext::from_plan(security_plan("plan-a")));
+    let (ctx, _resource_route_rx) = test_context();
+    resource_consumer
+        .start(ctx)
+        .await
+        .expect("resource consumer must start");
+
+    let handle = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg)
+        .await
+        .expect("shared listener");
+
+    let tool = handle.tool_registry.resolve("t").expect("tool registered");
+    let tool_plan = tool
+        .plan
+        .expect("the tool entry must carry the consumer's plan");
+    assert!(
+        matches!(tool_plan.access_mode, AccessMode::Authenticated),
+        "the tool entry keeps the consumer's access mode"
+    );
+    assert_eq!(
+        tool_plan.provider_ref,
+        Some("plan-a".to_string()),
+        "the tool entry keeps the consumer's provider ref"
+    );
+
+    let resource = handle
+        .resource_registry
+        .resolve("crm://x")
+        .expect("resource registered");
+    let resource_plan = resource
+        .plan
+        .expect("the resource entry must carry the consumer's plan");
+    assert!(
+        matches!(resource_plan.access_mode, AccessMode::Authenticated),
+        "the resource entry keeps the consumer's access mode"
+    );
+    assert_eq!(
+        resource_plan.provider_ref,
+        Some("plan-a".to_string()),
+        "the resource entry keeps the consumer's provider ref"
+    );
+
+    tool_consumer.stop().await.expect("clean stop");
+    resource_consumer.stop().await.expect("clean stop");
+}
+
+#[tokio::test]
 async fn dead_owner_tool_absent_from_list_ready_via_listener_handle() {
     // Crash regression (Task 1's lazy prune): after the consumer drops
     // without stop(), the dead owner's entry must vanish from the
