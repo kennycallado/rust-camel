@@ -259,6 +259,12 @@ jobs:
         # (compile + link, no execution). No Docker or runtime is required,
         # keeping the gate cheap.
         run: cargo test -p camel-test --features integration-tests-cxf --test cxf_test --no-run
+      - name: Test narrow sql integration feature (rc-9awnc deadline ordering)
+        # Test-only conformance suite for absolute deadline ordering across
+        # SQL manager admission: production manager + real segment under
+        # paused tokio virtual time. sqlite-backed, no Docker, no runtime
+        # services; the narrow feature keeps the compile cheap.
+        run: cargo test -p camel-test --features integration-sql --test sql_deadline_ordering
       - name: Test (full workspace)
         # rc-9wx6u: without --no-fail-fast the first failing binary aborts
         # the run, so a red run executes only a fraction of the suite

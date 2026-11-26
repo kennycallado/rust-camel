@@ -1,0 +1,34 @@
+{
+  "verdict": "APPROVED",
+  "kind": "plan",
+  "expert": "experts/e_opus",
+  "hash": "sha256:c5f64e97d81904c77230b928e598ff2f2086d6c75f39a0d3d940e8a083b0ee77",
+  "dispatched_at": "2026-11-26T16:20:00+01:00",
+  "provider_failures": [
+    {
+      "expert": "experts/e_gpt",
+      "model": "openai/gpt-6.2-sol",
+      "error": "The usage limit has been reached",
+      "dispatches": 2,
+      "note": "quota.log: gpt family gpt_err=token-expired since 2026-11-25T20:34Z"
+    },
+    {
+      "expert": "experts/e_glm",
+      "model": "zai-coding-plan/glm-5.4",
+      "error": "Usage limit reached for 5 hour. Your limit will reset at 2026-11-26 23:35:22",
+      "dispatches": 1
+    }
+  ],
+  "substitute": {
+    "policy": "fleet _template-policy.md §Quota load-balancing — e_opus stand-in for e_gpt when the GPT quota is exhausted (mhandle 227 precedent), recorded in the park report",
+    "reason": "primary e_gpt provider-dead (2 dispatches), sanctioned e_glm substitute 5h-exhausted; both failures recorded above — same substitution as the spec gate",
+    "plan_dispatch": "1 of max 2"
+  },
+  "reviewer_substitution": {
+    "roles": ["plan review (r1 REJECT, r2 APPROVE-WITH-FINDINGS)", "per-task review", "holistic review"],
+    "policy": "same recorded e_opus substitution: @reviewers/r_glm 5h-exhausted (reset 23:35:22), @reviewers/r_gpt provider-dead (usage limit)",
+    "note": "plan-review rounds are not blessing dispatches; the 2-dispatch plan-bless cap is unaffected"
+  },
+  "blesser_evidence": "e_opus ran the lane script (50/50), the suite (5 passed), fmt, lint-publish-cycles, and the diff-quiet production check in the worktree",
+  "spec_verdict_chain": "spec APPROVED-WITH-FIXES (hash ddec4de6…) → fixes applied → plan r1 REJECT → plan v2 → r2 APPROVE-WITH-FINDINGS (none blocking) → polish applied → plan APPROVED (this hash)"
+}

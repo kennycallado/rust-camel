@@ -154,6 +154,12 @@ Justified exclusions:
 camel-component-llm | local | cargo test -p camel-component-llm --features decisions
 # --- camel-core: ci.yml:146 boundary suite
 camel-core | local | cargo test -p camel-core --test hexagonal_architecture_boundaries_test
+# --- rc-9awnc deadline-ordering suite (mission 618): rides camel-test (ADR-0055
+#     leaf sink — sql must not dev-depend on core); triggered by every crate
+#     that holds the code under test (duplicate-owner precedent, kernel_fail_closed)
+camel-test | local | cargo test -p camel-test --features integration-sql --test sql_deadline_ordering
+camel-core | local | cargo test -p camel-test --features integration-sql --test sql_deadline_ordering
+camel-component-sql | local | cargo test -p camel-test --features integration-sql --test sql_deadline_ordering
 # --- own tests/ suites (default features)
 camel-component-redis | local | cargo test -p camel-component-redis
 camel-component-mail | local | cargo test -p camel-component-mail

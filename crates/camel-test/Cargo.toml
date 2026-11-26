@@ -125,6 +125,9 @@ ctor.workspace = true
 
 [features]
 integration-tests-cxf = ["dep:camel-component-cxf"]
+# Narrow sql-only gate: the rc-9awnc deadline-ordering fixtures need the
+# sql component + sqlx but no containers (sqlite-backed, virtual time).
+integration-sql = ["dep:camel-component-sql", "dep:sqlx"]
 integration-tests = [
     "dep:camel-master",
     "dep:testcontainers",

@@ -2111,7 +2111,7 @@ case_49() {
     assert_rc 0 || return 1
     assert_out_has 'PASS lane camel-test' || return 1
     assert_out_lacks 'NO LANE for camel-test' || return 1
-    assert_argv_exact 'test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_script_test'$'\n''test --workspace --test dev_watch_proto_test' || return 1
+    assert_argv_exact 'test -p camel-test --features integration-sql --test sql_deadline_ordering'$'\n''test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_script_test'$'\n''test --workspace --test dev_watch_proto_test' || return 1
 
     # 49b — an allowlisted subset override replaces the default list.
     fixture_new 49b-allowlisted-subset || return 1
@@ -2130,7 +2130,7 @@ case_49() {
     fixture_meta 'camel-test:crates/test:lib,test' || return 1
     run_sweep GATES_ONLY=lanes CAMEL_TEST_WORKSPACE_SUITES='dev_watch_proto_test'
     assert_rc 0 || return 1
-    assert_argv_exact 'test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_proto_test' || return 1
+    assert_argv_exact 'test -p camel-test --features integration-sql --test sql_deadline_ordering'$'\n''test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_proto_test' || return 1
 
     # 49c — an empty list is a named error and dispatches no workspace call
     #       while the compile-only row still runs.
@@ -2226,9 +2226,9 @@ case_49() {
     commit_work "touch camel-test" || return 1
     fixture_meta 'camel-test:crates/test:lib,test' || return 1
     unset CAMEL_TEST_WORKSPACE_SUITES
-    run_sweep GATES_ONLY=lanes STUB_TEST_FAIL_AT=2
+    run_sweep GATES_ONLY=lanes STUB_TEST_FAIL_AT=3
     assert_rc_nonzero || return 1
-    assert_argv_exact 'test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_script_test'$'\n''test --workspace --test dev_watch_proto_test' || return 1
+    assert_argv_exact 'test -p camel-test --features integration-sql --test sql_deadline_ordering'$'\n''test -p camel-test --features integration-tests --no-run'$'\n''test --workspace --test dev_watch_script_test'$'\n''test --workspace --test dev_watch_proto_test' || return 1
     assert_out_has 'FAIL lane camel-test :: suites=' || return 1
 
     # 49g — GATES_SKIP=lanes disables the row entirely.
