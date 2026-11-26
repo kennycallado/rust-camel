@@ -177,6 +177,9 @@ camel-json-schema | local | cargo test -p camel-json-schema
 camel-cli | local | cargo test -p camel-cli --no-default-features --features flavor-regular,exec --no-fail-fast
 # --- camel-component-mock: own tests/ suite
 camel-component-mock | local | cargo test -p camel-component-mock
+# --- camel-component-api: own tests/ suite (polling_consumer_timeout_tests,
+#     runtime_observability_tests, traced_log_capture) — dispatch-cancellation
+camel-component-api | local | cargo test -p camel-component-api
 # --- camel-integration-test: tier.rs BuilderStep walk touched (sqltrans-portmodel);
 #     own tests/ suite, local (no infra needed for the unit surface)
 camel-integration-test | local | cargo test -p camel-integration-test

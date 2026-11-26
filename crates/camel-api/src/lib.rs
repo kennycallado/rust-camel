@@ -99,9 +99,9 @@ pub use error_handler::{
     StepDisposition,
 };
 pub use exchange::{
-    CAMEL_STOP, Exchange, ExchangePattern, ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION,
-    ORIGINAL_MESSAGE_EXTENSION, OriginalContentTypeInherited, PROPERTY_HTTP_CONTENT_TYPE_INHERITED,
-    is_camel_stop,
+    CAMEL_STOP, DISPATCH_CANCEL_EXTENSION, DispatchCancellation, Exchange, ExchangePattern,
+    ORIGINAL_CONTENT_TYPE_INHERITED_EXTENSION, ORIGINAL_MESSAGE_EXTENSION,
+    OriginalContentTypeInherited, PROPERTY_HTTP_CONTENT_TYPE_INHERITED, is_camel_stop,
 };
 pub use exchange_lookup::{ExchangeLookupPath, LookupPathError, PathSegment};
 pub use filter::{

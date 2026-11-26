@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 use crate::lifecycle::adapters::pipeline_runtime::SharedPipeline;
-use crate::lifecycle::adapters::route_compiler::CANCEL_TOKEN;
+use crate::lifecycle::adapters::route_compiler::{CANCEL_TOKEN, DISPATCH_CANCEL};
 use crate::lifecycle::adapters::route_helpers::{DrainGuard, ready_with_backoff};
 use crate::lifecycle::cohort_activation::CohortActivationGate;
 
@@ -153,6 +153,10 @@ impl InlineRouteDispatcher for RouteInlineDispatcher {
             // result below — stash emissions escape with theirs.
             let mut exchange = exchange;
             exchange.in_flight_claim = _in_flight_claim.as_ref().map(InFlightClaim::split);
+            // Per-dispatch trigger: this independent inline entry takes the
+            // marker (None when the producer did not stamp one, which shadows
+            // any outer dispatch scope during this pipeline call).
+            let dispatch_cancel = exchange.take_dispatch_cancel();
 
             // Operation, strictly ordered: admission → cohort gate →
             // readiness → scoped pipeline call. Dropping this future on the
@@ -166,8 +170,12 @@ impl InlineRouteDispatcher for RouteInlineDispatcher {
                 let mut cohort_rx = cohort.subscribe();
                 let _ = cohort_rx.wait_for(|open| *open).await;
                 ready_with_backoff(&mut pipe, &operation_cancel).await?;
-                CANCEL_TOKEN
-                    .scope(operation_cancel, async move { pipe.call(exchange).await })
+                DISPATCH_CANCEL
+                    .scope(
+                        dispatch_cancel,
+                        CANCEL_TOKEN
+                            .scope(operation_cancel, async move { pipe.call(exchange).await }),
+                    )
                     .await
             };
 

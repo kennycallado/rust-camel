@@ -20,7 +20,7 @@ use camel_component_api::{ConcurrencyModel, ConsumerContext, consumer::ExchangeE
 use crate::lifecycle::adapters::consumer_management;
 use crate::lifecycle::adapters::controller_component_context::ControllerComponentContext;
 use crate::lifecycle::adapters::inline_dispatcher::RouteInlineDispatcher;
-use crate::lifecycle::adapters::route_compiler::CANCEL_TOKEN;
+use crate::lifecycle::adapters::route_compiler::{CANCEL_TOKEN, DISPATCH_CANCEL};
 use crate::lifecycle::adapters::route_controller::DefaultRouteController;
 #[cfg(test)]
 use crate::lifecycle::adapters::route_helpers::emit_start_route_event;
@@ -486,10 +486,13 @@ impl camel_api::RouteController for DefaultRouteController {
                             _ = pipeline_cancel.cancelled() => return,
                         };
                         let ExchangeEnvelope {
-                            exchange,
+                            mut exchange,
                             mut reply_tx,
                             in_flight_claim,
                         } = envelope;
+                        // Per-dispatch trigger: take (not peek) the
+                        // enqueue-only marker so the pipeline entry owns it.
+                        let dispatch_cancel = exchange.take_dispatch_cancel();
                         // drainclaim: `in_flight_claim` is moved into the
                         // per-envelope task below and held across the
                         // pipeline future; any earlier exit of THIS scope
@@ -578,9 +581,15 @@ impl camel_api::RouteController for DefaultRouteController {
                             }
 
                             // B1: scope CANCEL_TOKEN so run_steps can check
-                            // cancellation between steps.
-                            let mut result = CANCEL_TOKEN
-                                .scope(cancel, async move { pipe.call(exchange).await })
+                            // cancellation between steps. Route-stop stays
+                            // the outer per-start scope; the dispatch trigger
+                            // nests inside it.
+                            let mut result = DISPATCH_CANCEL
+                                .scope(
+                                    dispatch_cancel,
+                                    CANCEL_TOKEN
+                                        .scope(cancel, async move { pipe.call(exchange).await }),
+                                )
                                 .await;
                             // claimfamily: reclaim the sibling from an
                             // in-band result (input completed inside this
@@ -635,10 +644,13 @@ impl camel_api::RouteController for DefaultRouteController {
                             }
                         };
                         let ExchangeEnvelope {
-                            exchange,
+                            mut exchange,
                             mut reply_tx,
                             in_flight_claim,
                         } = envelope;
+                        // Per-dispatch trigger: take (not peek) the
+                        // enqueue-only marker so the pipeline entry owns it.
+                        let dispatch_cancel = exchange.take_dispatch_cancel();
                         // drainclaim: hold the claim for the whole iteration
                         // — the readiness early-return below and every
                         // `continue`/`return` exit drop it via scope exit.
@@ -718,8 +730,12 @@ impl camel_api::RouteController for DefaultRouteController {
                         if pipeline_marker {
                             eprintln!("camel job: pipeline entered");
                         }
-                        let mut result = CANCEL_TOKEN
-                            .scope(cancel, async move { pipeline.call(exchange).await })
+                        let mut result = DISPATCH_CANCEL
+                            .scope(
+                                dispatch_cancel,
+                                CANCEL_TOKEN
+                                    .scope(cancel, async move { pipeline.call(exchange).await }),
+                            )
                             .await;
                         // claimfamily: reclaim the sibling from an in-band
                         // result (input completed inside this pipeline) so

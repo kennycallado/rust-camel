@@ -1,0 +1,77 @@
+{
+  "kind": "plan",
+  "change": "dispatch-cancellation",
+  "verdict": "APPROVED",
+  "hash": "sha256:0a8251174cdc6db86d348ccebd29efc44d5bd57d82d298c83e5e0217e30079ec",
+  "expert": "experts/e_opus",
+  "session": "ses_de6f034bbffeWfwiFHInlGLxcA",
+  "date": "2026-11-26",
+  "history": [
+    {
+      "kind": "spec",
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:9a194b97bd69ceee8176c187b968d8df6a2584f8df2447ad88760e7d00a83920",
+      "pre_fix_hash": "sha256:a1c1fff62ed45a0105e15ec0e588ae08059745f1ba1a12c4d7410b59f8634c05",
+      "expert": "experts/e_gpt",
+      "session": "ses_de7169f83ffe44vBi17tP85Fy4",
+      "fixes": [
+        "correct the reply-closed rejection (tokio 1.54 Sender::closed(&mut self) exists); name the trigger wait-future drop",
+        "fresh independent enqueue-only marker taken at pipeline entry; replies carry no marker",
+        "transacted exception honours the frozen commit cutoff (deadline precedence, rollback before cutoff, no re-consult after handoff, detach on unacknowledged rollback)",
+        "ConsumerStopping only when observed before a next step; dispatch-cancelled failures bypass retry/absorption; route-stop handling unchanged",
+        "route-stop regression test uses a Concurrent two-step route with a live waiter and releases after the route token fires",
+        "fresh token minted in the camel-api helper, outside the lint-cancel-tokens component scan; never derived from the consumer token"
+      ]
+    },
+    {
+      "kind": "plan",
+      "round": 1,
+      "verdict": "BLESS-WITH-FIXES",
+      "hash": "sha256:48ba783cbd9e6ff9af126cf6ac2055736f2ce29f35d8c928eb2b2992d58d18b2",
+      "expert": "experts/e_gpt",
+      "session": "ses_de708e838ffe6wwISiHi9hPlrF",
+      "fixes": [
+        "retry-loop gate: RetryableStep::dispatch_cancelled defaulted false, overridden by OwnedRetryable, checked by camel-processor between attempts; run_steps propagates Exhausted+ConsumerStopping before handle_step",
+        "test legs: real abort+join plus a stamped-envelope leg with a retained reply receiver asserting Err(ConsumerStopping); release test parks only ordinal 1",
+        "route-stop test awaits the cloned pipeline_cancel_token instead of sleeping past the budget",
+        "stateful fake checkout with lease accounting in the transacted test",
+        "camel-component-api lane row added to AGENTS.md; all waits timeout-bounded",
+        "aggregate-split rationale: an abandoned contributor must not cancel a shared completed bucket"
+      ]
+    },
+    {
+      "kind": "plan",
+      "round": 2,
+      "verdict": "REJECTED",
+      "hash": "sha256:01289d7996e162021c74c4330a1ce31ff195aed793b09f4ae5336b9f56ab284b",
+      "expert": "experts/e_glm (substituted after experts/e_gpt returned a usage-limit refusal; refusal recorded)",
+      "session": "ses_de702fcf4ffeJozBzaGhjPt5rE",
+      "blocking_findings": [
+        "route-stop drain grace weakened for consumers that drop send_and_wait at shutdown (JMS, RabbitMQ, SEDA, Redis stream): the armed guard would cut in-flight exchanges and flip transacted commits to rollbacks",
+        "route_stop_still_cancels_in_flight_dispatch needs a two-step Concurrent route; a single step has no boundary check"
+      ],
+      "minors": [
+        "timeout-bound spawned-handle joins (lint-unbounded-wait)",
+        "inline-dispatcher None-shadow has no test; document nested inline scope"
+      ],
+      "fixes_applied": [
+        "DispatchCancellation carries drain_owner + manual Drop that defuses the guard when the consumer-lifetime token is cancelled; drain_on(owner); send_and_wait passes self.cancel_token()",
+        "new camel-api test dispatch_cancel_drop_during_shutdown_leaves_token_live",
+        "new camel-core test abandoned_wait_during_route_stop_drains_to_completion",
+        "two-step Concurrent route restored for the route-stop regression",
+        "all test joins wrapped in tokio::time::timeout",
+        "inline_entry_without_marker_shadows_outer_dispatch_scope test + doc sentence",
+        "design/spec/proposal state the shutdown drop exemption"      ]
+    },
+    {
+      "kind": "plan",
+      "round": 3,
+      "verdict": "APPROVED",
+      "hash": "sha256:0a8251174cdc6db86d348ccebd29efc44d5bd57d82d298c83e5e0217e30079ec",
+      "expert": "experts/e_opus",
+      "session": "ses_de6f034bbffeWfwiFHInlGLxcA",
+      "notes": "Final round used because round 2's e_gpt refusal plus e_glm REJECT left no approval; conductor 3-re-bless cap, one over the mission's 2-plan budget. Minors from this round applied: inline test cancels before dispatch, proposal/task test counts updated, all joins timeout-bounded, suspend behaviour documented."
+    }
+  ],
+  "budget_note": "Spec: 1 dispatch (as budgeted). Plan: 3 rounds (budget 2) because e_gpt refused on round 2 and e_glm's substitution REJECTED with blocking findings; final approval by e_opus. No gate was downgraded and no verdict was self-signed."
+}

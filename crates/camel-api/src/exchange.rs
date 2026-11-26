@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use opentelemetry::Context;
+use tokio_util::sync;
 use uuid::Uuid;
 
 use crate::error::CamelError;
@@ -13,6 +14,19 @@ use crate::value::Value;
 /// Extension key used by use_original_message: stashes the pre-route Message
 /// so the error handler can restore body+headers before DLC dispatch.
 pub const ORIGINAL_MESSAGE_EXTENSION: &str = "CamelOriginalMessage";
+
+/// Extension key carrying the per-dispatch cancellation marker.
+///
+/// `ConsumerContext::send_and_wait` stamps an `Arc<CancellationToken>` under
+/// this key when it enqueues an exchange. Each pipeline entry takes (removes)
+/// the marker; cancelling the token stops the pipeline before its next step
+/// (ADR-0043). The dispatch token is independent of the consumer-lifetime and
+/// route-stop tokens.
+///
+/// This is enqueue-only, non-serializable exchange metadata. A reply returned
+/// from `send_and_wait` carries no marker because the pipeline took it at
+/// entry.
+pub const DISPATCH_CANCEL_EXTENSION: &str = "CamelDispatchCancel";
 
 /// Extension key for the Content-Type provenance snapshot taken with
 /// `ORIGINAL_MESSAGE_EXTENSION` at route entry when `use_original_message` is
@@ -48,6 +62,69 @@ pub fn is_camel_stop(exchange: &Exchange) -> bool {
         .property(CAMEL_STOP)
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
+}
+
+/// Handle owning the per-dispatch cancellation signal stamped by
+/// `ConsumerContext::send_and_wait`.
+///
+/// The handle holds a [`sync::DropGuard`] on the dispatch token: dropping it
+/// cancels the token, which stops the pipeline before its next step (ADR-0043).
+/// [`DispatchCancellation::disarm`] defuses the guard for a completed dispatch,
+/// and [`DispatchCancellation::drain_on`] makes a shutdown-driven drop (the
+/// consumer-lifetime token already cancelled) leave the dispatch running so the
+/// ADR-0043 drain grace governs the exchange.
+///
+/// The stamped marker is non-serializable exchange metadata; a reply from
+/// `send_and_wait` carries none because the pipeline takes it at entry.
+#[must_use = "dropping the handle cancels the stamped dispatch token; disarm it on completion"]
+pub struct DispatchCancellation {
+    token: sync::CancellationToken,
+    guard: Option<sync::DropGuard>,
+    drain_owner: Option<sync::CancellationToken>,
+}
+
+impl DispatchCancellation {
+    /// Borrow the dispatch token this handle owns.
+    pub fn token(&self) -> &sync::CancellationToken {
+        &self.token
+    }
+
+    /// Mark the consumer-lifetime token that owns this dispatch.
+    ///
+    /// When the owner is already cancelled at drop time, the drop is
+    /// shutdown-driven and must NOT cancel the dispatch (ADR-0043 drain grace);
+    /// the route stop owns the exchange instead.
+    pub fn drain_on(mut self, owner: sync::CancellationToken) -> Self {
+        self.drain_owner = Some(owner);
+        self
+    }
+
+    /// Defuse the guard without cancelling the token.
+    ///
+    /// Used when the dispatch completed: `DropGuard::disarm` returns the live
+    /// token, and dropping that token does not cancel.
+    pub fn disarm(mut self) {
+        if let Some(guard) = self.guard.take() {
+            drop(guard.disarm());
+        }
+    }
+}
+
+impl Drop for DispatchCancellation {
+    fn drop(&mut self) {
+        let Some(guard) = self.guard.take() else {
+            return;
+        };
+        if self
+            .drain_owner
+            .as_ref()
+            .is_some_and(sync::CancellationToken::is_cancelled)
+        {
+            // Shutdown owns the exchange: defuse the guard.
+            drop(guard.disarm());
+        }
+        // Otherwise dropping the guard cancels the dispatch token.
+    }
 }
 
 /// Property key for the exception message (error Display string).
@@ -258,6 +335,43 @@ impl Exchange {
         copy.in_flight_claim = self.in_flight_claim.as_ref().map(|claim| claim.split());
         copy
     }
+
+    /// Begin a per-dispatch cancellation scope and stamp its marker.
+    ///
+    /// Mints a fresh [`sync::CancellationToken`], stores a clone under
+    /// [`DISPATCH_CANCEL_EXTENSION`], and returns a [`DispatchCancellation`]
+    /// whose drop cancels the token unless disarmed or defused by a
+    /// shutdown-driven drop. Cancelling the token stops the pipeline before its
+    /// next step (ADR-0043); the token is independent of the consumer-lifetime
+    /// and route-stop tokens.
+    #[must_use = "dropping the handle cancels the stamped dispatch token; disarm it on completion"]
+    pub fn begin_dispatch_cancel(&mut self) -> DispatchCancellation {
+        let token = sync::CancellationToken::new();
+        self.set_extension(DISPATCH_CANCEL_EXTENSION, Arc::new(token.clone()));
+        DispatchCancellation {
+            guard: Some(token.clone().drop_guard()),
+            token,
+            drain_owner: None,
+        }
+    }
+
+    /// Take the dispatch-cancellation marker, removing it from the exchange.
+    ///
+    /// Called at pipeline entry: an exchange that entered the pipeline no
+    /// longer carries the marker, so a reply from `send_and_wait` returns none.
+    pub fn take_dispatch_cancel(&mut self) -> Option<sync::CancellationToken> {
+        self.extensions
+            .remove(DISPATCH_CANCEL_EXTENSION)
+            .and_then(|value| value.downcast_ref::<sync::CancellationToken>().cloned())
+    }
+
+    /// Peek at the dispatch-cancellation marker without removing it.
+    ///
+    /// Read-only accessor intended for tests and diagnostics.
+    pub fn dispatch_cancel(&self) -> Option<sync::CancellationToken> {
+        self.get_extension::<sync::CancellationToken>(DISPATCH_CANCEL_EXTENSION)
+            .cloned()
+    }
 }
 
 impl Clone for Exchange {
@@ -292,6 +406,7 @@ mod tests {
     use crate::in_flight::{InFlightClaim, InFlightGauge};
     use serde_json::json;
     use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn remove_property_removes_and_is_idempotent() {
@@ -595,5 +710,92 @@ mod tests {
         assert_eq!(gauge.total(), 1);
         assert!(copy.in_flight_claim.is_none());
         assert!(src.in_flight_claim.is_some());
+    }
+
+    #[test]
+    fn dispatch_cancel_begin_stamps_a_live_token() {
+        let mut ex = Exchange::new(Message::new("x"));
+
+        let cancel = ex.begin_dispatch_cancel();
+
+        assert!(ex.dispatch_cancel().is_some());
+        assert!(!ex.dispatch_cancel().expect("marker stamped").is_cancelled());
+        assert!(!cancel.token().is_cancelled());
+    }
+
+    #[test]
+    fn dispatch_cancel_guard_cancels_on_drop() {
+        let mut ex = Exchange::new(Message::new("x"));
+        let cancel = ex.begin_dispatch_cancel();
+
+        let token = cancel.token().clone();
+        drop(cancel);
+
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn dispatch_cancel_disarm_leaves_token_live() {
+        let mut ex = Exchange::new(Message::new("x"));
+        let cancel = ex.begin_dispatch_cancel();
+
+        let token = cancel.token().clone();
+        cancel.disarm();
+
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn dispatch_cancel_take_removes_the_marker() {
+        let mut ex = Exchange::new(Message::new("x"));
+        ex.begin_dispatch_cancel().disarm();
+
+        let taken = ex.take_dispatch_cancel();
+
+        assert!(taken.is_some());
+        assert!(ex.take_dispatch_cancel().is_none());
+        assert!(ex.dispatch_cancel().is_none());
+    }
+
+    #[test]
+    fn dispatch_cancel_drop_during_shutdown_leaves_token_live() {
+        let mut ex = Exchange::new(Message::new("x"));
+        let owner = CancellationToken::new();
+        let cancel = ex.begin_dispatch_cancel().drain_on(owner.clone());
+
+        let token = cancel.token().clone();
+        owner.cancel();
+        drop(cancel);
+
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn dispatch_cancel_drop_cancels_when_owner_live() {
+        let mut ex = Exchange::new(Message::new("x"));
+        let owner = CancellationToken::new();
+        let cancel = ex.begin_dispatch_cancel().drain_on(owner.clone());
+
+        let token = cancel.token().clone();
+        assert!(!owner.is_cancelled());
+        drop(cancel);
+
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn dispatch_cancel_clone_shares_the_same_token() {
+        let mut ex = Exchange::new(Message::new("x"));
+        ex.begin_dispatch_cancel().disarm();
+
+        let copy = ex.clone();
+        let token = copy.dispatch_cancel().expect("marker on clone");
+        token.cancel();
+
+        assert!(
+            ex.dispatch_cancel()
+                .expect("marker on original")
+                .is_cancelled()
+        );
     }
 }

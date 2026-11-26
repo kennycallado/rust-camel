@@ -380,9 +380,29 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
             };
         };
 
+        // Dispatch cancellation (dispatch-cancellation Task 4): the hook is
+        // read only BETWEEN attempts — an active attempt is never aborted.
+        // The route-stop token is deliberately out of scope for this file.
+        if step.dispatch_cancelled() {
+            return RetryOutcome::Exhausted {
+                exchange: original,
+                error: CamelError::ConsumerStopping,
+                policy,
+            };
+        }
+
         for attempt in 0..backoff.max_attempts {
             let delay = backoff.delay_for(attempt);
             tokio::time::sleep(delay).await;
+            // Between attempts again: a dispatch cancelled during the
+            // backoff sleep skips this redelivery (pre-invoke hook).
+            if step.dispatch_cancelled() {
+                return RetryOutcome::Exhausted {
+                    exchange: original,
+                    error: CamelError::ConsumerStopping,
+                    policy,
+                };
+            }
 
             let mut ex = original.branch_clone();
             ex.input.set_header(HEADER_REDELIVERED, Value::Bool(true));
@@ -431,6 +451,16 @@ impl RouteErrorHandler for DefaultRouteErrorHandler {
                         return RetryOutcome::Exhausted {
                             exchange: final_ex,
                             error: retry_err,
+                            policy,
+                        };
+                    }
+                    // The attempt failed and the loop would continue:
+                    // between attempts, a dispatch cancelled during the
+                    // invoke stops the redelivery here.
+                    if step.dispatch_cancelled() {
+                        return RetryOutcome::Exhausted {
+                            exchange: original,
+                            error: CamelError::ConsumerStopping,
                             policy,
                         };
                     }

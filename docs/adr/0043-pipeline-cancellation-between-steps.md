@@ -75,6 +75,25 @@ We return `PipelineOutcome::Failed(CamelError::ConsumerStopping)` rather than
 - No lifecycle bug: token is per-start via task-local, not compiled-in.
 - Restart regression test required (stop → start → exchanges process normally).
 
+### Amendment (2026-11-26): per-dispatch cancellation trigger
+
+`run_steps` now checks a second, narrower trigger beside the route-stop
+`CANCEL_TOKEN`: `DISPATCH_CANCEL`, a per-pipeline-call task-local holding the
+token carried by the Exchange's enqueue-only `CamelDispatchCancel` marker.
+`ConsumerContext::send_and_wait` mints a fresh, independent token and stamps
+the marker; every pipeline entry takes (removes) the marker and scopes the
+token. Dropping the wait future cancels only that dispatch, with one
+exemption: when the consumer-lifetime token is already cancelled, the drop is
+shutdown-driven and the drain grace above still owns the exchange. A cancelled
+dispatch stops at the same between-steps boundary and resolves with
+`Failed(ConsumerStopping)`; the retry loop consults
+`RetryableStep::dispatch_cancelled` between attempts so a cancelled dispatch is
+neither retried nor absorbed by the error handler. The aggregate-split loop
+takes the marker without observing it: an abandoned contributor must never
+cancel work shared by the completed bucket. The token is per pipeline call, so
+the stop→restart lifecycle bug that motivated the task-local design does not
+reappear.
+
 ### Amendment (2026-07-16): drain-grace precedence
 
 **Original consequence:** "In-flight Exchanges exit cleanly on route stop (one more

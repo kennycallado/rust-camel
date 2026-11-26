@@ -432,8 +432,23 @@ impl ConsumerContext {
     ///
     /// Returns `Ok(exchange)` on success or `Err(e)` if the pipeline failed
     /// without an error handler absorbing the error.
+    ///
+    /// The dispatch stamps a fresh, independent dispatch-cancellation marker
+    /// (see [`camel_api::DISPATCH_CANCEL_EXTENSION`]); the pipeline takes it at
+    /// entry, so a completed reply carries none. Dropping the returned future
+    /// before the reply cancels that dispatch, unless the consumer-lifetime
+    /// token is already cancelled — then the drop is shutdown-driven and the
+    /// ADR-0043 drain grace governs the exchange. A completed reply disarms the
+    /// signal.
+    ///
+    /// A nested inline `direct:` dispatch starts a fresh dispatch scope and
+    /// does not inherit an outer dispatch cancellation.
     pub async fn send_and_wait(&self, exchange: Exchange) -> Result<Exchange, CamelError> {
         let (reply_tx, reply_rx) = oneshot::channel();
+        let mut exchange = exchange;
+        let dispatch = exchange
+            .begin_dispatch_cancel()
+            .drain_on(self.cancel_token());
         self.sender
             .send(ExchangeEnvelope {
                 exchange,
@@ -442,7 +457,9 @@ impl ConsumerContext {
             })
             .await
             .map_err(|_| CamelError::ChannelClosed)?;
-        reply_rx.await.map_err(|_| CamelError::ChannelClosed)?
+        let reply = reply_rx.await.map_err(|_| CamelError::ChannelClosed)?;
+        dispatch.disarm();
+        reply
     }
 }
 

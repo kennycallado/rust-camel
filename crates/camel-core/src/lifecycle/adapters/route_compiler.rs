@@ -52,6 +52,22 @@ tokio::task_local! {
     pub(crate) static CANCEL_TOKEN: CancellationToken;
 }
 
+// Per-dispatch trigger, scoped per pipeline call (not per-start): set by the
+// dispatch entry from the exchange's enqueue-only marker, taken at entry.
+// Independent of the per-start route-stop token in `CANCEL_TOKEN`.
+tokio::task_local! {
+    pub(crate) static DISPATCH_CANCEL: Option<CancellationToken>;
+}
+
+/// True when the current dispatch's cancellation marker is present and fired.
+///
+/// Absent scope (direct pipeline calls in tests) reads as not cancelled.
+pub(crate) fn dispatch_cancelled() -> bool {
+    DISPATCH_CANCEL
+        .try_with(|t| t.as_ref().is_some_and(CancellationToken::is_cancelled))
+        .unwrap_or(false)
+}
+
 /// Runtime context for metrics + route_id (B3). Cancel is via task-local (B1).
 #[derive(Clone)]
 pub struct PipelineRuntimeCtx {
@@ -572,9 +588,14 @@ async fn run_steps(
     // the loop shape is kept purely for borrow hygiene — no behavior change.
     let len = steps.0.len();
     for i in 0..len {
-        // B1: cooperative cancellation between steps via task-local.
-        // If the task-local is not set (direct test calls), skip the check.
-        let cancelled = CANCEL_TOKEN.try_with(|t| t.is_cancelled()).unwrap_or(false);
+        // B1: cooperative cancellation between steps via task-local. Two
+        // triggers: the per-start route-stop token (`CANCEL_TOKEN`) and the
+        // per-dispatch marker (`DISPATCH_CANCEL`). The check runs only before
+        // a step — there is no terminal check after the last step; a step
+        // already in flight always finishes. If neither task-local is set
+        // (direct test calls), the checks are skipped.
+        let cancelled =
+            CANCEL_TOKEN.try_with(|t| t.is_cancelled()).unwrap_or(false) || dispatch_cancelled();
         if cancelled {
             return PipelineOutcome::Failed(CamelError::ConsumerStopping);
         }
@@ -607,6 +628,18 @@ async fn run_steps(
         } else {
             retryable.invoke(ex).await
         };
+
+        // A dispatch-cancelled failure is final: not retried and not absorbed
+        // by the error handler. Keyed on the dispatch marker only, never the
+        // route-stop token.
+        if dispatch_cancelled()
+            && matches!(
+                &outcome,
+                PipelineOutcome::Failed(CamelError::ConsumerStopping)
+            )
+        {
+            return PipelineOutcome::Failed(CamelError::ConsumerStopping);
+        }
 
         match outcome {
             PipelineOutcome::Completed(next) => {
@@ -655,6 +688,11 @@ async fn run_steps(
                         error,
                         policy,
                     } => {
+                        // A dispatch-cancelled exhaustion never reaches the
+                        // disposition handler (dispatch-cancellation Task 4).
+                        if dispatch_cancelled() && matches!(&error, CamelError::ConsumerStopping) {
+                            return PipelineOutcome::Failed(CamelError::ConsumerStopping);
+                        }
                         let disposition = if trace {
                             handler
                                 .handle_step(policy, exchange, error)
@@ -752,6 +790,10 @@ impl camel_api::error_handler::RetryableStep for OwnedRetryable {
             OwnedRetryable::Segment(s) => s.invoke(exchange),
             OwnedRetryable::TracedSegment(s) => s.invoke(exchange),
         }
+    }
+
+    fn dispatch_cancelled(&self) -> bool {
+        dispatch_cancelled()
     }
 }
 

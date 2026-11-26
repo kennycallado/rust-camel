@@ -35,10 +35,16 @@
 //! - **Cancellation.** The pipeline cancellation surface is the per-start
 //!   `CANCEL_TOKEN` task-local the executor scopes around `run_steps`
 //!   (ADR-0043); `run_steps` already maps an observed cancellation to
-//!   [`CamelError::ConsumerStopping`]. The frozen `TransactionError` family
-//!   has NO cancellation variant, so the segment's cancellation primary is
-//!   `CamelError::ConsumerStopping` — the established convention — never
-//!   `Timeout` (a deadline is not a cancellation).
+//!   [`CamelError::ConsumerStopping`]. The per-dispatch `DISPATCH_CANCEL`
+//!   trigger (the enqueue-only dispatch marker, scoped per pipeline call)
+//!   joins the same block-level cancellation arm: either token firing
+//!   resolves the body race as cancelled and fails the R6 commit cutoff,
+//!   and the block finalizes through the frozen 604d pseudocode — rollback
+//!   before the cutoff, detach on uncertainty. The frozen
+//!   `TransactionError` family has NO cancellation variant, so the
+//!   segment's cancellation primary is [`CamelError::ConsumerStopping`] —
+//!   the established convention — never `Timeout` (a deadline is not a
+//!   cancellation).
 //! - **Cleanup context.** [`CamelError`] has no `with_cleanup` field, so the
 //!   604d `(Some(p), Err(u))` row logs the cleanup uncertainty (`warn!`) and
 //!   returns the primary — the frozen spec: "the body error is primary and
@@ -75,6 +81,7 @@ use camel_api::transaction::join::JoinScope;
 use tokio_util::sync::CancellationToken;
 
 use crate::lifecycle::adapters::route_compiler::CANCEL_TOKEN;
+use crate::lifecycle::adapters::route_compiler::DISPATCH_CANCEL;
 
 /// Default block deadline measured at block entry (frozen spec "Block
 /// timeout": default 30 s, per-block override).
@@ -157,7 +164,14 @@ impl TransactedSegment {
         // Pipeline cancellation surface (ADR-0043): the executor scopes
         // CANCEL_TOKEN around run_steps; absent means "never cancelled",
         // exactly like run_steps' own between-steps check.
-        let cancel = CANCEL_TOKEN.try_with(CancellationToken::clone).ok();
+        let route_cancel = CANCEL_TOKEN.try_with(CancellationToken::clone).ok();
+        // Per-dispatch trigger (enqueue-only dispatch marker, scoped per
+        // pipeline call): absent means "not a marked dispatch".
+        let dispatch_cancel = DISPATCH_CANCEL.try_with(|t| t.clone()).ok().flatten();
+        let surface = CancelSurface {
+            route: route_cancel,
+            dispatch: dispatch_cancel,
+        };
 
         // Admission: checkout + hygiene race `min(block_abs, acquire_abs)`
         // INSIDE the manager's open (604c admission; `PoolExhausted` vs
@@ -214,12 +228,13 @@ impl TransactedSegment {
             BlockSession::new(self.datasource.as_str(), scope, Arc::clone(&session));
 
         // Body race (604c §A): `biased select { sleep_until(block_deadline),
-        // CANCEL_TOKEN.cancelled(), body }` IN THAT ORDER — tie → deadline
-        // wins → Timeout.
+        // cancellation, body }` IN THAT ORDER — tie → deadline wins →
+        // Timeout. Cancellation is the `CancelSurface`: the per-start
+        // CANCEL_TOKEN joined by the per-dispatch DISPATCH_CANCEL trigger.
         let body_end = tokio::select! {
             biased;
             _ = tokio::time::sleep_until(block_abs) => BodyEnd::Deadline,
-            _ = cancelled_or_pending(cancel.as_ref()) => BodyEnd::Cancelled,
+            _ = surface.cancelled() => BodyEnd::Cancelled,
             outcome = block_session.enter(self.body.run(exchange)) => match outcome {
                 PipelineOutcome::Failed(e) => BodyEnd::Err(e),
                 // Boxed: PipelineOutcome dwarfs the other variants and the
@@ -230,7 +245,7 @@ impl TransactedSegment {
             },
         };
 
-        self.finalize(session, body_end, cancel.as_ref(), entry, block_abs)
+        self.finalize(session, body_end, &surface, entry, block_abs)
             .await
     }
 
@@ -243,7 +258,7 @@ impl TransactedSegment {
         &self,
         s: Arc<dyn TransactionSession>,
         body_end: BodyEnd,
-        cancel: Option<&CancellationToken>,
+        surface: &CancelSurface,
         entry: tokio::time::Instant,
         block_abs: tokio::time::Instant,
     ) -> PipelineOutcome {
@@ -274,8 +289,8 @@ impl TransactedSegment {
             // The gate reads the observable state (lossy Fresh is fine: any
             // non-Active state falls through to the total rollback).
             let now = tokio::time::Instant::now();
-            // if CANCEL_TOKEN.is_cancelled() || now >= block_deadline {  // R6 cutoff
-            if cancel.is_some_and(CancellationToken::is_cancelled) || now >= block_abs {
+            // if CANCEL.is_cancelled() || now >= block_deadline {  // R6 cutoff
+            if surface.is_cancelled() || now >= block_abs {
                 // primary = Some(if now >= block_deadline { Timeout } else { Cancelled })
                 primary = Some(if now >= block_abs {
                     timeout_error(&datasource, entry).into()
@@ -361,13 +376,44 @@ fn timeout_error(datasource: &str, entry: tokio::time::Instant) -> TransactionEr
     }
 }
 
-/// The race branch for cancellation: the scoped token's `cancelled()` future,
-/// or a never-ready future when the task-local is absent (direct calls and
-/// unscooped tests never observe a cancellation).
-async fn cancelled_or_pending(cancel: Option<&CancellationToken>) {
-    match cancel {
-        Some(token) => token.cancelled().await,
-        None => std::future::pending::<()>().await,
+/// The block's cancellation surface: the per-start `CANCEL_TOKEN`
+/// (ADR-0043) joined by the per-dispatch `DISPATCH_CANCEL` trigger. Either
+/// token firing resolves the body race as [`BodyEnd::Cancelled`] and fails
+/// the R6 commit cutoff; an absent token never cancels (direct calls and
+/// unscooped tests observe no cancellation).
+struct CancelSurface {
+    /// The per-start route-stop token the executor scopes around the run.
+    route: Option<CancellationToken>,
+    /// The per-dispatch trigger token (enqueue-only dispatch marker).
+    dispatch: Option<CancellationToken>,
+}
+
+impl CancelSurface {
+    /// Both tokens polled for the flag at the R6 cutoff.
+    fn is_cancelled(&self) -> bool {
+        self.route
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+            || self
+                .dispatch
+                .as_ref()
+                .is_some_and(CancellationToken::is_cancelled)
+    }
+
+    /// The race branch for cancellation: resolves when either token fires,
+    /// or stays pending forever when both are absent.
+    async fn cancelled(&self) {
+        match (self.route.as_ref(), self.dispatch.as_ref()) {
+            (Some(route), None) => route.cancelled().await,
+            (None, Some(dispatch)) => dispatch.cancelled().await,
+            (Some(route), Some(dispatch)) => {
+                tokio::select! {
+                    _ = route.cancelled() => {}
+                    _ = dispatch.cancelled() => {}
+                }
+            }
+            (None, None) => std::future::pending::<()>().await,
+        }
     }
 }
 
@@ -416,6 +462,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::task::Poll;
     use std::time::Duration;
@@ -423,6 +470,7 @@ mod tests {
     use camel_api::Message;
     use camel_api::transaction::join::current_block_session;
     use camel_component_api::test_support::log_capture;
+    use tokio::sync::watch;
 
     use super::*;
 
@@ -1363,6 +1411,231 @@ mod tests {
             session.calls(),
             vec!["commit"],
             "a lost ACK after the cutoff is never reported as a rollback"
+        );
+    }
+
+    // ── Stateful checkout: dispatch-cancel lease hygiene ────────────────
+
+    /// Shared state of the stateful fake checkout: one outstanding lease,
+    /// the body-drop flag the rollback asserts against, and the recorded
+    /// finalize calls.
+    struct CheckoutShared {
+        state: Mutex<TransactionState>,
+        /// Exactly one lease while the checkout is outstanding.
+        leases: Arc<AtomicUsize>,
+        /// Flipped by the body future's drop guard.
+        body_dropped: Arc<AtomicBool>,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl CheckoutShared {
+        fn record(&self, call: &'static str) {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(call);
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    /// Stateful fake checkout session: begins `Active` holding the single
+    /// lease. `rollback()` records the call, asserts the body future was
+    /// already dropped (rollback runs strictly after the body race dropped
+    /// it), lands the state in `Done`, and releases the lease; `commit()`
+    /// records and MUST never be reached on a cancelled block.
+    struct LeaseSession {
+        shared: Arc<CheckoutShared>,
+    }
+
+    impl TransactionSession for LeaseSession {
+        fn datasource(&self) -> &str {
+            DS
+        }
+
+        fn state(&self) -> TransactionState {
+            *self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn begin(&self) -> camel_api::transaction::BeginFuture<'_> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+
+        fn set_rollback_only(&self) {}
+
+        fn is_rollback_only(&self) -> bool {
+            false
+        }
+
+        fn commit(&self) -> camel_api::transaction::FinalizeFuture<'_> {
+            self.shared.record("commit");
+            Box::pin(std::future::ready(Ok(TransactionOutcome::Committed)))
+        }
+
+        fn rollback(&self) -> camel_api::transaction::FinalizeFuture<'_> {
+            assert!(
+                self.shared.body_dropped.load(Ordering::SeqCst),
+                "the body future must be dropped before the rollback runs"
+            );
+            self.shared.record("rollback");
+            *self
+                .shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = TransactionState::Done;
+            self.shared.leases.fetch_sub(1, Ordering::SeqCst);
+            Box::pin(std::future::ready(Ok(TransactionOutcome::RolledBack)))
+        }
+    }
+
+    /// Fake manager over the same checkout state: `open_session()` checks
+    /// out the connection — one outstanding lease, session starting
+    /// `Active`.
+    struct LeaseManager {
+        shared: Arc<CheckoutShared>,
+    }
+
+    impl TransactionManager for LeaseManager {
+        fn datasource(&self) -> &str {
+            DS
+        }
+
+        fn acquire_deadline(&self) -> Duration {
+            Duration::from_secs(5)
+        }
+
+        fn open_session(&self) -> camel_api::transaction::OpenSessionFuture<'_> {
+            self.shared.leases.fetch_add(1, Ordering::SeqCst);
+            let shared = Arc::clone(&self.shared);
+            let session = Arc::new(LeaseSession { shared });
+            Box::pin(std::future::ready(Ok(
+                session as Arc<dyn TransactionSession>
+            )))
+        }
+    }
+
+    /// Body that signals entry over `entered`, then parks on the `release`
+    /// watch until dropped; the drop guard flips `body_dropped` so the fake
+    /// rollback can assert the body future died before cleanup ran.
+    #[derive(Clone)]
+    struct ParkedBody {
+        entered: watch::Sender<bool>,
+        release: watch::Receiver<bool>,
+        body_dropped: Arc<AtomicBool>,
+    }
+
+    /// Drop guard marking the body future's death.
+    struct BodyDropGuard(Arc<AtomicBool>);
+
+    impl Drop for BodyDropGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl OutcomePipeline for ParkedBody {
+        fn clone_box(&self) -> Box<dyn OutcomePipeline> {
+            Box::new(self.clone())
+        }
+
+        fn run<'a>(
+            &'a mut self,
+            _exchange: Exchange,
+        ) -> Pin<Box<dyn Future<Output = PipelineOutcome> + Send + 'a>> {
+            let entered = self.entered.clone();
+            let mut release = self.release.clone();
+            let guard = BodyDropGuard(Arc::clone(&self.body_dropped));
+            Box::pin(async move {
+                let _guard = guard;
+                entered.send_replace(true);
+                let _ = release.changed().await;
+                PipelineOutcome::Completed(Exchange::new(Message::new("released")))
+            })
+        }
+    }
+
+    /// Per-dispatch `DISPATCH_CANCEL` cancellation finalizes a parked
+    /// transacted block without leaking the checkout: the body future is
+    /// dropped (its drop guard fires) before the rollback runs, exactly one
+    /// ROLLBACK is recorded, COMMIT is never consulted, the session lands
+    /// in `Done`, and the single outstanding lease returns to 0.
+    #[tokio::test]
+    async fn cancelled_transacted_block_finalizes_without_leaking_a_session() {
+        let shared = Arc::new(CheckoutShared {
+            state: Mutex::new(TransactionState::Active),
+            leases: Arc::new(AtomicUsize::new(0)),
+            body_dropped: Arc::new(AtomicBool::new(false)),
+            calls: Mutex::new(Vec::new()),
+        });
+        let (entered_tx, mut entered_rx) = watch::channel(false);
+        let (_release_tx, release_rx) = watch::channel(false);
+        let body = ParkedBody {
+            entered: entered_tx,
+            release: release_rx,
+            body_dropped: Arc::clone(&shared.body_dropped),
+        };
+        let mut segment = TransactedSegment::new(
+            DS,
+            Arc::new(LeaseManager {
+                shared: Arc::clone(&shared),
+            }),
+            OutcomeSegment::new(Box::new(body)),
+        );
+        let token = CancellationToken::new();
+        let join = tokio::spawn(DISPATCH_CANCEL.scope(Some(token.clone()), async move {
+            segment.run(Exchange::new(Message::new("m"))).await
+        }));
+        // Await body entry, bounded.
+        let entry = tokio::time::timeout(
+            Duration::from_secs(5),
+            entered_rx.wait_for(|entered| *entered),
+        )
+        .await
+        .expect("the body must enter and signal entry before the deadline")
+        .expect("the entry signal must resolve");
+        assert!(*entry, "the entry signal must read true");
+        token.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), join)
+            .await
+            .expect("dispatch cancellation must finalize the block")
+            .expect("the block task must not panic");
+        let PipelineOutcome::Failed(e) = outcome else {
+            panic!("expected Failed, got {outcome:?}");
+        };
+        assert!(
+            matches!(e, CamelError::ConsumerStopping),
+            "dispatch cancellation finalizes with the cancellation error, got {e:?}"
+        );
+        assert_eq!(
+            shared.calls(),
+            vec!["rollback"],
+            "exactly one ROLLBACK and no COMMIT on a cancelled block"
+        );
+        assert!(
+            shared.body_dropped.load(Ordering::SeqCst),
+            "the body future must be dropped before the rollback (asserted inside rollback too)"
+        );
+        assert_eq!(
+            *shared
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            TransactionState::Done,
+            "the rollback lands the session in Done"
+        );
+        assert_eq!(
+            shared.leases.load(Ordering::SeqCst),
+            0,
+            "the checkout lease must not leak"
         );
     }
 }

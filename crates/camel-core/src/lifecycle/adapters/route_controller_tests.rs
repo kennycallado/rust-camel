@@ -6804,3 +6804,9 @@ async fn b_prime_emit_on_reply_drop_aggregate_post_pipeline_err() {
 #[cfg(test)]
 #[path = "route_controller_drainclaim_tests.rs"]
 mod drainclaim;
+
+// ── dispatch-cancellation (Task 3): per-dispatch marker at pipeline entry ──
+
+#[cfg(test)]
+#[path = "route_controller_dispatch_cancel_tests.rs"]
+mod dispatch_cancel;

@@ -1222,10 +1222,16 @@ impl DefaultRouteController {
                                     }
                                 }
                                 let ExchangeEnvelope {
-                                    exchange,
+                                    mut exchange,
                                     reply_tx,
                                     in_flight_claim,
                                 } = envelope;
+                                // Aggregate-split is deliberately NOT a
+                                // dispatch scope: one abandoned contributor
+                                // must never cancel work shared by the
+                                // completed bucket. Take the marker anyway so
+                                // aggregate replies carry no stale marker.
+                                let _dispatch_cancel = exchange.take_dispatch_cancel();
                                 let _drain_guard = super::route_helpers::DrainGuard::new(Arc::clone(&drain_in_flight));
                                 // drainclaim claim PROPAGATION: the
                                 // envelope's claim travels WITH the

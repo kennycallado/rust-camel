@@ -136,6 +136,15 @@ pub trait RetryableStep: Send {
         &'a mut self,
         exchange: Exchange,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = PipelineOutcome> + Send + 'a>>;
+
+    /// Whether the dispatch that owns this step has been cancelled.
+    ///
+    /// The retry loop consults it between attempts. The default `false`
+    /// keeps every existing implementor unchanged. It must never consult
+    /// the route-stop token.
+    fn dispatch_cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// BoxProcessor adapter: preserves readiness-error routing by calling
