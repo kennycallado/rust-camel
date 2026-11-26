@@ -43,12 +43,16 @@ named test with concrete input asserting the exact error variant and, where
 applicable, the route, offender, and datasource; parser-level rejections
 (unknown block key) assert only the offending key.
 
-This rejection set SHALL hold on EVERY lowering entry point — the
-declarative compile and the canonical lowering alike — through ONE shared
-structural walk over the lowered step tree; no entry point may carry a
-second copy of the list over the lowered step tree, and a structural
-rejection on the canonical path SHALL be produced whether or not a
-TransactionManager is registered for the block datasource — neither
+This rejection set SHALL hold on EVERY entry point that admits a
+`transacted` block — the declarative compile, the canonical lowering, and
+the internal registration seam for an already-lowered `RouteDefinition`
+alike — through ONE shared structural walk over the lowered step tree, for
+every offence representable as a lowered `BuilderStep` at that entry
+(unknown block keys remain parser-only; the canonical form cannot author a
+dynamic-routing step); no
+entry point may carry a second copy of the list over the lowered step tree,
+and a structural rejection on the canonical path SHALL be produced whether
+or not a TransactionManager is registered for the block datasource — neither
 replaced by the `ManagerMissing` backstop nor skipped when the manager gate
 would pass. A dynamic-routing step (recipient list, routing slip, or
 dynamic router) inside a block SHALL be rejected at load: its target is
@@ -122,11 +126,11 @@ cannot author such a step at all.
 - **WHEN** the canonical lowering runs
 - **THEN** the lowering fails at load with the typed parallel-inside-block error (never `ManagerMissing`)
 
-#### Scenario: both lowering entries share one structural walk
+#### Scenario: all entries share one structural walk
 
-- **GIVEN** the declarative compile entry and the canonical lowering entry
-- **WHEN** either entry loads a block containing the same structural offence
-- **THEN** both fail with the same typed error variant (source-level assertion that both entries call the one walk module)
+- **GIVEN** the declarative compile entry, the canonical lowering entry, and the internal registration seam
+- **WHEN** any entry loads a block containing the same structural offence
+- **THEN** all fail with the same typed error variant produced by the one walk module (source-level assertion that all entries call it)
 
 #### Scenario: dynamic-routing step inside a block is rejected at load
 
@@ -139,10 +143,6 @@ requirement "Join semantics for sql steps on the block datasource"
 (`RuntimeSqlInJoinedStep`, `TransactionControlSql`, `JoinSessionMissing`,
 `JoinScopeMismatch`, `DialectUnprovable`, `UnsupportedJoinDialect`); this
 slice owns every load-time structural rejection above.
-
-A `RouteDefinition` registered already lowered
-(`CamelContext::add_route_definition`) passes no lowering entry and is
-outside this clause until the shared walk runs there (ADR-0101 §h).
 
 ### Requirement: TransactionManager port and registry resolution
 
@@ -581,4 +581,47 @@ the relay/downstream SHALL deduplicate.
 - **GIVEN** the operational documentation for transacted blocks
 - **WHEN** a DB commit succeeds but the idempotent-key confirm is not yet recorded
 - **THEN** the documentation specifies the unique outbox message id and relay/downstream deduplication as the required mitigation
+
+### Requirement: Registration-seam walk for pre-lowered route definitions
+
+The system SHALL run the shared transacted-block walk at the internal route
+registration seam (`RuntimeBus::register_route` → `handle_register_internal`)
+over an already-lowered `RouteDefinition`, with registry-backed manager
+resolution and catalog-backed dialect resolution, BEFORE the runtime side
+effect and BEFORE the duplicate-route check. The scan SHALL enter every
+outermost `BuilderStep::Transacted` reachable in the definition's step tree,
+including the circuit-breaker fallback; a block nested inside another block
+remains the shared walk's structural `NestedBlock` rejection. The seam SHALL
+preserve the typed `TransactionError` variant produced by the scan across the
+internal registration port — it SHALL NOT be stringified into `RouteError` —
+while every non-scan registration failure keeps its existing formatting
+(`invalid state: …`). The `JoinSessionMissing` route-add backstop SHALL
+remain in force unchanged until the executor slice removes it deliberately;
+its surface stays as today (mapped to `RouteError` by the unchanged runtime
+execution adapter). A definition with no transacted block SHALL register
+exactly as before.
+
+#### Scenario: registration rejects a pre-lowered parallel split
+
+- **GIVEN** a pre-lowered `RouteDefinition` whose `BuilderStep::Transacted` block on datasource `pg` contains a parallel split reaching a joined sql step, with no TransactionManager registered
+- **WHEN** the definition is registered through `CamelContext::add_route_definition`
+- **THEN** registration fails with `TransactionError::ParallelInBlock { step: "split", datasource: "pg" }` and no route aggregate is persisted
+
+#### Scenario: registration rejects a pre-lowered dynamic routing target
+
+- **GIVEN** a pre-lowered `RouteDefinition` whose `circuit_breaker_fallback` holds a container wrapping a `BuilderStep::Transacted` block that contains a recipient list
+- **WHEN** the definition is registered
+- **THEN** registration fails with `TransactionError::DynamicTargetUnprovable { step: "recipient-list" }`
+
+#### Scenario: registration reports a missing manager as a typed error
+
+- **GIVEN** a pre-lowered `RouteDefinition` whose clean block on datasource `pg` has no registered TransactionManager
+- **WHEN** the definition is registered
+- **THEN** registration fails with `TransactionError::ManagerMissing { datasource: "pg" }` (asserted as the variant, not as prose), and the `JoinSessionMissing` backstop is never reached
+
+#### Scenario: registration of a plain pre-lowered route is unchanged
+
+- **GIVEN** a pre-lowered `RouteDefinition` with no transacted block
+- **WHEN** the definition is registered
+- **THEN** registration succeeds and the route reaches `Registered` state
 
