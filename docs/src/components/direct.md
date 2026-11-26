@@ -94,7 +94,9 @@ The Consumer removes its registry entry on `stop()` or when the cancellation tok
 
 ## Producer
 
-`to: "direct:name"` builds a DirectProducer. The Producer holds one in-flight call at a time through a bounded semaphore. `poll_ready` checks only the registry. It fails fast when no Consumer is registered and `failIfNoConsumers` is not `false`. `call` acquires the permit before the dispatch timeout starts. It then hands the Exchange to the Consumer's channel and awaits the reply.
+`to: "direct:name"` builds a DirectProducer. Inline dispatch is the primary path. For a Sequential consumer, the Producer runs the Pipeline on its own task under the dispatcher's FIFO admission. Channel submission is the fallback, not the inline path. The Producer submits the Exchange to the Consumer's channel and awaits the reply. It holds no admission permit. On the channel path a Concurrent route processes Exchanges in parallel up to its `max`. A Sequential route processes them one at a time in arrival order. `poll_ready` checks only the registry. It fails fast when no Consumer is registered and `failIfNoConsumers` is not `false`.
+
+The producer deadline and error are unchanged. More calls can reach the bounded route queue before timing out. Once enqueued, an exchange can still execute after its caller times out.
 
 `failIfNoConsumers=true` (default) rejects the call when no Consumer is registered. Set it to `false` to let the Producer race against late registration. The Producer still waits for the Consumer to receive the Exchange, so `false` does not give a fire-and-forget guarantee. Use SEDA for that.
 

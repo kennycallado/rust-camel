@@ -15,7 +15,6 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
@@ -269,7 +268,6 @@ impl Endpoint for DirectEndpoint {
             name: self.config.name.clone(),
             registry: Arc::clone(&self.registry),
             config: self.config.clone(),
-            semaphore: Arc::new(Semaphore::new(1)),
             fail_if_no_consumers: self.config.fail_if_no_consumers,
             runtime: rt,
         }))
@@ -386,7 +384,6 @@ struct DirectProducer {
     name: String,
     registry: DirectRegistry,
     config: DirectConfig,
-    semaphore: Arc<Semaphore>,
     fail_if_no_consumers: Option<bool>,
     runtime: Arc<dyn camel_component_api::RuntimeObservability>,
 }
@@ -397,7 +394,6 @@ impl Clone for DirectProducer {
             name: self.name.clone(),
             registry: self.registry.clone(),
             config: self.config.clone(),
-            semaphore: self.semaphore.clone(),
             fail_if_no_consumers: self.fail_if_no_consumers,
             runtime: Arc::clone(&self.runtime),
         }
@@ -424,11 +420,11 @@ impl Service<Exchange> for DirectProducer {
     type Future = Pin<Box<dyn Future<Output = Result<Exchange, CamelError>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Check that the endpoint is registered. Permits are NOT acquired
-        // here: a permit reserved in poll_ready is held across the
-        // poll_ready/call boundary, wedging the semaphore when a wrapping
-        // Service re-readies a clone (tower contract: call() may only
-        // reserve resources for its own future).
+        // Check that the endpoint is registered. No resources are reserved
+        // here: anything reserved in poll_ready would be held across the
+        // poll_ready/call boundary, wedging a wrapping Service that
+        // re-readies a clone (tower contract: call() may only reserve
+        // resources for its own future).
         let reg = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         match reg.get(&self.name) {
             None => {
@@ -453,7 +449,6 @@ impl Service<Exchange> for DirectProducer {
     fn call(&mut self, exchange: Exchange) -> Self::Future {
         let name = self.name.clone();
         let registry = Arc::clone(&self.registry);
-        let semaphore = Arc::clone(&self.semaphore);
         let runtime = Arc::clone(&self.runtime);
         let timeout = effective_dispatch_timeout(self.config.timeout_ms);
         let exchange_id = exchange.correlation_id.clone();
@@ -466,9 +461,9 @@ impl Service<Exchange> for DirectProducer {
 
         Box::pin(async move {
             // One timed section covers BOTH paths: the boundary spans the
-            // registry lookup, the per-path serialization wait (channel
-            // permit or dispatcher admission), and the dispatch itself,
-            // so neither path's timeout can drift (inline timeout parity).
+            // registry lookup, the per-path serialization wait (dispatcher
+            // admission or channel wait), and the dispatch itself, so
+            // neither path's timeout can drift (inline timeout parity).
             let timed = tokio::time::timeout(timeout, async {
                 // Registry lookup: a missing entry is an unhandled dispatch
                 // failure like any other — it flows through the same
@@ -493,11 +488,10 @@ impl Service<Exchange> for DirectProducer {
                     Some((ctx, dispatcher)) => {
                         let result = match dispatcher {
                             // Inline fast path: run the consumer pipeline on this
-                            // task. The endpoint semaphore is skipped — the
-                            // dispatcher's admission mutex is the single
-                            // serializer for inline dispatches. Cycle/depth guard
-                            // rejection maps straight out; there is no channel
-                            // fallback on guard rejection.
+                            // task. The dispatcher's admission mutex is the
+                            // single serializer for inline dispatches.
+                            // Cycle/depth guard rejection maps straight out;
+                            // there is no channel fallback on guard rejection.
                             Some(d) => {
                                 let dispatch_future = d.dispatch(exchange);
                                 let guard_name = name.clone();
@@ -509,17 +503,18 @@ impl Service<Exchange> for DirectProducer {
                                 })
                                 .await
                             }
-                            // Channel path (Phase 1 semantics): submit through the
-                            // consumer context under the endpoint's sole permit.
-                            // Covers Concurrent consumers and
-                            // capability-unavailable entries.
-                            None => {
-                                let _permit = semaphore
-                                    .acquire_owned()
-                                    .await
-                                    .map_err(|_| CamelError::ChannelClosed)?;
-                                ctx.send_and_wait(exchange).await
-                            }
+                            // Channel path (fallback, not inline): submit
+                            // through the consumer context. No producer-side
+                            // permit: Concurrent routes parallelize per their
+                            // `max` (per-envelope drain tasks); Sequential
+                            // routes serialize in their single drain task in
+                            // channel arrival order.
+                            //
+                            // The producer deadline and error are unchanged.
+                            // More calls can reach the bounded route queue
+                            // before timing out. Once enqueued, an exchange
+                            // can still execute after its caller times out.
+                            None => ctx.send_and_wait(exchange).await,
                         };
                         (result, Some(ctx))
                     }

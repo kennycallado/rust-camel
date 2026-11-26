@@ -1,0 +1,13 @@
+{
+  "kind": "plan",
+  "verdict": "APPROVED",
+  "expert": "experts/e_gpt",
+  "hash": "sha256:b4bf7323092e5c2b49b291ab7a53ae21e610d2c8f5e1f1a370883a2a3dde2484",
+  "rounds": 2,
+  "first_dispatch": "APPROVED-WITH-FIXES (5 fix groups applied verbatim)",
+  "plan_review": "reviewers/r_glm APPROVE-WITH-FINDINGS (6 findings applied)",
+  "spec_bless": "sha256:3a6fc0f333a22ad297ebf4047a8c23db70e8f73099ce940d9fc5854596f771eb",
+  "date": "2026-11-26",
+  "mission": 614,
+  "bd": "rc-zy47o"
+}

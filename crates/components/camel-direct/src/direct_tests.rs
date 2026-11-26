@@ -479,7 +479,6 @@ fn direct_producer(
             timeout_ms,
             fail_if_no_consumers,
         },
-        semaphore: Arc::new(Semaphore::new(1)),
         fail_if_no_consumers,
         runtime: rt(),
     }
@@ -510,7 +509,7 @@ fn poll_ready_absent_consumer_fails_fast() {
 }
 
 #[test]
-fn poll_ready_live_consumer_ok_without_permit() {
+fn poll_ready_live_consumer_ok() {
     let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
     registry
         .lock()
@@ -521,11 +520,9 @@ fn poll_ready_live_consumer_ok_without_permit() {
     let mut cx = Context::from_waker(&waker);
     let result = producer.poll_ready(&mut cx);
     assert!(matches!(result, Poll::Ready(Ok(()))));
-    assert_eq!(
-        producer.semaphore.available_permits(),
-        1,
-        "poll_ready must not consume the call permit"
-    );
+    // poll_ready reserves nothing: a second poll on the same producer
+    // still readies immediately.
+    assert!(matches!(producer.poll_ready(&mut cx), Poll::Ready(Ok(()))));
 }
 
 #[test]
@@ -608,126 +605,6 @@ fn test_direct_poll_ready_reports_stale_entry_not_ready() {
         }
         other => panic!("expected closed-entry error, got: {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn call_blocks_on_semaphore_until_release() {
-    let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
-    let (route_tx, mut route_rx) = mpsc::channel::<ExchangeEnvelope>(4);
-    let ctx = ConsumerContext::new(route_tx, CancellationToken::new(), "park-route".to_string());
-    registry.lock().unwrap().insert(
-        "park".to_string(),
-        DirectEntry {
-            ctx,
-            closed: Arc::new(AtomicBool::new(false)),
-            dispatcher: None,
-        },
-    );
-
-    let mut producer = direct_producer("park", registry, None, None);
-    let semaphore = Arc::clone(&producer.semaphore);
-
-    // Route stub: parks the FIRST exchange's reply on the test-controlled
-    // release signal; later exchanges reply immediately.
-    let parked = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-    let parked_signal = Arc::clone(&parked);
-    let release_signal = Arc::clone(&release);
-    tokio::spawn(async move {
-        let mut first = true;
-        loop {
-            match tokio::time::timeout(Duration::from_secs(2), route_rx.recv()).await {
-                Ok(Some(envelope)) => {
-                    if first {
-                        first = false;
-                        parked_signal.notify_one();
-                        release_signal.notified().await;
-                    }
-                    if let Some(tx) = envelope.reply_tx {
-                        let _ = tx.send(Ok(envelope.exchange));
-                    }
-                }
-                Ok(None) => break, // closed: drain complete
-                Err(_) => break,   // stalled: drainer ends
-            }
-        }
-    });
-
-    let fut_a = producer.call(Exchange::new(Message::new("a")));
-    let fut_b = producer.call(Exchange::new(Message::new("b")));
-    let a = tokio::spawn(fut_a);
-    let b = tokio::spawn(fut_b);
-
-    tokio::time::timeout(Duration::from_secs(5), parked.notified())
-        .await
-        .expect("route stub must receive call A's exchange within 5s");
-    // Let B run into the semaphore acquisition and park there.
-    tokio::task::yield_now().await;
-    tokio::task::yield_now().await;
-
-    assert_eq!(
-        semaphore.available_permits(),
-        0,
-        "call A must hold the sole permit while awaiting its reply"
-    );
-    assert!(
-        !b.is_finished(),
-        "call B must be blocked on the semaphore while call A is in flight"
-    );
-
-    release.notify_one();
-
-    let reply_a = a
-        .await // allow-test-wait: semaphore released before join; call completes
-        .expect("call A task must not panic")
-        .expect("call A must complete Ok once its reply arrives");
-    assert_eq!(reply_a.input.body.as_text(), Some("a"));
-    let reply_b = b
-        .await // allow-test-wait: semaphore released before join; call completes
-        .expect("call B task must not panic")
-        .expect("call B must complete Ok after the permit is released");
-    assert_eq!(reply_b.input.body.as_text(), Some("b"));
-}
-
-#[tokio::test]
-async fn call_pending_when_all_permits_held() {
-    let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
-    // Keep the route receiver alive (unpolled) so the submission channel
-    // stays open and the reply never arrives: the call future must park.
-    let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(1);
-    let ctx = ConsumerContext::new(route_tx, CancellationToken::new(), "held-route".to_string());
-    registry.lock().unwrap().insert(
-        "held".to_string(),
-        DirectEntry {
-            ctx,
-            closed: Arc::new(AtomicBool::new(false)),
-            dispatcher: None,
-        },
-    );
-
-    let mut producer = direct_producer("held", registry, None, None);
-    let permit = Arc::clone(&producer.semaphore)
-        .try_acquire_owned()
-        .expect("sole permit must be free before call");
-
-    let mut fut = producer.call(Exchange::new(Message::new("x")));
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    assert!(
-        fut.as_mut().poll(&mut cx).is_pending(),
-        "call must pend while the sole permit is held elsewhere"
-    );
-
-    drop(permit);
-    // Next poll completes acquisition and proceeds into the send/reply
-    // round-trip (which pends: nobody replies). Holding the permit proves
-    // the future got past acquisition.
-    assert!(fut.as_mut().poll(&mut cx).is_pending());
-    assert_eq!(
-        producer.semaphore.available_permits(),
-        0,
-        "call future must now hold the permit (past acquisition)"
-    );
 }
 
 #[tokio::test]
@@ -1490,10 +1367,10 @@ async fn inline_timeout_covers_admission_wait() {
         .await
         .expect("first dispatch must acquire admission within 2s");
 
-    // Second concurrent producer (distinct instance → distinct
-    // endpoint semaphore): it must time out while WAITING on
-    // admission — the wait is inside the timeout boundary — not hang
-    // until the parked dispatch releases it.
+    // Second concurrent producer (distinct instance; admission is the
+    // dispatcher mutex, not any producer state): it must time out while
+    // WAITING on admission — the wait is inside the timeout boundary — not
+    // hang until the parked dispatch releases it.
     let waiting_producer = direct_producer("adm-wait", registry, None, Some(200));
     let started = std::time::Instant::now();
     let err = dispatch(waiting_producer, Exchange::new(Message::new("second")))
@@ -1563,7 +1440,7 @@ async fn inline_cycle_rejected_without_fallback() {
 }
 
 #[tokio::test]
-async fn concurrent_producers_serialized_fifo() {
+async fn sequential_consumer_keeps_fifo() {
     let registry: DirectRegistry = Arc::new(Mutex::new(HashMap::new()));
     let (route_tx, _route_rx) = mpsc::channel::<ExchangeEnvelope>(1);
     let dispatcher = FifoRecorderDispatcher {
@@ -1576,23 +1453,26 @@ async fn concurrent_producers_serialized_fifo() {
         live_entry(route_tx, Some(Arc::new(dispatcher))),
     );
 
-    let producer = direct_producer("fifo", registry, None, Some(2_000));
-    let mut tasks = Vec::new();
+    let prod = direct_producer("fifo", registry, None, Some(2_000));
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    // Poll each call once so every future records its arrival at the
+    // dispatcher's FIFO admission mutex before any dispatch completes.
+    let mut futs = Vec::new();
     for i in 0..4 {
-        let mut svc = producer.clone();
-        let events_clone = Arc::clone(&events);
-        tasks.push(tokio::spawn(async move {
-            if svc
-                .call(Exchange::new(Message::new(format!("p{i}"))))
-                .await
-                .is_err()
-            {
-                events_clone.lock().unwrap().push(format!("error:{i}"));
-            }
-        }));
+        let mut fut = prod
+            .clone()
+            .call(Exchange::new(Message::new(format!("p{i}"))));
+        assert!(
+            fut.as_mut().poll(&mut cx).is_pending(),
+            "first poll of p{i} must be Pending"
+        );
+        futs.push(fut);
     }
-    for task in tasks {
-        task.await.unwrap();
+
+    for fut in futs {
+        fut.await.expect("dispatch must succeed");
     }
 
     let log = events.lock().unwrap().clone();
@@ -1611,4 +1491,9 @@ async fn concurrent_producers_serialized_fifo() {
         seen.push(begin);
     }
     assert_eq!(seen.len(), 4, "all four producers must have executed");
+    assert_eq!(
+        seen,
+        vec!["p0", "p1", "p2", "p3"],
+        "admission must follow p0-p3 arrival order"
+    );
 }

@@ -1,0 +1,34 @@
+{
+  "kind": "holistic-review",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "reviewers/r_glm",
+  "session": "ses_de8199729ffeH8d7UNkW3ajUod",
+  "impl_hash": "f567aea41",
+  "spec_bless": "sha256:3a6fc0f333a22ad297ebf4047a8c23db70e8f73099ce940d9fc5854596f771eb",
+  "plan_bless": "sha256:b4bf7323092e5c2b49b291ab7a53ae21e610d2c8f5e1f1a370883a2a3dde2484",
+  "findings": [
+    {
+      "severity": "minor",
+      "finding": "tasks.md carried the unsubstituted placeholder sha256:<recomputed-at-bless-commit>",
+      "resolution": "substituted the real plan hash sha256:b4bf7323092e5c2b49b291ab7a53ae21e610d2c8f5e1f1a370883a2a3dde2484 with a pointer to .bless.json"
+    },
+    {
+      "severity": "minor",
+      "finding": "test file module doc header said 'Red test' although the file now holds three tests, two added post-red",
+      "resolution": "retitled to 'Route-level tests pinning the direct-dispatch concurrent-admission requirements' with the red narrative kept as rationale"
+    }
+  ],
+  "gate_evidence": {
+    "gates_local_post_commit": "exit 0 (/home/shared/tmp/direct-concurrent-admission/gates-final.log)",
+    "cargo_build_workspace": "exit 0",
+    "cargo_test_workspace_lib": "exit 0",
+    "hexagonal_architecture_boundaries_test": "33 passed, exit 0",
+    "camel_component_direct_tests": "46 passed, exit 0",
+    "route_level_tests": "3 passed, exit 0",
+    "mdbook_test": "exit 0",
+    "red_log": "/home/shared/tmp/direct-concurrent-admission/red-concurrent-consumer-parallel-admission.log (snapshot (1,0) vs (2,0))"
+  },
+  "date": "2026-11-26",
+  "mission": 614,
+  "bd": "rc-zy47o"
+}
