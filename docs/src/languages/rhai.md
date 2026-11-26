@@ -46,6 +46,8 @@ Rhai integrates with Rust types without a foreign-function boundary. Exchange va
 
 Resource limits bound CPU and memory use. Defaults are 100,000 max operations, 1 MiB max string size, 10,000 max array elements, 10,000 max map entries, 64 max expression depth, 32 max function-expression depth, 64 max call levels, and a 5,000 ms execution timeout. The timeout wraps synchronous evaluation in `spawn_blocking`. It returns control to the route after five seconds but cannot cancel the blocking task. The operation limit eventually stops a CPU-bound script.
 
+The caps are deliberate. Change them in `[languages.rhai.limits]`; the Rhai crate CONTEXT owns the limit table. The word `match` is reserved by the Rhai engine itself: a script cannot declare or call a function named `match`.
+
 ## Scripts from files
 
 A `source_file` field loads the Rhai source from a file. A `.rhai` extension infers the language, so `language:` is optional:
@@ -363,5 +365,9 @@ The `rhai_replace_*` characterization tests in the Rhai crate pin the in-place
 behavior.
 
 See [Value boundaries across languages](value-boundary.md) for missing-value and null-versus-empty semantics across all languages.
+
+## Unit-tier documents
+
+`camel test` unit documents boot the closed lean component set (`direct`, `log`, `mock`, `seda`, `timer`) with `direct:` stimulus only. They read no `Camel.toml` ([ADR-0064](../adr/0064-two-tier-testing-contract.md)). A `[languages.rhai.limits]` block in the project's `Camel.toml` therefore never reaches a unit document; the lean boot evaluates Rhai with the rust-camel runtime defaults. A route that needs configured limits or a component outside the lean set runs in the integration tier. See [Declarative camel test](../testing/camel-test.md) for the tier contract and the thin-adapter pattern.
 
 **Reference**: [Language SPI](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-api/CONTEXT.md) · [Rhai crate](https://github.com/kennycallado/rust-camel/blob/main/crates/languages/camel-language-rhai/CONTEXT.md)

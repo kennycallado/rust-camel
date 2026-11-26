@@ -1,0 +1,11 @@
+{
+  "verdict": "BLESS-WITH-FIXES",
+  "kind": "plan",
+  "scope": "combined spec+plan (single dispatch per mission 619 order)",
+  "hash": "sha256:2d72fb4566a89d9ac8bea40ff53ab1bfaa09f39972a662b688648c24c3584281",
+  "expert": "e_opus",
+  "expert_note": "Mission-specified @experts/e_gpt failed with 'The usage limit has been reached'; sanctioned substitute @experts/e_glm failed with 'Usage limit reached for 5 hour' (resets 2026-11-26 23:35). Independent expert-of-last-resort e_opus produced the verdict. Verbatim verdict: /home/shared/tmp/observer-docs-semantics/blessing-verdict-e_opus.md",
+  "fixes_applied": ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"],
+  "re_bless": false,
+  "date": "2026-11-26"
+}

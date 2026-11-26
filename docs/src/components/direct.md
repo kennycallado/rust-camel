@@ -98,6 +98,8 @@ The Consumer removes its registry entry on `stop()` or when the cancellation tok
 
 The producer deadline and error are unchanged. More calls can reach the bounded route queue before timing out. Once enqueued, an exchange can still execute after its caller times out.
 
+Sequential is the default consumer model. The admission wait is part of the call: the `timeout_ms` boundary spans registry lookup, the admission wait, and pipeline execution, so a call that queues behind another call can time out before its route runs. To run calls in parallel, declare `concurrent: <max>` on the consumer route; `0` means no limit. See [Route structure](../yaml-dsl/route-structure.md) for the route keys. The direct-dispatch spec owns this contract (`openspec/specs/direct-dispatch/spec.md` in the repository, outside the rendered book).
+
 `failIfNoConsumers=true` (default) rejects the call when no Consumer is registered. Set it to `false` to let the Producer race against late registration. The Producer still waits for the Consumer to receive the Exchange, so `false` does not give a fire-and-forget guarantee. Use SEDA for that.
 
 The default `timeout_ms` is 30 000. A timeout returns `CamelError::ProcessorError` with a `timed out` message. The error propagates through the route's [error handler](../concepts/error-handling.md).
@@ -109,5 +111,9 @@ Direct is the natural request-reply Component for in-process calls. The Producer
 ## Error handling
 
 The DirectConsumer reports unhandled pipeline failures through the `b-prime:direct:send-and-wait` metric and logs at `error!` (ADR-0012 category b'). Producer send failures (no Consumer, channel closed, reply dropped) are category (a) handler-owned. The Producer logs them at `warn!`. The route's error handler owns the operational signal.
+
+A failure inside the called route does not leak its mutations into the caller. When the caller wraps the call in `do_try`, the catch chain starts from the pre-try snapshot: the caller exchange as it was when the `do_try` block began. The snapshot discards headers and properties that the called route set, and also discards changes from try-body steps that ran before the call. Carry diagnostics across the boundary in the `data` field of the `throw` step. Match by `code` or `business_kind`; `message` is log-only and never crosses a mapping or projection ([ADR-0097](../adr/0097-business-error-envelope.md)). The do-try spec owns the snapshot rule (`openspec/specs/do-try/spec.md` in the repository, outside the rendered book).
+
+A bounded `concurrent: <max>` applies back-pressure, not rejection. The Concurrent consumer acquires a permit before it dequeues an exchange, so extra exchanges wait for a permit and are never rejected while the route runs. With `concurrent: 0` the route sets no limit and admits every exchange. The producer `timeout_ms` still covers the wait, so a call that waits too long fails with the timeout error. The wait bounds memory under load ([ADR-0044](../adr/0044-route-admission-backpressure.md)). See [Architecture](../architecture/index.md) for the consumer-model details.
 
 **Reference**: [Direct crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/components/camel-direct/CONTEXT.md). Example source: [`examples/multi-route-direct`](https://github.com/kennycallado/rust-camel/tree/main/examples/multi-route-direct).

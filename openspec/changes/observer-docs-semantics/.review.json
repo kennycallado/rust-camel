@@ -1,0 +1,48 @@
+{
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "findings_resolved": true,
+  "reviewer": "e_opus",
+  "reviewer_note": "@reviewers/r_glm (zai glm 5h) and @reviewers/r_gpt (usage limit) were quota-exhausted; e_opus reviewed as reviewer of last resort. e_opus also produced the combined blessing, so the holistic review is not independent of the plan. Human spot-check of I1 recommended.",
+  "scope": "holistic review of the complete change (base d84bfd804 to working tree)",
+  "impl_hash": "sha256:984271dd4ea16ee2586f5a9e0375a87967b8ca2410dbceb506c86cbc2e02def7",
+  "diff": "docs/src only; 6 pages",
+  "findings": [
+    {
+      "id": "I1",
+      "severity": "important",
+      "summary": "direct.md named `concurrency: concurrent`, which is not a YAML route key (RouteDslRoute is deny_unknown_fields). Correct keys: `concurrent: <max>` (0 = no limit) with `sequential: bool`.",
+      "resolution": "Rewritten in direct.md and tasks.md to `concurrent: <max>`; `0` no-limit stated; link to route-structure.md; back-pressure paragraph scoped to bounded max (no semaphore when max is None, route_controller_trait.rs:463)."
+    },
+    {
+      "id": "I2",
+      "severity": "important",
+      "summary": "The new Sequential paragraph sat before the channel-path paragraph 'Once enqueued, an exchange can still execute after its caller times out', implying Sequential inline calls can run after timeout.",
+      "resolution": "Paragraph moved after the channel-path paragraph in direct.md; tasks.md step order updated."
+    },
+    {
+      "id": "m1",
+      "severity": "minor",
+      "summary": "Widening okStatusCodeRange to 200-499 also accepts 3xx, so non-followed redirects stop raising HttpOperationFailed.",
+      "resolution": "Clause added to circuit-breaker.md and tasks.md."
+    },
+    {
+      "id": "m2",
+      "severity": "minor",
+      "summary": "rhai unit-tier section lacked a link to the camel-test tier contract.",
+      "resolution": "Link to testing/camel-test.md added in rhai.md and tasks.md."
+    },
+    {
+      "id": "m3",
+      "severity": "minor",
+      "summary": "Commit 22fe6019e message says 'five pages'; the change touches six.",
+      "resolution": "Recorded in the park report; commit not amended (reviewer instruction)."
+    }
+  ],
+  "verification_after_fixes": {
+    "mdbook_build_exit": 0,
+    "mdbook_test_exit": 0,
+    "openspec_validate": "valid",
+    "task_greps": "all pass"
+  },
+  "date": "2026-11-26"
+}

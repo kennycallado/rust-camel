@@ -112,10 +112,22 @@ document that parses today never probes and keeps its values.
 The probe tries candidate subsets smallest-first, in document order, and
 parses a fresh tree for each attempt. The first success wins, so coercion
 never extends beyond a minimum-cardinality subset. The cap is eight candidate
-leaves for the whole document, shared by every probed subtree. Failures keep
-their usual shape: an unresolved variable without a default fails and names
-the variable; a non-clean value, an over-cap document, and a genuinely broken
-document all keep the first-pass error text.
+leaves for the whole document, shared by every probed subtree.
+
+Each `throttle` step can contribute two of those leaves: its two integer
+fields, `max_requests` and `period_secs`. A document that puts
+`${env:}` tokens on both fields of five or more `throttle` steps carries
+ten or more candidates against the budget of eight and keeps its
+first-pass parse error. Split the `throttle` steps across documents, or
+reduce the tokenized fields until the document carries at most eight
+candidates in total. Other tokenized integer or boolean leaves share the same
+budget. The
+[camel-dsl crate CONTEXT](https://github.com/kennycallado/rust-camel/blob/main/crates/camel-dsl/CONTEXT.md)
+records the probe mechanics.
+
+Failures keep their usual shape: an unresolved variable without a default
+fails and names the variable; a non-clean value, an over-cap document, and a
+genuinely broken document all keep the first-pass error text.
 
 ### Stay-out subtrees
 

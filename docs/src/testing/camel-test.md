@@ -24,6 +24,9 @@ The contract lives in [ADR-0064](../adr/0064-two-tier-testing-contract.md) and t
 
 `camel lint` warns `R-MOCK-IN-PRODUCTION` on inline `to: mock:` and `endpoints: mock:` sends in route files. The warning is exempt for `tests/fixtures/` paths and `*.test.yaml` documents. Migrate the send to an `intercepts:` block in a `*.test.yaml` document, as described above.
 
+## Routes that need the integration tier
+Routes that carry a `security_policy` or consume from a `from: mcp:` endpoint do not run in unit documents. A `security_policy` route needs security configuration from `Camel.toml`, such as an authenticator, and the lean boot reads no `Camel.toml`. `mcp:` is outside the closed lean component set ([ADR-0064](../adr/0064-two-tier-testing-contract.md)). Keep such routes as thin adapters that forward to a `direct:` route, and unit-test the `direct:` route. The adapter gets its coverage in the integration tier.
+
 ## Bean stubs
 A `beans:` block declares stub beans for the `bean:` steps in the routes. A stub bean is an in-process processor registered in the bean registry before the context boots. The `bean:` step resolves against it, so the test runs without a real bean implementation. The block maps a bean name to a declaration.
 

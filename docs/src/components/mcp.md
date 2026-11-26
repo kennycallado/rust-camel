@@ -38,17 +38,30 @@ without a `security_policy` starts **Public by default**, and the per-bind
 exposure gate applies — a non-loopback bind serving any Public route
 requires a `[binds."<addr>"] allow_public_exposure = true` acknowledgement
 or start fails naming the bind (an acknowledged exposure warns permanently).
-The DSL block's `security_policy` propagates to every lowered tool and
-resource route; the kernel authenticates each request per the route plan's
-credential sources (normalized RFC 9110 headers) and installs the typed
-principal before the pipeline. Catalog caps (`max_tools`, `max_resources`,
-default 128 each) reject surplus registrations at start.
+The DSL `mcp:` block carries one `security_policy` for the whole server and
+propagates it to every lowered tool and resource route. The block has no per-tool
+policy: bind, TLS, and policy are server properties, not per-tool URI options.
+A tool that needs its own policy needs an explicit consumer route declared with
+`from: mcp:<server>/tool/<name>` and its own `security_policy`. The kernel
+authenticates each request per the route plan's credential sources (normalized
+RFC 9110 headers) and installs the typed principal before the pipeline. Catalog
+caps (`max_tools`, `max_resources`, default 128 each) reject surplus
+registrations at start. The mcp-component spec owns the server-property rule
+(`openspec/specs/mcp-component/spec.md` in the repository, outside the rendered
+book).
 
 Remote hosts that announce a protocol version other than `2026-07-28` get a `-32022` rejection and one `warn!` record per event. The server reads no `Mcp-Session-Id` header.
 
 ### Tool and resource behavior (steps/to passthrough)
 
 A tool or resource declared without `to` or `steps` keeps the identity pipeline: a `tools/call` returns its own arguments (v1 behavior). An opt-in `to` or `steps` — not both — lowers onto the consumer route through the same step machinery routes and rest use. Declaring both fails lowering with a named error.
+
+A business failure projects to a tool error result: `isError: true` and
+a payload of exactly `{"error": <code>, "kind": <kind>}`. A resource read
+returns error content with the same payload. The `message` field of a
+`Business` error is log-only, and `data` is redacted diagnostics that are
+never logged in clear. No projection sends either field to the client.
+[ADR-0097](../adr/0097-business-error-envelope.md) owns the envelope contract.
 
 ## Client (Producer)
 

@@ -37,3 +37,25 @@ The example source is at [`examples/circuit-breaker`](https://github.com/kennyca
 During the probe-in-flight window, concurrent callers behave differently by route shape. A route with an `error_handler` compiles the breaker into a `CircuitBreakerGate`. The gate serves the fallback to concurrent callers while the probe runs. A route without an `error_handler` compiles the breaker into a Tower `CircuitBreakerService`. That service rejects concurrent callers with `CircuitOpen` while the probe runs, even when a fallback is configured.
 
 Both behaviors are sound. The gate keeps a single probe in flight and serves stale fallback data. The service keeps a single probe in flight and rejects. The asymmetry is intentional. See [Route structure](../yaml-dsl/route-structure.md) for the YAML form.
+
+## Business errors are breaker-neutral
+
+A business error counts as a success for both breaker implementations, in
+every state. It never advances the failure counter in Closed. A HalfOpen
+probe that ends in a business error succeeds and closes the breaker.
+Only technical failures open the breaker or fail the probe.
+[ADR-0097](../adr/0097-business-error-envelope.md) records this as owner
+decision Q4. Both breakers follow it: the `CircuitBreakerGate` compiled
+from a route with an `error_handler`, and the Tower
+`CircuitBreakerService` compiled from a route without one.
+
+This rule interacts with the `http:` component. The HTTP producer raises
+`CamelError::HttpOperationFailed` when the response status falls outside
+the `okStatusCodeRange` parameter. The default range is `200-299`, so a
+`4xx` response is a technical failure and counts toward opening the
+breaker. When `4xx` responses are expected outcomes of the business call,
+widen the range with `okStatusCodeRange=200-499`. Then only `5xx`
+responses raise `HttpOperationFailed`, and `4xx` responses count as
+successes for the breaker. The widened range also accepts `3xx`
+responses, so a redirect that the producer does not follow counts as a
+success too.
