@@ -407,7 +407,7 @@ for entry in "${GATES[@]}"; do
     fi
 
     printf '\n=== %s\n' "$name"
-    if ( cd "$ROOT" && bash -o pipefail -c "$command" ); then
+    if ( cd "$ROOT" && bash -euo pipefail -c "$command" ); then
         printf 'PASS %s\n' "$name"
         passed+=("$name")
     else
@@ -790,7 +790,7 @@ PY
         fi
 
         printf '\n=== lane %s :: %s\n' "$crate" "$command"
-        if ( cd "$ROOT" && bash -o pipefail -c "$command" ); then
+        if ( cd "$ROOT" && bash -euo pipefail -c "$command" ); then
             printf 'PASS lane %s :: %s\n' "$crate" "$command"
             lane_passed=$(( lane_passed + 1 ))
         else
