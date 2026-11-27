@@ -1,0 +1,23 @@
+{
+  "change": "dep-hygiene-2026-11",
+  "kind": "combined spec+plan (skip_specs: true; re-scoped after REJECT)",
+  "expert": "experts/e_gpt",
+  "date": "2026-11-27",
+  "rounds": [
+    {
+      "hash": "sha256:38b21a8326af6c6aedc6e1c9cd6e5f6ab35c114bf70a55b12978e73951208056",
+      "verdict": "REJECTED",
+      "finding": "zip 9.8.2 adds constant_time_eq 0.6.2 (mandatory ^0.6.1) next to blake3 1.8.7's 0.4.2; duplicate set would grow",
+      "disposition": "dispatcher dropped zip and the parking_lot dedupe; batch re-scoped to seven bumps"
+    },
+    {
+      "hash": "sha256:7bb857fc7288736de46939ea738458a580011d1fbeb4a13f948d007a46296b7e",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 5,
+      "applied": "duplicate metric corrected to distinct (name, version) pairs (59 names, identical sets); lock evidence uses git diff from 1de271e1d and records ureq-proto 0.7.1 as a replacement plus the re-disambiguated edges (restored to baseline); rollback rule replaced with stop-and-park; task unchecked until post-blessing verification; lane enumeration expanded (21 commands incl. mqtt) with docker rows called out; digest evidence and systemd-run/schema-check/doc-build requirements added",
+      "final_hash": "sha256:37e93127155bdbeff9eea76bdc8a79a75455a043c888e9656dbc8988947f84f6",
+      "process_note": "applied verbatim, no second blessing round, per the dispatcher's directive"
+    }
+  ],
+  "outcome": "applied and verified, but the mission is parked: filetime 0.2.30 deprecates set_file_mtime on rustc 1.99 and forces a test-only source edit, which the blessed stop rule reserves to the dispatcher"
+}

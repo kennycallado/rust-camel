@@ -1,0 +1,24 @@
+{
+  "change": "dep-hygiene-2026-11",
+  "reviewer": "reviewers/r_glm",
+  "date": "2026-11-27",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "scope": "six-bump lock-only batch; filetime held at 0.2.29; zip and parking_lot dedupe dropped by dispatcher",
+  "reviews": {
+    "plan": "APPROVE-WITH-FINDINGS, 5 findings applied (duplicate metric, lock-evidence base, stop rule, lane enumeration, digest/gates evidence)",
+    "task": "APPROVE-WITH-FINDINGS; Important: re-run build/lib/audit/dup evidence on the shipped lock and add the camel-cli lane. Resolved: clippy/build/lib/lanes were already post-revert (mtimes 14:36-14:47 vs lock 14:33); audit, duplicate dump and outdated re-run on the shipped lock (audit-shipped.log, tree-dup-shipped.txt, pairs-shipped.txt, outdated-shipped.txt); camel-cli lane and cxf signer digest suite run, exit 0. Minor stale scratch copy Cargo.lock.final is not cited as evidence.",
+    "holistic": "APPROVE-WITH-FINDINGS; Minor: task checkbox checked before gates-local completes on the final commit. Resolution: gates-local is the last step of this change; if it fails the task is reopened. No other findings."
+  },
+  "evidence": {
+    "lock_delta": "Cargo.lock: six packages + ureq-proto 0.7.1; filetime 0.2.29, zip 9.2.2, parking_lot 0.12.5+0.13.0; no manifest/source edits",
+    "duplicates": "59 distinct duplicate names, 5539 dump lines, identical before/after sets (only sha2 version differs)",
+    "audit": "exit 0, four ignores untouched",
+    "outdated": "six bumped crates absent; filetime 0.2.30 remains",
+    "clippy": "4/4 registry invocations + component-file leg exit 0, verified by hand (gates-local clippy verdict is spurious, bd rc-rpv43)",
+    "build_lib": "cargo build --workspace 0; cargo test --workspace --lib 0 (74 suites)",
+    "lanes": "21 lanes + camel-cli lane + cxf signer digest suite exit 0",
+    "sha2_kat": "0.11.1 vs 0.11.2 byte-identical known-answer digests"
+  },
+  "blocking": null,
+  "note": "reviewers/r_glm served both reviews; r_gpt was not needed and no substitution was recorded. Independence limit: the same provider reviewed plan, task and holistic; the master re-runs the sweep at the merge gate."
+}
