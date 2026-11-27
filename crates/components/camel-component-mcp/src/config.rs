@@ -91,6 +91,26 @@ where
     non_empty_path(deserializer, "key_path")
 }
 
+/// Deserialize `skills_root` as an optional, non-empty trimmed path.
+///
+/// An absent field is `None`; a present-but-blank value is rejected naming the
+/// option, so an empty string never silently disables the extension.
+fn deserialize_skills_root<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(serde::de::Error::custom("skills_root must not be empty"));
+            }
+            Ok(Some(trimmed.to_owned()))
+        }
+    }
+}
+
 /// TLS certificate and private-key paths for an MCP server listener.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -291,6 +311,13 @@ pub struct McpServerConfig {
     /// must widen this list explicitly (ADR-0033).
     #[serde(default)]
     pub allowed_hosts: Option<Vec<String>>,
+
+    /// Optional skills root. When present, the listener loads every skill
+    /// under this directory at spawn and advertises the
+    /// `io.modelcontextprotocol/skills` extension. `None` (default) leaves
+    /// the extension off. A blank value is rejected at deserialization.
+    #[serde(default, deserialize_with = "deserialize_skills_root")]
+    pub skills_root: Option<String>,
 }
 
 impl McpServerConfig {

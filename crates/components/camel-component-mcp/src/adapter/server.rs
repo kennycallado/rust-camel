@@ -53,11 +53,13 @@ use axum::response::{IntoResponse, Response};
 use rmcp::ErrorData;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-    DiscoverResult, ErrorCode, Implementation, InitializeRequestParams, InitializeResult,
-    ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    DiscoverResult, ErrorCode, ExtensionCapabilities, GetSkillRequestParams, GetSkillResult,
+    Implementation, InitializeRequestParams, InitializeResult, ListPromptsResult,
+    ListResourcesResult, ListSkillsResult, ListToolsResult, PaginatedRequestParams,
     ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, ResourcesCapability, ServerCapabilities, ServerConfig,
-    SubscribeRequestParams, Tool, ToolsCapability,
+    ResourceContents, ResourcesCapability, SKILLS_EXTENSION_ID, ServerCapabilities, ServerConfig,
+    Skill, SkillFrontmatter, SkillResource, SkillResources, SubscribeRequestParams, Tool,
+    ToolsCapability,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
@@ -66,10 +68,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::headers::normalize_repeated;
 use crate::registry::{McpBindSecurity, McpResourceRegistry, McpToolRegistry};
+use crate::skills::{McpSkillCatalog, McpSkillEntry};
 use crate::types::{McpRequestHeaders, McpResource, McpResourceRead, McpToolInvocation};
 use camel_api::Body as CamelBody;
 use camel_api::security_policy::{
-    AccessMode, AuthContext, AuthorizationDecision, RouteSecurityPlan, SecurityPolicy, TransportId,
+    AccessMode, AudienceBinding, AuthContext, AuthorizationDecision, CredentialSource,
+    RouteSecurityPlan, SecurityPolicy, TransportId,
 };
 use camel_api::{CamelError, Exchange, Message};
 use camel_auth::AuthenticatedPrincipal;
@@ -123,12 +127,17 @@ pub struct McpServerAdapter {
     /// snapshot, consulted at the `request_headers` seam below for
     /// per-invocation kernel authentication.
     security: Arc<McpBindSecurity>,
+    /// The listener's skills catalog, loaded once at spawn (`None` when the
+    /// config declares no `skills_root` — the extension stays off). Read by
+    /// `skills/list` and `skills/get`; its presence also drives the extension
+    /// advertisement in [`capabilities`].
+    pub(crate) skills: Option<Arc<McpSkillCatalog>>,
     identity_name: String,
 }
 
 impl rmcp::ServerHandler for McpServerAdapter {
     fn get_info(&self) -> ServerConfig {
-        let mut info = ServerConfig::new(capabilities());
+        let mut info = ServerConfig::new(capabilities(self.skills.is_some()));
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         info.server_info =
             Implementation::new(self.identity_name.clone(), env!("CARGO_PKG_VERSION"));
@@ -295,6 +304,44 @@ impl rmcp::ServerHandler for McpServerAdapter {
         context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         let uri = request.uri;
+        let headers = normalized_headers(&context);
+        // While a catalog exists it owns the `skill://` namespace (spec:
+        // Resource URI addressing). Any other URI — and every URI on a
+        // listener without a root — keeps the registry path below untouched.
+        if let Some(catalog) = self.skills.as_deref()
+            && uri.starts_with("skill://")
+        {
+            // Bind-level authentication first (Task 2.2): a hidden URI answers
+            // before any lookup or path check, so a hidden and an unknown URI
+            // run the same work and neither existence nor timing distinguishes
+            // them.
+            if !self.skills_visible(&headers).await {
+                return Err(skill_unavailable(&uri));
+            }
+            // Manifest-first: a known URI is served from the immutable catalog,
+            // so no path is ever resolved for it. Unknown URIs then get the
+            // dot-dot check (spec: a dot-dot request URI is rejected) and, if
+            // that passes, the same error a hidden URI answered above.
+            if let Some(file) = catalog.file(&uri) {
+                let contents = resource_contents(McpResource {
+                    uri: uri.clone(),
+                    content: file.bytes.to_vec(),
+                    mime_type: file.mime_type.to_owned(),
+                });
+                return Ok(ReadResourceResponse::Complete(
+                    ReadResourceResult::new(vec![contents])
+                        .with_ttl_ms(LIST_RESULT_TTL_MS)
+                        .with_cache_scope(CacheScope::Private),
+                ));
+            }
+            if skill_uri_escapes(&uri) {
+                return Err(ErrorData::invalid_params(
+                    format!("skill path escapes the skills root: {uri}"),
+                    None,
+                ));
+            }
+            return Err(skill_unavailable(&uri));
+        }
         // Unknown resource (never registered, or unregistered by a stopped
         // consumer): clean method error, no Exchange, no dead channel.
         let Some(entry) = self.resources.resolve(&uri) else {
@@ -307,7 +354,6 @@ impl rmcp::ServerHandler for McpServerAdapter {
         }
         // Kernel gate at the request seam (Task 2.6): a denial is answered
         // as the resource's error body — the route never sees the read.
-        let headers = normalized_headers(&context);
         let principal = match kernel_authn(&self.security, &entry.route_id, &headers).await {
             KernelAuthn::Granted(principal) => Some(principal),
             KernelAuthn::Public => None,
@@ -337,6 +383,69 @@ impl rmcp::ServerHandler for McpServerAdapter {
         Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
             vec![resource_contents(resource)],
         )))
+    }
+
+    // ── Skills extension (Task 2.1) ───────────────────────────────────────
+
+    async fn list_skills(
+        &self,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListSkillsResult, ErrorData> {
+        // Defensive: rmcp answers `-32601` before dispatch when the extension
+        // is not declared, so `self.skills` is always `Some` here.
+        let Some(catalog) = self.skills.as_deref() else {
+            return Ok(ListSkillsResult::with_all_items(Vec::new())
+                .with_ttl_ms(LIST_RESULT_TTL_MS)
+                .with_cache_scope(CacheScope::Private));
+        };
+        let cursor = request.and_then(|params| params.cursor);
+        // Bind-level authentication (Task 2.2): a hidden caller sees an empty
+        // catalog. A supplied cursor then validates exactly as it would
+        // against an empty catalog — malformed, or every offset out of range.
+        if !self.skills_visible(&normalized_headers(&context)).await {
+            if cursor.is_some() {
+                return Err(ErrorData::invalid_params("invalid skills cursor", None));
+            }
+            return Ok(ListSkillsResult::with_all_items(Vec::new())
+                .with_ttl_ms(LIST_RESULT_TTL_MS)
+                .with_cache_scope(CacheScope::Private));
+        }
+        let page = catalog
+            .page(cursor.as_deref())
+            .map_err(|_| ErrorData::invalid_params("invalid skills cursor", None))?;
+        let skills = page
+            .skills
+            .iter()
+            .map(rmcp_skill)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut result = ListSkillsResult::with_all_items(skills)
+            .with_ttl_ms(LIST_RESULT_TTL_MS)
+            .with_cache_scope(CacheScope::Private);
+        result.next_cursor = page.next_cursor;
+        Ok(result)
+    }
+
+    async fn get_skill(
+        &self,
+        request: GetSkillRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetSkillResult, ErrorData> {
+        // Bind-level authentication (Task 2.2): a hidden skill answers like an
+        // unknown one, so existence is not disclosed.
+        if !self.skills_visible(&normalized_headers(&context)).await {
+            return Err(skill_unavailable(&request.uri));
+        }
+        let Some(entry) = self
+            .skills
+            .as_deref()
+            .and_then(|catalog| catalog.get(&request.uri))
+        else {
+            return Err(skill_unavailable(&request.uri));
+        };
+        Ok(GetSkillResult::new(rmcp_skill(entry)?)
+            .with_ttl_ms(LIST_RESULT_TTL_MS)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn list_prompts(
@@ -390,17 +499,97 @@ impl McpServerAdapter {
         if matches!(plan.access_mode, AccessMode::Public) {
             return true;
         }
-        match kernel_authn_for(&self.security, route_id, plan, headers).await {
+        let authn = kernel_authn_for(&self.security, route_id, plan, headers).await;
+        self.plan_catalog_visible(plan, &authn, headers).await
+    }
+
+    /// The authentication/authorization tail shared by per-entry catalog
+    /// visibility (Task 2.2) and bind-level skills visibility (Task 2.2):
+    /// `Public` plans are visible to everyone, a denial hides the entry, and
+    /// an `Authorized` plan additionally requires
+    /// [`catalog_policy_grants`]; `Authenticated` needs only the principal.
+    async fn plan_catalog_visible(
+        &self,
+        plan: &RouteSecurityPlan,
+        authn: &KernelAuthn,
+        headers: &http::HeaderMap,
+    ) -> bool {
+        match authn {
             KernelAuthn::Denied(_) => false,
             KernelAuthn::Public => true,
             KernelAuthn::Granted(principal) => match &plan.access_mode {
                 AccessMode::Authorized(policy) => {
-                    catalog_policy_grants(policy.as_ref(), plan.transport, &principal, headers)
-                        .await
+                    catalog_policy_grants(policy.as_ref(), plan.transport, principal, headers).await
                 }
                 _ => true,
             },
         }
+    }
+
+    /// Bind-level skills visibility (Task 2.2): the same kernel catalog rule
+    /// as `tools/list`, applied to the catalog rather than one entry.
+    ///
+    /// Until the bind's first non-`Public` registration the catalog is
+    /// public. Afterwards it is listed only when at least one live
+    /// non-`Public` plan admits the caller; with no live protected plan it
+    /// stays hidden (fail closed, sticky latch).
+    ///
+    /// Authentication runs at most once per distinct
+    /// `(credential_sources, provider_ref, audience_binding, transport)` key —
+    /// every field `kernel_authenticate` reads — while the policy decision
+    /// runs once per plan, so two plans sharing the key but carrying different
+    /// scopes are both evaluated. The cache is local to this call and holds no
+    /// credential: a cached denial replays with a fixed message.
+    async fn skills_visible(&self, headers: &http::HeaderMap) -> bool {
+        if !self.security.protected_seen() {
+            return true;
+        }
+        #[derive(PartialEq)]
+        struct AuthKey {
+            credential_sources: Vec<CredentialSource>,
+            provider_ref: Option<String>,
+            audience_binding: Option<AudienceBinding>,
+            transport: TransportId,
+        }
+        struct AuthEntry {
+            key: AuthKey,
+            outcome: Result<AuthenticatedPrincipal, ()>,
+        }
+        let mut cache: Vec<AuthEntry> = Vec::new();
+        for (route_id, plan) in self.security.plans_snapshot() {
+            if matches!(plan.access_mode, AccessMode::Public) {
+                continue;
+            }
+            let key = AuthKey {
+                credential_sources: plan.credential_sources.clone(),
+                provider_ref: plan.provider_ref.clone(),
+                audience_binding: plan.audience_binding.clone(),
+                transport: plan.transport,
+            };
+            let authn = match cache.iter().position(|entry| entry.key == key) {
+                Some(index) => match cache[index].outcome.clone() {
+                    Ok(principal) => KernelAuthn::Granted(principal),
+                    Err(()) => KernelAuthn::Denied(CamelError::Unauthenticated(
+                        "skills catalog: cached denial".into(),
+                    )),
+                },
+                None => {
+                    let authn = kernel_authn_for(&self.security, &route_id, &plan, headers).await;
+                    let outcome = match &authn {
+                        KernelAuthn::Granted(principal) => Ok(principal.clone()),
+                        // A non-`Public` plan never reports `Public`; anything
+                        // else than a granted principal fails closed.
+                        KernelAuthn::Denied(_) | KernelAuthn::Public => Err(()),
+                    };
+                    cache.push(AuthEntry { key, outcome });
+                    authn
+                }
+            };
+            if self.plan_catalog_visible(&plan, &authn, headers).await {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -422,6 +611,32 @@ fn resource_unavailable(uri: &str) -> ErrorData {
         format!("resource '{uri}' is not available"),
         None,
     )
+}
+
+/// Clean `-32602` error for a skill the listener will not serve: unknown URI,
+/// or a skill hidden from the caller by catalog authentication. Existence is
+/// not disclosed, so both answer the same message.
+fn skill_unavailable(uri: &str) -> ErrorData {
+    ErrorData::invalid_params(format!("skill '{uri}' is not available"), None)
+}
+
+/// True when a `skill://` URI carries a `..` path segment, raw or
+/// percent-encoded.
+///
+/// Each `/`-separated raw segment is decoded on its own and then split on both
+/// separators, so raw `..`, `%2e%2e`, `%2E%2E`, and `%2F`-joined escapes are
+/// all caught while a literal backslash inside one file name stays data
+/// unless it forms a `..` sub-segment. Decoding before splitting would turn an
+/// encoded separator in a legal file name into a path boundary; no path is
+/// ever resolved here — the check must answer `-32602` before the filesystem
+/// is consulted.
+fn skill_uri_escapes(uri: &str) -> bool {
+    uri.split('/').any(|raw_segment| {
+        percent_encoding::percent_decode_str(raw_segment)
+            .decode_utf8_lossy()
+            .split(['/', '\\'])
+            .any(|segment| segment == "..")
+    })
 }
 
 /// The inbound HTTP request headers, normalized per Task 2.5 (repeated
@@ -710,12 +925,54 @@ fn is_textual_mime(mime: &str) -> bool {
     base.starts_with("text/") || base.contains("json") || base.contains("xml")
 }
 
+/// Project one catalog entry into rmcp's SEP-2640 `Skill`: the stored
+/// frontmatter JSON becomes `SkillFrontmatter`, and every manifest file
+/// becomes a `SkillResource` carrying the digest and size of the stored
+/// bytes.
+///
+/// Frontmatter was validated as a JSON object with string `name` and
+/// `description` at load time; a conversion failure here is therefore an
+/// internal error, not a caller error.
+fn rmcp_skill(entry: &McpSkillEntry) -> Result<Skill, ErrorData> {
+    let frontmatter: SkillFrontmatter =
+        serde_json::from_value(entry.frontmatter.clone()).map_err(|error| {
+            ErrorData::internal_error(
+                format!(
+                    "skill '{}' frontmatter cannot be rendered: {error}",
+                    entry.uri
+                ),
+                None,
+            )
+        })?;
+    let files = entry
+        .files
+        .iter()
+        .map(|file| SkillResource::new(file.uri.clone(), file.digest.clone(), file.size))
+        .collect();
+    Ok(Skill::new(
+        entry.uri.clone(),
+        frontmatter,
+        SkillResources::Files(files),
+    ))
+}
+
 /// Capabilities the listener advertises: tools + resources (spec: the server
-/// hosts tool and resource consumer routes).
-fn capabilities() -> ServerCapabilities {
+/// hosts tool and resource consumer routes). When a skills catalog exists,
+/// the SEP-2640 extension is declared with `directoryRead: false` — the
+/// catalog serves file reads through `resources/read`, not
+/// `resources/directory/read`.
+fn capabilities(skills: bool) -> ServerCapabilities {
     let mut capabilities = ServerCapabilities::default();
     capabilities.tools = Some(ToolsCapability::default());
     capabilities.resources = Some(ResourcesCapability::default());
+    if skills {
+        let mut settings = serde_json::Map::new();
+        settings.insert("directoryRead".to_owned(), serde_json::Value::Bool(false));
+        capabilities.extensions = Some(ExtensionCapabilities::from([(
+            SKILLS_EXTENSION_ID.to_owned(),
+            settings,
+        )]));
+    }
     capabilities
 }
 
@@ -731,6 +988,7 @@ pub(crate) fn mcp_router(
     tools: Arc<McpToolRegistry>,
     resources: Arc<McpResourceRegistry>,
     security: Arc<McpBindSecurity>,
+    skills: Option<Arc<McpSkillCatalog>>,
     bind: &str,
     local_addr: SocketAddr,
     allowed_hosts: Option<Vec<String>>,
@@ -739,6 +997,7 @@ pub(crate) fn mcp_router(
         tools,
         resources,
         security,
+        skills,
         // The servers-map name is not visible at the shared-listener layer
         // (one bind may host many named servers), so the identity comes from
         // the config field that identifies the listener: its resolved bind
@@ -1085,6 +1344,7 @@ mod tests {
             tools: Arc::new(McpToolRegistry::new(8)),
             resources: Arc::new(McpResourceRegistry::new(8)),
             security,
+            skills: None,
             identity_name: "catalog-test".to_owned(),
         }
     }

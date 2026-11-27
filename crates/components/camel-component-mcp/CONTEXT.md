@@ -47,7 +47,7 @@ steps.
 Global TOML key: `mcp` (`McpBundle`).
 
 - `mcp.servers.<name>` (`McpServerConfig`): `bind`, `tls`, `security_policy`,
-  `max_tools`, `max_resources`, `allowed_hosts`.
+  `max_tools`, `max_resources`, `allowed_hosts`, `skills_root`.
 - `mcp.remotes.<name>` (`McpRemoteConfig`): `url`, `transport`,
   `request_timeout_secs`, `connect_timeout_secs`, `allow_internal`,
   `allow_cleartext`.
@@ -112,6 +112,31 @@ rejects the (N+1)th route with a clean `CamelError` (no silent truncation).
 - `McpResourceRegistry` — per-listener `uri → route` map backing
   `resources/read`. Entries follow the same owner-liveness discipline as
   `McpToolRegistry` (ADR-0068).
+
+## Skills (server role)
+
+`skills_root` is an opt-in `McpServerConfig` path. Absent, the listener loads
+no catalog and the extension stays off. Present, `McpServerRegistry::spawn`
+loads `McpSkillCatalog` before binding. A bad root, an invalid `SKILL.md`, an
+escaping symlink, or a limit breach fails the start with a typed `McpError`
+and binds nothing. The catalog is immutable for the listener lifetime and
+holds every regular file of each skill with its `skill://` URI, a `sha256:`
+digest of the served bytes, and the byte size. `skills/list` pages this
+manifest 50 skills at a time; `resources/read` serves the stored bytes and
+rejects any `..` segment. `resources/list` stays route-only, and a resource
+route that declares a `skill://` URI on a listener with a root fails consumer
+start: the catalog owns that namespace. A second named server on the same bind
+must declare the same literal root: `get_or_spawn` compares `Option<String>`
+values, so `/srv/skills/` differs from `/srv/skills`.
+
+Catalog visibility follows the bind's `protected_seen` latch. Skills are public
+until the bind has committed a non-Public route plan; the latch survives
+listener respawns. After that, at least one live non-Public plan must admit the
+caller through the same kernel and `catalog_entry_visible` tail as `tools/list`;
+a stopped protected route does not reopen the catalog. The latch keys on
+registered route plans and governs only this plan-less catalog. It is not the
+ADR-0061 Rule 8 bind-presence gate. Both methods and skill-file reads emit
+`ttlMs: 0` and `cacheScope: "private"`.
 
 ## Adapter confinement
 

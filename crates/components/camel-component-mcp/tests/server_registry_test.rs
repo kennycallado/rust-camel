@@ -31,6 +31,56 @@ fn cfg(bind: &str, tls: Option<serde_json::Value>) -> McpServerConfig {
     .expect("valid server config")
 }
 
+fn cfg_with_skills(bind: &str, skills_root: &std::path::Path) -> McpServerConfig {
+    serde_json::from_value(serde_json::json!({
+        "bind": bind,
+        "skills_root": skills_root.to_str().expect("skills root is utf-8"),
+        "security_policy": {"require": "auth"},
+    }))
+    .expect("valid server config with skills root")
+}
+
+/// Temp directory owned by one test, removed on drop (no `tempfile` dev-dep
+/// in this crate; mirrors the in-module `TestDir` in `src/skills.rs`).
+struct TestDir {
+    path: std::path::PathBuf,
+}
+
+impl TestDir {
+    fn new(tag: &str) -> Self {
+        use std::sync::atomic::AtomicU64;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "camel-mcp-registry-skills-{tag}-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create test dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn write_skill(root: &std::path::Path, name: &str) {
+    let skill = root.join(name);
+    std::fs::create_dir_all(&skill).expect("create skill dir");
+    std::fs::write(
+        skill.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {name} skill.\n---\n# {name}\n"),
+    )
+    .expect("write SKILL.md");
+}
+
 #[tokio::test]
 async fn first_consumer_spawns_listener() {
     let bind = "127.0.0.1:0";
@@ -1053,5 +1103,91 @@ fn takeover_by_incumbent_owner_keeps_working_plan() {
             .provider_ref,
         Some("plan-a".to_string()),
         "a same-owner takeover must keep a working plan"
+    );
+}
+
+#[tokio::test]
+async fn skills_root_conflict_rejected() {
+    let root_a = TestDir::new("root-a");
+    let root_b = TestDir::new("root-b");
+    write_skill(root_a.path(), "alpha");
+    write_skill(root_b.path(), "beta");
+
+    let bind = "127.0.0.27:0";
+    let first = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg_with_skills(bind, root_a.path()))
+        .await
+        .expect("first spawn with root-a succeeds");
+
+    let err = McpServerRegistry::global()
+        .get_or_spawn(bind, &cfg_with_skills(bind, root_b.path()))
+        .await
+        .expect_err("second spawn with a different skills_root must be rejected");
+
+    assert!(
+        matches!(err, McpError::Endpoint(ref message) if message.contains("skills_root")),
+        "expected Endpoint error naming skills_root, got {err}"
+    );
+
+    let skills = first
+        .skills
+        .as_ref()
+        .expect("first handle carries a catalog");
+    assert_eq!(skills.len(), 1, "root-a declares exactly one skill");
+    assert!(
+        skills.get("skill://alpha/SKILL.md").is_some(),
+        "first listener must keep serving root-a's catalog"
+    );
+}
+
+#[tokio::test]
+async fn missing_skills_root_fails_spawn() {
+    let temp = TestDir::new("missing");
+
+    let missing_bind = "127.0.0.28:0";
+    let missing_root = temp.path().join("does-not-exist");
+    let err = McpServerRegistry::global()
+        .get_or_spawn(
+            missing_bind,
+            &cfg_with_skills(missing_bind, missing_root.as_path()),
+        )
+        .await
+        .expect_err("a missing skills root must fail the spawn");
+    assert!(
+        matches!(err, McpError::SkillLoad { .. }),
+        "expected SkillLoad for a missing root, got {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains(missing_root.to_str().expect("missing root path is utf-8")),
+        "error must name the offending root path, got {err}"
+    );
+
+    let file_bind = "127.0.0.29:0";
+    let file_root = temp.path().join("not-a-directory");
+    std::fs::write(&file_root, b"regular file").expect("write regular file");
+    let err = McpServerRegistry::global()
+        .get_or_spawn(file_bind, &cfg_with_skills(file_bind, file_root.as_path()))
+        .await
+        .expect_err("a regular file as skills root must fail the spawn");
+    assert!(
+        matches!(err, McpError::SkillLoad { .. }),
+        "expected SkillLoad for a non-directory root, got {err}"
+    );
+    assert!(
+        err.to_string()
+            .contains(file_root.to_str().expect("file root path is utf-8")),
+        "error must name the offending root path, got {err}"
+    );
+
+    let recovered = McpServerRegistry::global()
+        .get_or_spawn(missing_bind, &cfg(missing_bind, None))
+        .await
+        .expect("a later valid config on the same bind must spawn");
+    assert!(
+        tokio::net::TcpStream::connect(recovered.local_addr)
+            .await
+            .is_ok(),
+        "recovered listener must accept connections"
     );
 }

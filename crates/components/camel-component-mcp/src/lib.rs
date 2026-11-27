@@ -20,6 +20,7 @@ pub mod headers;
 pub(crate) mod metadata;
 pub mod producer;
 pub mod registry;
+pub mod skills;
 pub mod types;
 
 pub use bundle::McpBundle;

@@ -36,6 +36,24 @@ pub enum McpError {
     #[error("config error: {0}")]
     Config(#[from] serde_json::Error),
 
+    /// A skill under the configured `skills_root` could not be loaded. The
+    /// reason names the offending skill when one is identifiable.
+    #[error("skill load error: {reason}")]
+    SkillLoad {
+        /// Skill directory the failure belongs to, when identifiable.
+        skill: Option<String>,
+        /// Human-readable failure detail.
+        reason: String,
+    },
+
+    /// A skill path (symlink or file) resolves outside the canonical skills
+    /// root and is therefore never served.
+    #[error("skill path escapes the skills root: {path}")]
+    SkillPathEscape {
+        /// Canonical path that escaped the skills root.
+        path: String,
+    },
+
     /// Endpoint/URI or transport-specific error (catch-all).
     #[error("endpoint error: {0}")]
     Endpoint(String),
@@ -48,9 +66,10 @@ impl From<McpError> for CamelError {
             // `CamelError::ConfigValidation` carries fixed camel-api variants with
             // no MCP-shaped arm, so the stringly `Config` member of the same
             // "config" classification family is used.
-            McpError::CapExceeded { .. } | McpError::ConfigConflict { .. } => {
-                CamelError::Config(e.to_string())
-            }
+            McpError::CapExceeded { .. }
+            | McpError::ConfigConflict { .. }
+            | McpError::SkillLoad { .. }
+            | McpError::SkillPathEscape { .. } => CamelError::Config(e.to_string()),
             // Config deserialization failure — same "config" family.
             McpError::Config(_) => CamelError::Config(e.to_string()),
             // Runtime requirement failure against a remote (discover fail-fast):

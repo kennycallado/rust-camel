@@ -1,0 +1,37 @@
+{
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "reviewer": "e_opus (claude-opus-5-5, anthropic) — final holistic review",
+  "impl_hash": "git:acfe80fd7b47071d63a22174aaccf60244acf754",
+  "date": "2026-11-27",
+  "substitutions": [
+    "r_gpt (openai/gpt-6.2-sol) was the holistic reviewer for rounds 1-4; its provider hit a usage limit on 2026-11-27, so e_opus performed the final holistic review per the mission chain. e_opus is a different family from the blesser (e_glm)."
+  ],
+  "history": [
+    "Task 1.1 r_glm: APPROVE-WITH-FINDINGS (message-wording minors only; no fixes required)",
+    "Task 1.2 r_glm: APPROVE",
+    "Task 2.1 r_glm: APPROVE",
+    "Task 2.2 r_glm: APPROVE",
+    "Task 2.3 r_glm: APPROVE-WITH-FINDINGS (escape-test decode/split pin; fixed)",
+    "Task 3.1 r_glm: APPROVE (one intro-sentence minor; fixed)",
+    "Holistic r_gpt round 1: REJECT — protected respawn reset the security book; hidden/unknown read asymmetry; backslash URI false rejection; broken SKILL.md markers; blocking load",
+    "Holistic r_gpt round 2: REJECT — load timeout left work running; backslash ban rejected valid files; failed first start latched; test strengthening",
+    "Holistic r_gpt round 3: REJECT — failed respawn erased the latch / cancelled start latched; load cancellation not single-flight; global visited set rejected valid aliases",
+    "Holistic r_gpt round 4: REJECT — TLS served before commit; takeover could become ready unlatched; stranded load waiters; snapshots outliving listener generations",
+    "Holistic e_opus (final): APPROVE-WITH-FINDINGS — no blocking code defect; required latch-lifetime wording in spec/docs and the final commit"
+  ],
+  "findings_resolved": [
+    "Security book carried across dead-listener eviction; protected respawn regression and failed-respawn latch regression.",
+    "Committed-protection latch: commit before either transport serves; atomic takeover commit; failed/cancelled first start never commits; no clear path.",
+    "Per-BindSlot single-flight SkillsFlight: cancellation-safe Notify ordering, failed flight retirement by Arc::ptr_eq, catalog cached per listener generation, respawn reload test.",
+    "Workers: auth-first read branch; identical -32602 for hidden/unknown/escaping on a denied caller; manifest-first serving; per-raw-segment escape check; typed broken-marker errors; in-root aliases allowed, true cycles rejected.",
+    "TLS pre-binds a std TcpListener and builds the server before the commit; plain path commits before spawning serve.",
+    "Spec/docs: latch lifetime is the bind for the process lifetime, across respawns; registry load wording is get_or_spawn/load_skills_for_slot.",
+    "r_gpt round-4 fixes committed as acfe80fd7; openspec validate and mdbook build/test exit 0 after the wording edits."
+  ],
+  "notes": [
+    "The final gate sweep reran green on commit f3d5ce335: every mission gate exit 0 (see the park file). The earlier sweep's only failure was the pre-existing server_protocol_test peer-port flake (bd rc-abx6t), rerun green. All task checkboxes are [x]; openspec validate and mdbook pass.",
+    "The spec latch wording was adjusted after the plan bless by e_opus's required finding (bind-process lifetime across respawns); no code changed. See .bless.json post_bless_edits for the final artifact hash.",
+    "The mission-named tests are present once each in tests/skills_extension_test.rs; 20 integration tests in that file plus 10 skills unit tests.",
+    "No new package in Cargo.lock; only sha2/noyalib/percent-encoding (already in the lock)."
+  ]
+}

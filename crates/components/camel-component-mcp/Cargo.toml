@@ -33,6 +33,9 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 rmcp = { workspace = true }
 base64 = { workspace = true }
+noyalib = { workspace = true }
+percent-encoding = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 bytes = { workspace = true }
@@ -41,7 +44,6 @@ camel-builder = { workspace = true }
 camel-component-api = { workspace = true, features = ["test-support"] }
 camel-dsl = { workspace = true }
 futures = { workspace = true }
-percent-encoding = { workspace = true }
 rustls = { workspace = true }
 # `start_paused` in the connect-timeout unit test requires tokio test-util.
 tokio = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,53 @@
+{
+  "kind": "plan",
+  "verdict": "BLESS",
+  "hash": "sha256:f4c2ab0886da4130c863fef21a6fa36ae95fc696491d66367915bee8dfca0e5e",
+  "conditions_applied_hash": "sha256:a2f54abebc199d9826aada2071bb3840fda07551718cb3a489cb978c0f0d6d2f",
+  "expert": "e_glm",
+  "model": "glm-5.4 (zai-coding-plan)",
+  "session": "ses_de2e8bd3dffeWA6iTzP8eJjn1E",
+  "date": "2026-11-27",
+  "substitutions": [
+    "e_gpt is provider-dead as of 2026-11-25 (mission order); every blessing dispatch used e_glm under the recorded substitution. e_opus was not needed."
+  ],
+  "conditions": [
+    "C1 (mandatory, applied): every raw POST in skills_extension_test.rs carries params._meta with io.modelcontextprotocol/protocolVersion and io.modelcontextprotocol/clientCapabilities, server/discover included; the no-root test asserts HTTP 200 with capabilities.tools/resources and no extensions key.",
+    "C2 (applied): a hidden caller sees an empty catalog; a supplied cursor validates as it would against an empty catalog.",
+    "C3 (applied): protected_seen is stored inside the same plans lock hold as the insert, after the keep-incumbent return.",
+    "C4 (applied): the Cargo.lock diff adds \"noyalib\" and \"sha2 0.11.1\" (the lock already holds two sha2 versions).",
+    "C5 (applied): next_cursor is the decimal string Some((offset + 50).to_string())."
+  ],
+  "plan_dispatches": 3,
+  "spec_gate": {
+    "verdict": "BLESS",
+    "hash": "sha256:29f40d15cd553fd9c007e8886b691d156e39a3539549bc2e1ed980a358705b49",
+    "dispatches": 4,
+    "history": [
+      "BLESS-WITH-FIXES (hash 9ee72b2a) — rmcp 3.9.0 typed skills dispatch; raw directoryRead; auth latch; name/limits; read cache fields; URI precedence",
+      "BLESS-WITH-FIXES (hash 3904f65f) — proposal/cache-gap/noyalib/duplicate-key residues",
+      "BLESS-WITH-FIXES (hash 82737183) — symlink wording, parser config, percent-encoding, CONTEXT-MAP keys",
+      "BLESS (hash 29f40d15) — final spec verdict"
+    ]
+  },
+  "plan_history": [
+    "BLESS-WITH-FIXES (hash d7b99b4d) — 7 Important (non-exhaustive struct literal, unsatisfiable gate, forward dependency, non-skill escape drift, lane gate, per-plan policy test, bind allocator) + 14 Minor",
+    "BLESS-WITH-FIXES (hash 3ebd23f5) — F1 empty-catalog cursor regression + M-a..M-j",
+    "BLESS (hash f4c2ab08) — conditions C1..C5 recorded and applied; final artifact hash a2f54abe"
+  ],
+  "post_bless_edits": [
+    {
+      "date": "2026-11-27",
+      "reason": "e_opus final holistic review required fix (wording only; no code change)",
+      "edit": "Spec latch lifetime changed from 'current listener's lifetime' to bind-process lifetime across respawns; docs/src/components/mcp.md, component CONTEXT.md, design.md and tasks.md synchronized. openspec validate and mdbook build/test pass.",
+      "final_change_hash": "sha256:c07af3fd56f7108cc7a23d4ea551ffdc9f7ffb2ca01ac8feddee3b2fc3414857"
+    }
+  ],
+  "notes": [
+    "Mission order said 1 spec dispatch and at most 2 plan dispatches; the conductor cap allows up to 4 per gate. The spec gate used 4 (round 1 carried a Critical toolchain defect); the plan gate used 3 (round 1 carried a real behavioral defect, round 2 a regression in an empty catalog, round 3 BLESSED). No round 5/4 was attempted.",
+    "The round-3 expert could not reproduce the aggregate hash f4c2ab08 with its own hashing but verified each file; our scripts/bless-hash.sh reproduced f4c2ab08 before the C1-C5 condition edits and a2f54abe after them.",
+    "Final latch design (implementation + e_opus-approved): the security book is carried across dead-listener eviction; protected_seen is committed only by spawn before either transport serves or by a winning register_plan_takeover under the plan lock; failed/cancelled first starts never commit; a stopped route never clears it. The earlier 'eviction drops the latch' residual note is superseded.",
+    "Dependency reading: 'no new dependencies' means no new package in the workspace or Cargo.lock. sha2 and noyalib join the crate dependency list; percent-encoding moves from dev-dependencies to dependencies. Cargo.lock changes only the camel-component-mcp dependency entry.",
+    "The latch is not the ADR-0061 Rule 8 bind-presence gate: it keys on registered route plans and governs the plan-less Skills catalog only.",
+    "Plan conditions carried into tasks.md: bound the file read with take(limit+1); skill_limits_are_inclusive_at_512_files_and_16_mib; skills_latch_ignores_refused_duplicate_plan; catalog_first_page_is_valid_on_an_empty_catalog. The final implementation replaced the register-time latch with commit-in-spawn/atomic-takeover during the holistic review."
+  ]
+}

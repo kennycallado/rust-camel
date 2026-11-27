@@ -210,3 +210,17 @@ fn zero_cap_rejected_max_resources() {
         "expected Endpoint error naming the offending field, got {err}"
     );
 }
+
+#[test]
+fn skills_root_parses_and_empty_is_rejected() {
+    let cfg: McpServerConfig =
+        serde_json::from_str(r#"{"bind": "127.0.0.1:9100", "skills_root": "/srv/skills"}"#)
+            .expect("skills_root is a known field");
+    assert_eq!(cfg.skills_root.as_deref(), Some("/srv/skills"));
+
+    let err = serde_json::from_str::<McpServerConfig>(
+        r#"{"bind": "127.0.0.1:9100", "skills_root": "  "}"#,
+    )
+    .expect_err("a blank skills_root must be rejected");
+    assert!(err.to_string().contains("skills_root"), "error: {err}");
+}

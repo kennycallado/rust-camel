@@ -279,6 +279,12 @@ impl Consumer for McpConsumer {
             }
         };
 
+        // No commit here (holistic review round 4): the fresh-listener path
+        // commits inside `spawn` BEFORE the serve task can accept, and the
+        // existing-listener path commits atomically with the winning
+        // `register_plan_takeover` in (d). A start that fails before either
+        // point must not latch the bind.
+
         // (d) Duplicate guard + register. The registry rejects live-owner
         // duplicates atomically (see `register`), so the pre-check here is
         // only a friendly-error fast path that lets the second consumer fail
@@ -333,6 +339,18 @@ impl Consumer for McpConsumer {
                 )
             }
             McpEndpointUri::Resource { resource_uri, .. } => {
+                // While a skills root is configured the catalog owns the
+                // `skill://` namespace (spec: a skill URI route conflicts
+                // with a skills root). One URI has exactly one owner; the
+                // route refuses to start so the catalog read path is never
+                // shadowed.
+                if resource_uri.starts_with("skill://") && handle.skills.is_some() {
+                    security.unregister_plan_owned(&route_id, &Arc::downgrade(&owner));
+                    return Err(McpError::Endpoint(format!(
+                        "resource '{resource_uri}' conflicts with the skills catalog on this bind"
+                    ))
+                    .into());
+                }
                 if handle
                     .resource_registry
                     .uri_taken_by_live_owner(&resource_uri)
