@@ -512,8 +512,10 @@ impl Service<Exchange> for DirectProducer {
                             //
                             // The producer deadline and error are unchanged.
                             // More calls can reach the bounded route queue
-                            // before timing out. Once enqueued, an exchange
-                            // can still execute after its caller times out.
+                            // before timing out. A caller that gives up
+                            // cancels its channel-path dispatch at the next
+                            // step boundary (bd rc-29t24); a queued dispatch
+                            // never enters the pipeline.
                             None => ctx.send_and_wait(exchange).await,
                         };
                         (result, Some(ctx))

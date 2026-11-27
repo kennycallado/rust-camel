@@ -1,0 +1,14 @@
+{
+  "change": "direct-timeout-cancels-queued",
+  "reviewer": "experts/e_glm",
+  "date": "2026-11-27",
+  "verdict": "APPROVE-WITH-FINDINGS",
+  "findings": [
+    {
+      "severity": "blocking-before-merge",
+      "summary": "cargo xtask lint-unbounded-wait failed at crates/camel-test/tests/direct_concurrent_admission_test.rs:170: the new await_no_in_flight loop awaited h.ctx().lock() without an allow-test-wait adjudication",
+      "resolution": "fixed: the lock now carries the allow-test-wait marker with the same test-owned-uncontended rationale as resolve_producer; lint-unbounded-wait OK (0 findings = max 0), lint-test-sleep unchanged (471 = max 471)"
+    }
+  ],
+  "note": "Same agent blessed the spec and performed this review because both reviewer providers (r_glm, r_gpt) are quota-exhausted; recorded as a known independence limit. The master conductor re-ran the suite, fmt and both lints after the fix."
+}

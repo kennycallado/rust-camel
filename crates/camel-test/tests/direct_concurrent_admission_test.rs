@@ -11,8 +11,9 @@
 //! completes.
 //!
 //! A second test pins the channel-path timeout parity: the producer deadline
-//! bounds admission wait too, and an exchange enqueued before its caller
-//! times out still executes once the route admits it.
+//! bounds admission wait too, and a caller that gives up cancels its dispatch
+//! at the next step boundary (bd rc-29t24): a queued exchange never enters
+//! the pipeline, an admitted one finishes its running step and stops.
 //!
 //! Runtime contract: the current-thread `#[tokio::test]` flavor is REQUIRED
 //! by `with_time_control()` — a `multi_thread` flavor panics inside
@@ -161,6 +162,26 @@ async fn concurrent_consumer_parallel_admission() {
     h.stop().await;
 }
 
+/// Poll until the context reports no in-flight exchange, so a queued dispatch
+/// has actually been dequeued (and cancelled) before the assertions run.
+async fn await_no_in_flight(h: &CamelTestContext) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let in_flight = {
+            let ctx = h.ctx().lock().await; // allow-test-wait: harness ctx mutex test-owned and uncontended in-test
+            ctx.total_in_flight()
+        };
+        if in_flight == 0 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "in-flight exchange did not settle within 2s (now {in_flight})"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Snapshot of the pipeline trace, taken without holding the lock.
 fn events_snapshot(events: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
     events.lock().expect("events mutex poisoned").clone()
@@ -270,8 +291,9 @@ async fn direct_timeout_still_counts_admission_wait() {
         "p1 must not enter the pipeline while p0 holds the only Concurrent slot"
     );
 
-    // The p0 caller deadline expired in the same virtual window; the parked
-    // envelope is NOT retracted.
+    // The p0 caller deadline expired in the same virtual window, so p0 is
+    // cancelled at its next step boundary: its running step still completes,
+    // the following `to: mock` step does not run.
     let f0_result = tokio::time::timeout(Duration::from_millis(300), f0)
         .await
         .expect("p0 must resolve within 300 ms virtual once its deadline elapsed");
@@ -280,24 +302,131 @@ async fn direct_timeout_still_counts_admission_wait() {
         "p0 must fail with the canonical direct timeout, got {f0_result:?}"
     );
 
-    // Release the parked pipeline: both timed-out exchanges are still
-    // enqueued and execute in channel arrival order.
+    // Release the parked pipeline. p0 finishes the step it is parked in and
+    // stops at the boundary; p1 never entered. Both callers abandoned their
+    // wait, so neither reaches the following `to: mock` step.
+    // Resume virtual time so the release propagates in real wall time.
+    tokio::time::resume();
     release.notify_one();
-    h.mock()
-        .get_endpoint("done")
-        .unwrap()
-        .await_exchanges(2, Duration::from_secs(1))
-        .await;
-    h.mock()
-        .get_endpoint("done")
-        .unwrap()
-        .assert_exchange_count(2)
-        .await;
+    for _ in 0..200 {
+        if events_snapshot(&events).len() >= 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     assert_eq!(
         events_snapshot(&events),
-        ["begin:p0", "end:p0", "begin:p1", "end:p1"],
-        "the timed-out exchanges must still execute in channel arrival order after release"
+        ["begin:p0", "end:p0"],
+        "p0 finishes its running step; p1 never enters the pipeline"
     );
+    // Both callers abandoned their wait, so neither exchange reaches the next
+    // step: settle first so a queued p1 is provably dequeued and cancelled.
+    await_no_in_flight(&h).await;
+    h.mock()
+        .get_endpoint("done")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
+
+    h.stop().await;
+}
+
+/// The complement of the timeout scenario: a dispatch already inside a step
+/// when its caller gives up finishes that step, then stops before the next
+/// one. The cancellation is observed at the step boundary, never mid-step.
+#[tokio::test]
+async fn abandoned_dispatch_stops_before_the_next_step() {
+    let (h, _tc) = CamelTestContext::builder()
+        .with_component(DirectComponent::new())
+        .with_mock()
+        .with_time_control()
+        .build()
+        .await;
+
+    tokio::time::resume();
+
+    let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(Notify::new());
+
+    let events_step = Arc::clone(&events);
+    let release_step = Arc::clone(&release);
+    let route = RouteBuilder::from("direct:solo")
+        .route_id("admitted-timeout-target")
+        .concurrent(1)
+        .process(move |ex: Exchange| {
+            let events = Arc::clone(&events_step);
+            let release = Arc::clone(&release_step);
+            async move {
+                let body = ex.input.body.as_text().unwrap_or_default().to_string();
+                events
+                    .lock()
+                    .expect("events mutex poisoned")
+                    .push(format!("begin:{body}"));
+                release.notified().await;
+                events
+                    .lock()
+                    .expect("events mutex poisoned")
+                    .push(format!("end:{body}"));
+                Ok(ex)
+            }
+        })
+        .to("mock:done")
+        .build()
+        .unwrap();
+
+    h.add_route(route).await.unwrap();
+    h.start().await;
+    tokio::time::pause();
+
+    let producer = resolve_producer(&h, "direct:solo?timeout_ms=100").await;
+    let mut call = producer.clone();
+    let mut future = tower::Service::call(&mut call, Exchange::new(Message::new("only")));
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    assert!(
+        future.as_mut().poll(&mut cx).is_pending(),
+        "the first poll enqueues the exchange and awaits the parked reply"
+    );
+    for _ in 0..50 {
+        if events_snapshot(&events) == ["begin:only"] {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        events_snapshot(&events),
+        ["begin:only"],
+        "the exchange must have entered the pipeline before the deadline elapses"
+    );
+
+    let result = tokio::time::timeout(Duration::from_millis(300), future)
+        .await
+        .expect("the caller must resolve within 300 ms virtual");
+    assert!(
+        matches!(&result, Err(CamelError::ProcessorError(m)) if m == "direct:solo call timed out"),
+        "the caller fails with the canonical direct timeout, got {result:?}"
+    );
+
+    // Resume virtual time so the release propagates in real wall time.
+    tokio::time::resume();
+    release.notify_one();
+    for _ in 0..200 {
+        if events_snapshot(&events).len() >= 2 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        events_snapshot(&events),
+        ["begin:only", "end:only"],
+        "the running step finishes even though its caller gave up"
+    );
+    await_no_in_flight(&h).await;
+    h.mock()
+        .get_endpoint("done")
+        .unwrap()
+        .assert_exchange_count(0)
+        .await;
 
     h.stop().await;
 }

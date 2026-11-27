@@ -1,0 +1,21 @@
+{
+  "change": "direct-timeout-cancels-queued",
+  "kind": "spec",
+  "expert": "experts/e_glm",
+  "date": "2026-11-27",
+  "hash": "sha256:8db8f85676b8b2d0484ade7d4014955cb3ab33b12eaf4247013b6bf4b5564998",
+  "rounds": [
+    {
+      "hash": "sha256:ffddab6856af0c291a161dffcae34c7e983fa736b9ea609ef8e33509de498902",
+      "verdict": "BLESS-WITH-FIXES",
+      "findings": 7,
+      "applied": "re-anchored to the requirement that owns 614's scenario; scoped the boundary rule to the channel path with the inline deviation stated; settle loop proves queued cancellation; GIVEN carries the first caller's timeout; proposal/design rewritten; tasks rewritten (zero mock exchanges); the retracted sentence removed from docs, the module doc, the test comments and the camel-direct channel-path comment"
+    },
+    {
+      "hash": "sha256:8db8f85676b8b2d0484ade7d4014955cb3ab33b12eaf4247013b6bf4b5564998",
+      "verdict": "BLESSED",
+      "findings": 0
+    }
+  ],
+  "substitution": "experts/e_gpt is provider-dead (openai usage limit / token-expired since 2026-11-25T20:34Z); experts/e_glm served both rounds as an independent expert, recorded here per the fleet substitution policy"
+}
